@@ -12,7 +12,7 @@
     "start": "node dist/src/main.js",
     "test": "npm run test:unit",
     "test:unit": "playwright test --project=unit",
-    "image:build": "docker build -t verstas-devbox:local images/devbox"
+    "image:build": "npm run build && docker build -f images/devbox/Dockerfile -t verstas-devbox:local ."
   },
   "dependencies": {
     "adm-zip": "^0.6.1",

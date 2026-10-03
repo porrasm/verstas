@@ -328,6 +328,21 @@ export const eventSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("cost"), t: z.string(), ticket: ticketIdSchema.optional(), cost: costSchema }),
   z.object({ kind: z.literal("run"), t: z.string(), state: runStateSchema, reason: z.string().optional() }),
   z.object({ kind: z.literal("error"), t: z.string(), ticket: ticketIdSchema.optional(), text: z.string() }),
+  /** The last line a worker writes; the harness reads it to decide what happens to the ticket. */
+  z.object({
+    kind: z.literal("worker_done"),
+    t: z.string(),
+    ticket: ticketIdSchema.optional(),
+    role: z.enum(["implementer", "reviewer", "planner"]),
+    ok: z.boolean(),
+    stopReason: z.string(),
+    rateLimited: z.boolean(),
+    costUsd: z.number(),
+    turns: z.number().int(),
+    seconds: z.number().int(),
+    text: z.string(),
+    stderr: z.string().default(""),
+  }),
 ]);
 export type VerstasEvent = z.infer<typeof eventSchema>;
 
