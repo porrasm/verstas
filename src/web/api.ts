@@ -37,6 +37,9 @@ import { dockerShell, ensureSessionSandbox, runSetup, type RunManagerConfig } fr
 import { deleteScript, getScript, hostsFromScript, listScripts, saveScript, setupScriptSchema } from "../scripts/library.js";
 import { buildContext, probeImage } from "../context/context.js";
 import { detectPacksInRepo, NETWORK_PACKS, packHosts } from "../network/packs.js";
+import { allRuns, lastRun, runTotals } from "../sessions/runs.js";
+import { RemoteClient } from "../remote/client.js";
+import { isLoopback } from "../remote/http.js";
 
 /**
  * The UI's API, on 127.0.0.1 only. Everything the agent API refuses lives
@@ -54,6 +57,8 @@ export type UiApiDeps = {
   getConfig: () => Config;
   setConfig: (c: Config) => Promise<void>;
   version: string;
+  /** The remote dashboard connection; absent in tests that do not need it. */
+  remote?: RemoteClient;
 };
 
 const wrap =
@@ -123,6 +128,66 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
       const { claudeToken } = z.object({ claudeToken: z.string().min(10).max(4000) }).parse(req.body);
       await saveSecrets({ ...(await loadSecrets()), claudeToken: claudeToken.trim() });
       res.json({ ok: true });
+    }),
+  );
+
+  // --- remote dashboard (docs/REMOTE.md) ------------------------------------------
+
+  /** A base URL is an origin: https anywhere, http only on this machine. */
+  const remoteOrigin = (raw: string): string => {
+    let u: URL;
+    try {
+      u = new URL(raw.trim());
+    } catch {
+      throw new z.ZodError([{ code: "custom", path: ["baseUrl"], message: "Not a URL", input: raw }]);
+    }
+    if (u.protocol !== "https:" && !(u.protocol === "http:" && isLoopback(u))) {
+      throw new z.ZodError([{ code: "custom", path: ["baseUrl"], message: "Use https (http only for localhost)", input: raw }]);
+    }
+    return u.origin;
+  };
+
+  const remoteView = async () => {
+    const cfg = d.getConfig().remote;
+    return { enabled: cfg.enabled, baseUrl: cfg.baseUrl, hasToken: Boolean((await loadSecrets()).remoteToken), status: d.remote?.status() ?? { state: "off", shared: 0 } };
+  };
+
+  api.get(
+    "/remote",
+    wrap(async (_req, res) => {
+      res.json(await remoteView());
+    }),
+  );
+
+  api.put(
+    "/remote",
+    wrap(async (req, res) => {
+      const body = z.object({ enabled: z.boolean().optional(), baseUrl: z.string().max(500).optional(), token: z.string().trim().max(500).optional() }).parse(req.body);
+      const cur = d.getConfig();
+      const baseUrl = body.baseUrl === undefined ? cur.remote.baseUrl : body.baseUrl.trim() ? remoteOrigin(body.baseUrl) : "";
+      if (body.token !== undefined) {
+        const secrets = await loadSecrets();
+        await saveSecrets({ ...secrets, remoteToken: body.token || undefined });
+      }
+      await d.setConfig(configSchema.parse({ ...cur, remote: { enabled: body.enabled ?? cur.remote.enabled, baseUrl } }));
+      await d.remote?.apply();
+      // Give the first push a moment so the page shows connected or the error.
+      await new Promise((r) => setTimeout(r, 1500));
+      res.json(await remoteView());
+    }),
+  );
+
+  api.post(
+    "/remote/test",
+    wrap(async (req, res) => {
+      const body = z.object({ baseUrl: z.string().max(500).optional(), token: z.string().trim().max(500).optional() }).parse(req.body ?? {});
+      const baseUrl = body.baseUrl?.trim() ? remoteOrigin(body.baseUrl) : d.getConfig().remote.baseUrl;
+      const token = body.token || (await loadSecrets()).remoteToken;
+      if (!baseUrl || !token) {
+        res.json({ ok: false, error: !baseUrl ? "No base URL" : "No token" });
+        return;
+      }
+      res.json(await RemoteClient.test(baseUrl, token));
     }),
   );
 
@@ -835,6 +900,17 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
     }),
   );
 
+  /** Show the session on the remote dashboard, or stop showing it. */
+  api.put(
+    "/sessions/:id/remote",
+    wrap(async (req, res) => {
+      const { remote } = z.object({ remote: z.boolean() }).parse(req.body);
+      const h = await d.hub.get(param(req, "id"));
+      await h.mutate((docs) => ({ next: { session: { ...docs.session, remote } } }));
+      res.json({ ok: true, remote });
+    }),
+  );
+
   api.put(
     "/sessions/:id/allowlist",
     wrap(async (req, res) => {
@@ -989,51 +1065,6 @@ const applyAction = async (d: UiApiDeps, sessionId: string, a: RequestAction, no
   if (det.kind === "resources") return `applied${note ? `: ${note}` : ""}`;
   if (det.kind === "instruction") return note ? `done: ${note}` : "done";
   return note ? `answer: ${note}` : "answered without text";
-};
-
-/** Every run.json under runs/, oldest first; unreadable ones are skipped. */
-const allRuns = async (runsDir: string): Promise<Run[]> => {
-  const out: Run[] = [];
-  try {
-    const ids = (await fs.readdir(runsDir)).map(Number).filter((n) => Number.isInteger(n) && n > 0).sort((a, b) => a - b);
-    for (const id of ids) {
-      try {
-        out.push(JSON.parse(await fs.readFile(path.join(runsDir, String(id), "run.json"), "utf8")) as Run);
-      } catch {
-        continue;
-      }
-    }
-  } catch {
-    return out;
-  }
-  return out;
-};
-
-/** What the UI shows in a header: money spent over every run, how many runs, when something last happened. */
-const runTotals = (runs: Run[], createdAt: string): { usd: number; runs: number; lastActivityAt: string } => {
-  let last = createdAt;
-  let usd = 0;
-  for (const r of runs) {
-    usd += r.cost.usd ?? 0;
-    for (const t of [r.startedAt, r.endedAt]) if (t && t > last) last = t;
-  }
-  return { usd, runs: runs.length, lastActivityAt: last };
-};
-
-const lastRun = async (runsDir: string): Promise<Run | undefined> => {
-  try {
-    const ids = (await fs.readdir(runsDir)).map(Number).filter((n) => Number.isInteger(n) && n > 0).sort((a, b) => b - a);
-    for (const id of ids) {
-      try {
-        return JSON.parse(await fs.readFile(path.join(runsDir, String(id), "run.json"), "utf8")) as Run;
-      } catch {
-        continue;
-      }
-    }
-  } catch {
-    return undefined;
-  }
-  return undefined;
 };
 
 export { loadConfig, saveConfig, sessionPaths };

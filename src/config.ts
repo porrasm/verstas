@@ -27,12 +27,25 @@ export const configSchema = z.object({
   devboxImage: z.string().min(1).default("verstas-devbox:local"),
   /** Set true when the host is Linux and the proxy needs host-gateway spelled out. */
   linuxHost: z.boolean().default(process.platform === "linux"),
+  /**
+   * Remote dashboard (docs/REMOTE.md): where to push the sessions you
+   * shared. Off until you turn it on; the token lives in secrets.json.
+   */
+  remote: z
+    .object({
+      enabled: z.boolean().default(false),
+      /** e.g. https://porras.club, or https://localhost:3001 while testing. */
+      baseUrl: z.string().max(500).default(""),
+    })
+    .prefault({}),
 });
 export type Config = z.infer<typeof configSchema>;
 
 export const secretsSchema = z.object({
   /** From `claude setup-token`; passed to the session container as CLAUDE_CODE_OAUTH_TOKEN. */
   claudeToken: z.string().min(1).optional(),
+  /** The token you created in the remote dashboard; sent as a bearer token to its base URL only. */
+  remoteToken: z.string().min(1).optional(),
 });
 export type Secrets = z.infer<typeof secretsSchema>;
 

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   api,
+  type RemoteSettings,
   copyText,
   type ApplyResult,
   type RequestAction,
@@ -262,6 +263,7 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
           <span>{session.repos.length ? <>repos <span className="mono">{session.repos.map((r) => r.name).join(", ")}</span></> : "no repositories"}</span>
           <ModelPicker session={session} onChange={(model) => tryAct("model", () => api("PUT", `${base}/caps`, { model }))} />
           <NotifyToggle />
+          <RemoteToggle session={session} onSet={(remote) => tryAct("remote", () => api("PUT", `${base}/remote`, { remote }))} />
           <span className={live ? "" : "err"} title={live ? "Live updates connected" : "Reconnecting to the host app"}><span className={`dot ${live ? "good" : "bad"}`} /> {live ? "live" : "reconnecting…"}</span>
         </div>
         <Goal text={session.goal} />
@@ -641,6 +643,29 @@ const notifyFor = (sessionName: string, e: VEvent) => {
   } catch {
     // ignore
   }
+};
+
+/**
+ * Off by default: nothing about a session leaves this machine until you tick
+ * it. Turning it on says where the data goes.
+ */
+const RemoteToggle = ({ session, onSet }: { session: Session; onSet: (remote: boolean) => Promise<void> }) => {
+  const [remote, setRemote] = useState<RemoteSettings | null>(null);
+  useEffect(() => {
+    api<RemoteSettings>("GET", "/remote").then(setRemote).catch(() => setRemote(null));
+  }, []);
+  const on = session.remote;
+  if (!on && !remote?.enabled) return null;
+  const where = remote?.baseUrl || "the remote dashboard";
+  const toggle = () => {
+    if (on) return void onSet(false);
+    if (confirm(`Show "${session.name}" on ${where}?\n\nIts tickets (titles, specs, reports, notes), inbox, setup verdict, prompts and a short activity log are sent there while Verstas runs. Tool output, file contents and diffs are not.`)) void onSet(true);
+  };
+  return (
+    <button className={`chip ${on ? "on" : ""}`} onClick={toggle} aria-pressed={on} title={on ? `Shown on ${where}. Click to stop sending it.` : `Not shared. Click to show this session on ${where}.`}>
+      {on ? "On remote dashboard" : "Remote dashboard: off"}
+    </button>
+  );
 };
 
 const NotifyToggle = () => {

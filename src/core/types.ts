@@ -387,6 +387,11 @@ export const sessionSchema = z.object({
     })
     .prefault({}),
   state: sessionStateSchema.default("created"),
+  /**
+   * Show this session on the remote dashboard (docs/REMOTE.md). Off by
+   * default: nothing about a session leaves this machine until you tick it.
+   */
+  remote: z.boolean().default(false),
 });
 export type Session = z.infer<typeof sessionSchema>;
 

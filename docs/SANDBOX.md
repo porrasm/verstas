@@ -299,11 +299,20 @@ labelled resources without a matching directory and offers to remove them.
 - **Proxy correctness.** The allowlist proxy is about two hundred lines of
   TypeScript with unit tests for the matcher and the request filter. It is
   small enough to read in one sitting; please do.
-- **Host app exposure.** Port 4700 is bound to `127.0.0.1`. Opening it to
-  the LAN (to watch from a phone) is a later, explicit option that adds a
-  password. Port 4701 accepts only requests with a valid run token, but it
+- **Host app exposure.** Port 4700 is bound to `127.0.0.1`. To watch from a
+  phone, use the remote dashboard instead of opening it (next item). Port 4701 accepts only requests with a valid run token, but it
   is reachable from your LAN; it should be firewalled or bound to the
   Docker bridge address in a later change.
+
+- **Remote dashboard (off by default).** When you turn it on and tick a
+  session, that session's tickets, inbox, setup verdict, prompts and a
+  short activity log go to the dashboard you configured, over HTTPS, while
+  Verstas runs; tool output, file contents and diffs never do
+  (docs/REMOTE.md lists both). Whoever holds the dashboard login or the
+  token can run the commands in that list for ticked sessions, which
+  includes approving network requests. Verstas connects out; it never
+  listens for the dashboard. Untick a session, or delete the token in the
+  dashboard, to stop it.
 
 ## Reviewer checklist
 
@@ -319,3 +328,6 @@ labelled resources without a matching directory and offers to remove them.
       inside the session container, and the container's flags match the
       table in Boundary 2.
 - [ ] Deleting a session removes network, proxy, container and directory.
+- [ ] `src/remote/` sends only sessions with `remote: true`, never tool
+      results, and `remoteCommandSchema` has no kind that reaches settings,
+      secrets, the allowlist, files, export/apply or session deletion.

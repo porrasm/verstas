@@ -1,5 +1,97 @@
 import { useEffect, useState } from "react";
-import { api, type Config, type Status } from "../api";
+import { api, fmtAgo, type Config, type RemoteSettings, type Status } from "../api";
+
+/**
+ * Remote dashboard: a base URL and a token you created there. Only sessions
+ * you tick on their own page are sent (docs/REMOTE.md).
+ */
+const RemoteDashboard = () => {
+  const [r, setR] = useState<RemoteSettings | null>(null);
+  const [baseUrl, setBaseUrl] = useState("");
+  const [token, setToken] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<{ text: string; error: boolean } | null>(null);
+  const load = () =>
+    api<RemoteSettings>("GET", "/remote")
+      .then((x) => {
+        setR(x);
+        setBaseUrl((b) => b || x.baseUrl);
+      })
+      .catch((e: Error) => setNote({ text: e.message, error: true }));
+  useEffect(() => {
+    void load();
+    const id = setInterval(() => void load(), 5000);
+    return () => clearInterval(id);
+  }, []);
+  if (!r) return null;
+  const save = async (patch: { enabled?: boolean; baseUrl?: string; token?: string }) => {
+    setBusy(true);
+    setNote(null);
+    try {
+      const next = await api<RemoteSettings>("PUT", "/remote", patch);
+      setR(next);
+      setBaseUrl(next.baseUrl);
+      if (patch.token !== undefined) setToken("");
+      if (next.status.state === "error") setNote({ text: next.status.error ?? "Could not connect", error: true });
+    } catch (e) {
+      setNote({ text: (e as Error).message, error: true });
+    } finally {
+      setBusy(false);
+    }
+  };
+  const test = async () => {
+    setBusy(true);
+    try {
+      const t = await api<{ ok: boolean; name?: string; error?: string }>("POST", "/remote/test", { baseUrl, token: token || undefined });
+      setNote(t.ok ? { text: `Connected: the dashboard knows this token as "${t.name}".`, error: false } : { text: t.error ?? "Failed", error: true });
+    } catch (e) {
+      setNote({ text: (e as Error).message, error: true });
+    } finally {
+      setBusy(false);
+    }
+  };
+  const st = r.status;
+  const stateText =
+    st.state === "connected"
+      ? `Connected · ${st.shared} session${st.shared === 1 ? "" : "s"} shared${st.lastPushAt ? ` · last push ${fmtAgo(st.lastPushAt, Date.now())}` : ""}`
+      : st.state === "connecting"
+        ? "Connecting…"
+        : st.state === "error"
+          ? `Error: ${st.error}`
+          : st.state === "unconfigured"
+            ? `Not connected: ${st.error}`
+            : "Off";
+  const dirty = baseUrl.trim() !== r.baseUrl || token.length > 0;
+  return (
+    <section className="card">
+      <h3>Remote dashboard</h3>
+      <p className="lead">
+        Follow sessions and answer the inbox from your phone. Create a token in the dashboard (the <code>verstas</code> app), paste its address and the token here, then tick
+        "Remote dashboard" on each session you want to see there. <strong>Sessions are not sent unless you tick them</strong>; for those, tickets, inbox, setup verdict, prompts and a short
+        activity log go out, never tool output, file contents or diffs. Verstas connects out; nothing here listens for the dashboard.
+      </p>
+      <div className="two">
+        <label>
+          Base URL <span className="help">https, or http://localhost for testing</span>
+          <input id="remote-url" className="mono" placeholder="https://porras.club" value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} />
+        </label>
+        <label>
+          Token <span className="help">{r.hasToken ? "A token is saved; paste a new one to replace it" : "From the dashboard's Tokens page"}</span>
+          <input id="remote-token" type="password" className="mono" autoComplete="off" placeholder={r.hasToken ? "••••••••" : "vst_…"} value={token} onChange={(e) => setToken(e.target.value)} />
+        </label>
+      </div>
+      <label className="chk">
+        <input type="checkbox" checked={r.enabled} disabled={busy} onChange={(e) => void save({ enabled: e.target.checked, baseUrl, ...(token ? { token } : {}) })} /> Connect to the remote dashboard
+      </label>
+      <div className="row">
+        <button className="pri" disabled={busy || !dirty} onClick={() => void save({ baseUrl, ...(token ? { token } : {}) })}>Save</button>
+        <button disabled={busy || !baseUrl.trim() || (!token && !r.hasToken)} onClick={() => void test()}>Test connection</button>
+        <span className={`small ${st.state === "connected" ? "ok" : st.state === "error" ? "err" : "muted"}`}>{stateText}</span>
+      </div>
+      {note && <div className={`small ${note.error ? "err" : "ok"}`}>{note.text}</div>}
+    </section>
+  );
+};
 
 export const SettingsPage = ({ status }: { status: Status | null }) => {
   const [cfg, setCfg] = useState<Config | null>(null);
@@ -80,6 +172,8 @@ export const SettingsPage = ({ status }: { status: Status | null }) => {
           <button className="pri" onClick={saveToken} disabled={token.length < 10}>Save token</button>
         </div>
       </section>
+
+      <RemoteDashboard />
 
       <section className="card">
         <h3>Work targets</h3>

@@ -12,6 +12,8 @@ import type { SandboxConfig } from "./sandbox/lifecycle.js";
 import { SessionHub } from "./sessions/hub.js";
 import { listSessions } from "./sessions/sessions.js";
 import { createUiApi } from "./web/api.js";
+import { RemoteClient } from "./remote/client.js";
+import { requestJson } from "./remote/http.js";
 
 /**
  * Entrypoint. Two HTTP servers:
@@ -88,6 +90,19 @@ agentApp.listen(config.agentApiPort, "0.0.0.0", () => {
   console.log(`agent api  http://0.0.0.0:${config.agentApiPort}/agent`);
 });
 
+// Remote dashboard: outbound only. Your actions arrive as commands and are
+// carried out through this process's own UI API on the loopback address.
+const remote = new RemoteClient({
+  hub,
+  runs,
+  listSessionIds: async () => (await listSessions(config.sessionsRoot)).map((s) => s.id),
+  getConfig: () => config,
+  getToken: async () => (await loadSecrets()).remoteToken,
+  localApi: (call) => requestJson(`http://127.0.0.1:${config.uiPort}/api${call.path}`, { method: call.method, body: call.body, timeoutMs: 120_000 }),
+  version,
+  log: (m) => console.log(m),
+});
+
 // UI API + static UI + WebSocket, loopback only.
 const uiApp = express();
 uiApp.use("/api", requestLog("ui"));
@@ -103,6 +118,7 @@ uiApp.use(createUiApi({
     if (c.sessionsRoot !== hub.root) console.log("sessions root changed; restart verstas to use it");
   },
   version,
+  remote,
 }));
 const webDist = path.join(repoRoot, "web", "dist");
 uiApp.use(express.static(webDist));
@@ -130,6 +146,10 @@ hub.on("event", (e) => {
 });
 
 server.listen(config.uiPort, "127.0.0.1", () => {
+  void remote.apply().then(() => {
+    const st = remote.status();
+    if (st.state !== "off") console.log(`remote dashboard ${config.remote.baseUrl}: ${st.state}${st.error ? ` (${st.error})` : ""}`);
+  });
   console.log(`verstas ${version}  http://127.0.0.1:${config.uiPort}  sessions in ${config.sessionsRoot}${process.env.VERSTAS_DEBUG ? "  [debug: docker commands, raw worker streams, full tool output]" : ""}`);
 });
 
@@ -140,6 +160,11 @@ for (const sig of ["SIGINT", "SIGTERM"] as const) {
     stopping = true;
     console.log("stopping; active runs are stopped and their tickets requeued (Ctrl-C again to force)");
     server.close();
-    void runs.stopAll().finally(() => process.exit(0));
+    // Tell the dashboard first: it shows "not running" at once instead of in 45 s.
+    void remote
+      .stop()
+      .catch(() => undefined)
+      .then(() => runs.stopAll())
+      .finally(() => process.exit(0));
   });
 }

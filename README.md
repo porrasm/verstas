@@ -72,14 +72,18 @@ Then, in the web app:
    brief and env.md, outside any ticket. "Make sure you can run the e2e
    suite", "why is the dev server slow?". It can install and configure; a
    repository change becomes one commit; the reply stays on the page.
-7. **Apply to repo** when you want the work: the session page's Work panel
+7. **Remote dashboard** (optional, Settings): follow ticked sessions and
+   answer the inbox from your phone through the `verstas` app in the apps
+   monorepo. Off by default, and per session off until you tick it; see
+   [docs/REMOTE.md](docs/REMOTE.md) for what is and is not sent.
+8. **Apply to repo** when you want the work: the session page's Work panel
    puts a repository's commits on the branch `verstas/<session>` in your
    real checkout, one commit per ticket, without touching the branch you
    have checked out. Merge, rebase or cherry-pick from there. Export
    bundles remain for moving work to another machine: one `git fetch` line per
    repository is shown. Bundles are pure data; nothing from the repository
    runs on your machine.
-8. **Delete** the session when done. Its containers, network and directory
+9. **Delete** the session when done. Its containers, network and directory
    go with it.
 
 Run `npm run dev` in a terminal that stays open; the host app stops its
@@ -130,6 +134,7 @@ loop with fakes. Running a session needs Docker and the image.
   boundary is where it is. Review this before running a session.
 - `docs/BOARD.md`: the ticket and board format for import and export.
 - `docs/DRIVERS.md`: the worker contract, for running another agent.
+- `docs/REMOTE.md`: the remote dashboard, what it sends and what it can do.
 
 ## Layout
 
@@ -144,9 +149,10 @@ src/
   agent-api/          what a worker may do, behind a run token
   harness/            the loop, prompts, Docker-backed runner
   web/api.ts          the UI's API (loopback)
+  remote/             the remote dashboard client: what is sent, what may be asked
   main.ts             entrypoint
 images/devbox/        the session image
 web/                  React UI (Vite)
 tests/unit/           Playwright unit project
-docs/                 SANDBOX, BOARD, DRIVERS
+docs/                 SANDBOX, BOARD, DRIVERS, REMOTE
 ```

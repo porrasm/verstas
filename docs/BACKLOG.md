@@ -22,6 +22,13 @@ sessions, Docker or other runs.
 
 ## V-01 · Remote dashboard relay (MVP)  (M)
 
+**Status: done 2026-10-04**, with two changes to the plan below: HTTPS
+push plus long-poll instead of a WebSocket (the monorepo's loefoe agent
+pattern; nothing to keep alive through Dokku), and the dashboard drops a
+host's state when it stops polling instead of showing the last snapshot.
+See docs/REMOTE.md. Not yet: push notifications from the dashboard,
+end-to-end encryption of what is relayed.
+
 **Why.** Watch sessions and answer the inbox from a phone without leaving
 the Mac open on the desk. Work code stays local by default.
 

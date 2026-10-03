@@ -56,6 +56,14 @@ export type Session = {
   readiness?: Readiness;
   prompts: { at: string; runId: number; text: string; reply: string; stopReason: string }[];
   state: string;
+  /** Shown on the remote dashboard; off by default. */
+  remote: boolean;
+};
+export type RemoteSettings = {
+  enabled: boolean;
+  baseUrl: string;
+  hasToken: boolean;
+  status: { state: "off" | "unconfigured" | "connecting" | "connected" | "error"; error?: string; lastPushAt?: string; lastCommandAt?: string; shared: number };
 };
 export type Readiness = { verdict: "ready" | "needs"; at: string; summary: string; checks: { text: string; ok: boolean }[]; confirmedAt?: string };
 /** Tickets wait for the environment: requirements set and not confirmed. Mirrors src/core/types.ts. */
