@@ -20,7 +20,8 @@ export class DockerError extends Error {
 
 export type DockerRunner = {
   run(args: readonly string[], opts?: { input?: string; timeoutMs?: number; allowFailure?: boolean }): Promise<DockerResult>;
-  spawn(args: readonly string[]): ChildProcess;
+  /** `env` is added to the docker CLI's own environment: pair it with `-e NAME` (no value) to pass a secret without putting it in argv. */
+  spawn(args: readonly string[], opts?: { env?: Record<string, string> }): ChildProcess;
 };
 
 const DEBUG = Boolean(process.env.VERSTAS_DEBUG);
@@ -49,9 +50,9 @@ export const createDockerRunner = (binary = "docker"): DockerRunner => ({
     if (code !== 0 && !opts.allowFailure) throw new DockerError(args, result);
     return result;
   },
-  spawn(args) {
+  spawn(args, opts = {}) {
     if (DEBUG) console.log(`[docker] spawn  docker ${show(args)}`);
-    return spawn(binary, args, { stdio: ["pipe", "pipe", "pipe"] });
+    return spawn(binary, args, { stdio: ["pipe", "pipe", "pipe"], env: opts.env ? { ...process.env, ...opts.env } : process.env });
   },
 });
 

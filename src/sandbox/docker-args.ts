@@ -20,7 +20,7 @@ export const AGENT_API_HOST = "host.docker.internal";
  * created under older rules is recreated on the next start instead of
  * silently keeping them (it joins the spec fingerprint).
  */
-export const SANDBOX_VERSION = 4;
+export const SANDBOX_VERSION = 5;
 
 /**
  * Capabilities the session container keeps: Docker's default set minus
@@ -232,6 +232,8 @@ export type ExecOptions = {
   stdin?: boolean;
   workdir?: string;
   env?: Record<string, string>;
+  /** Names only (`-e NAME`): docker takes the value from its own environment, so a secret never appears in argv. */
+  passEnv?: readonly string[];
 };
 
 export const execArgs = (sessionId: string, cmd: readonly string[], opts: ExecOptions = {}): string[] => [
@@ -241,6 +243,7 @@ export const execArgs = (sessionId: string, cmd: readonly string[], opts: ExecOp
   "-w",
   opts.workdir ?? "/workspace",
   ...Object.entries(opts.env ?? {}).flatMap(([k, v]) => ["-e", `${k}=${v}`]),
+  ...(opts.passEnv ?? []).flatMap((k) => ["-e", k]),
   containerName(sessionId),
   ...cmd,
 ];

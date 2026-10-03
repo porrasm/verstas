@@ -46,6 +46,8 @@ export type RunDeps = {
   agentApiUrl: string;
   /** Proxy "denied" lines since a timestamp, for the log. */
   proxyDenials?: (sessionId: string, since: string) => Promise<{ host: string; port: number }[]>;
+  /** Secret values that must never be committed (the Claude token); every commit's staged diff is scanned for them. */
+  secrets?: () => Promise<string[]>;
   /** For tests: a fixed clock. */
   now?: () => string;
   /** For tests: how long to sleep on a rate limit (ms). */
@@ -248,7 +250,8 @@ export class RunManager {
         await status(`prompt: ${text.trim().split("\n")[0]!.slice(0, 120)}`);
         const done = await this.runJob(h, run, { role: "prompt", promptText: await this.withNotes(h, userPrompt(text)) }, log, ctl.signal, token);
         addCost(run, done.costUsd);
-        await this.commitInContainer(h, `Prompt: ${text.trim().split("\n")[0]!.slice(0, 72)}`);
+        const leaked = await this.commitInContainer(h, `Prompt: ${text.trim().split("\n")[0]!.slice(0, 72)}`);
+        if (leaked.length) await log({ kind: "error", t: clock(), text: `The Claude token appears in the changes to ${leaked.join(", ")}; nothing was committed there. Remove it from the files.` });
         const entry = { at: clock(), runId: run.id, text: text.slice(0, 20_000), reply: done.text.slice(0, 8000), stopReason: done.stopReason };
         await h.mutate((docs) => ({ next: { session: { ...docs.session, prompts: [...docs.session.prompts, entry].slice(-20) } } }));
         run.state = ctl.signal.aborted ? "stopped" : "finished";
@@ -479,7 +482,14 @@ export class RunManager {
     await h.mutate((docs) => ({ next: { board: replaceTicket(docs.board, { ...getTicket(docs.board, ticket.id), attempts }) } }));
 
     if (verdict === "ok") {
-      await this.commitInContainer(h, `${ticket.id}: ${ticket.title}`);
+      const leaked = await this.commitInContainer(h, `${ticket.id}: ${ticket.title}`);
+      if (leaked.length) {
+        const note = `The Claude token appears in the changes to ${leaked.join(", ")}; nothing was committed there. Remove it from the files (the changes are still in the working tree) and move the ticket back to ready.`;
+        await log({ kind: "error", t: clock(), ticket: ticket.id, text: note });
+        await move("blocked", note);
+        run.currentTicket = undefined;
+        return "blocked";
+      }
       await h.mutate((docs) => {
         const t = getTicket(docs.board, ticket.id);
         return { next: { board: replaceTicket(docs.board, { ...t, diff: numstat, cost: { ...(t.cost ?? { inputTokens: 0, outputTokens: 0 }), usd: (t.cost?.usd ?? 0) + impl.costUsd } }) } };
@@ -614,16 +624,33 @@ export class RunManager {
     return { stat: stat.stdout.trim(), numstat: { added, removed, files }, diff: diff.stdout };
   }
 
-  /** Commits every change in every repo of the session, inside the container (docs/SANDBOX.md Boundary 5). */
-  private async commitInContainer(h: SessionHandle, message: string): Promise<void> {
+  /**
+   * Commits every change in every repo of the session, inside the container
+   * (docs/SANDBOX.md Boundary 5). A repo whose staged diff contains a secret
+   * is not committed: its changes are unstaged and stay in the working tree,
+   * and the repo name is returned so the caller can refuse the ticket.
+   */
+  private async commitInContainer(h: SessionHandle, message: string): Promise<string[]> {
     const sh = this.deps.shell(h.id);
+    const secrets = ((await this.deps.secrets?.().catch(() => [])) ?? []).filter((x) => x.length >= 16);
+    const leaked: string[] = [];
     for (const repo of h.session.repos) {
       const dir = `/workspace/${repo.name}`;
       await sh.exec(["git", "add", "-A"], { workdir: dir, timeoutMs: 60_000 });
       const staged = await sh.exec(["git", "diff", "--cached", "--quiet"], { workdir: dir, timeoutMs: 60_000 });
       if (staged.code === 0) continue; // nothing to commit here
+      if (secrets.length) {
+        // Searched on the host: the secret never goes into a command line in the box.
+        const diff = await sh.exec(["git", "diff", "--cached", "--no-color", "--text"], { workdir: dir, timeoutMs: 120_000 });
+        if (secrets.some((sec) => diff.stdout.includes(sec) || diff.stdout.includes(sec.slice(0, 40)))) {
+          await sh.exec(["git", "reset", "-q"], { workdir: dir, timeoutMs: 60_000 });
+          leaked.push(repo.name);
+          continue;
+        }
+      }
       await sh.exec(["git", "-c", "core.hooksPath=/dev/null", "commit", "-q", "--no-verify", "-m", message], { workdir: dir, timeoutMs: 60_000 });
     }
+    return leaked;
   }
 }
 

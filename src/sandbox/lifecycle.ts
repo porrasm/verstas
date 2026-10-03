@@ -210,9 +210,13 @@ export const removeSnapshots = async (cfg: SandboxConfig, sessionId: string): Pr
   for (const id of ids) await cfg.docker.run(["image", "rm", "-f", id], { allowFailure: true });
 };
 
-/** Starts a process in the session container as the agent user; the caller owns the child. */
-export const execInSandbox = (cfg: SandboxConfig, sessionId: string, cmd: readonly string[], opts: { stdin?: boolean; env?: Record<string, string> } = {}): ChildProcess =>
-  cfg.docker.spawn(execArgs(sessionId, cmd, { stdin: opts.stdin, env: opts.env }));
+/**
+ * Starts a process in the session container as the agent user; the caller
+ * owns the child. `secretEnv` reaches only this process, by name through the
+ * docker CLI's environment, never through argv or the container's own env.
+ */
+export const execInSandbox = (cfg: SandboxConfig, sessionId: string, cmd: readonly string[], opts: { stdin?: boolean; env?: Record<string, string>; secretEnv?: Record<string, string> } = {}): ChildProcess =>
+  cfg.docker.spawn(execArgs(sessionId, cmd, { stdin: opts.stdin, env: opts.env, passEnv: Object.keys(opts.secretEnv ?? {}) }), { env: opts.secretEnv });
 
 /** Runs a command to completion as the agent user and returns its output. */
 export const runInSandbox = (cfg: SandboxConfig, sessionId: string, cmd: readonly string[], opts: { timeoutMs?: number; allowFailure?: boolean; input?: string; workdir?: string } = {}) =>

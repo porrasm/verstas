@@ -620,3 +620,28 @@ test("a prompt runs one worker with your text and the notes, commits a change as
     await fs.rm(s.root, { recursive: true, force: true });
   }
 });
+
+test("a change that contains the Claude token is never committed; the ticket is blocked with the reason", async () => {
+  const s = await makeSession({ reviewer: false });
+  try {
+    const token = "sk-ant-oat01-THIS-IS-A-FAKE-TOKEN-FOR-THE-TEST-0123456789";
+    const shell = fakeShell();
+    const base = shell.exec.bind(shell);
+    shell.exec = async (cmd, opts) => (cmd.join(" ") === "git diff --cached --no-color --text" ? { code: 0, stdout: `+CLAUDE_CODE_OAUTH_TOKEN=${token}\n`, stderr: "" } : base(cmd, opts));
+    const worker = fakeWorker(s.hub, s.id, async (job, hub, id) => {
+      await fileReport(hub, id, job.ticket!, "done");
+      return {};
+    });
+    const mgr = new RunManager({ hub: s.hub, tokens: new RunTokens(), shell: () => shell, worker: () => worker, ensureSandbox: async () => undefined, agentApiUrl: "x", secrets: async () => [token] });
+    await (await mgr.start(s.id)).done;
+    const t1 = (await s.hub.get(s.id)).board.tickets[0]!;
+    expect(t1.state).toBe("blocked");
+    expect(t1.notes.at(-1)?.text).toContain("Claude token appears in the changes to app");
+    expect(shell.commits).toEqual([]);
+    expect(shell.calls).toContainEqual(["git", "reset", "-q"]);
+    // The token never went into a command the box would see.
+    expect(shell.calls.some((c) => c.join(" ").includes(token))).toBe(false);
+  } finally {
+    await fs.rm(s.root, { recursive: true, force: true });
+  }
+});

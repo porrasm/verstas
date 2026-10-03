@@ -121,3 +121,8 @@ test("a snapshot is a labelled commit of the session container, and the containe
   const args = runSessionArgs({ ...spec, runImage: snapshotImageName("nuppi-mvp") });
   expect(args.slice(-3)).toEqual(["verstas-session-nuppi-mvp:latest", "sleep", "infinity"]);
 });
+
+test("secrets reach an exec by name only, never by value in argv", () => {
+  const args = execArgs("nuppi-mvp", ["node", "/opt/verstas/worker.js"], { passEnv: ["CLAUDE_CODE_OAUTH_TOKEN", "VERSTAS_RUN_TOKEN"] });
+  expect(args).toEqual(["exec", "-w", "/workspace", "-e", "CLAUDE_CODE_OAUTH_TOKEN", "-e", "VERSTAS_RUN_TOKEN", "verstas-nuppi-mvp", "node", "/opt/verstas/worker.js"]);
+});

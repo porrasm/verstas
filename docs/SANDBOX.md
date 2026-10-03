@@ -99,7 +99,7 @@ so that a change here shows up as a test diff):
 | `-v <session>/workspace:/workspace` | The one read-write bind mount. |
 | `-v verstas-<id>-home:/home/agent`, `HOME=/home/agent` | A named Docker volume, not a host path: package caches, browsers and toolchains the agent installs survive a container recreate without counting against the workspace limit or crossing the macOS file-sharing layer. Labelled with the session and removed when the session is deleted. |
 | `-v <repo>/dist/src/worker:/opt/verstas:ro` | Our worker and board MCP code, read-only, over the image's own copy, so a fix ships with `npm run build` instead of an image rebuild. The agent can read it (it is not secret) and cannot change it. |
-| `--env` only for `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY`, the Claude token and the run's board token | Nothing from your environment leaks in. |
+| `--env` only for `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY`, `HOME`, `TMPDIR` and the session id | Nothing from your environment leaks in, and no secret: the tokens go to each worker's exec only (Boundary 6). |
 | `--init`, `--restart no`, `--label verstas.session=<id>` | Clean signal handling, no resurrection, and cleanup can find everything by label. |
 
 Not used, and why:
@@ -200,14 +200,25 @@ machine (`core.fsmonitor`, `core.sshCommand`, `pre-commit`). So:
 
 ## Boundary 6: secrets
 
-Two secrets enter a session, both as environment variables of the session
-container:
+Two secrets enter a session, and neither is in the container's
+environment. Each worker's `docker exec` passes them by name only
+(`-e CLAUDE_CODE_OAUTH_TOKEN`), with the value in the docker CLI's own
+environment, so they never appear in a command line on the host or in the
+box, and setup scripts, recipes, gates and harness git do not see them.
 
 - `CLAUDE_CODE_OAUTH_TOKEN`, made once with `claude setup-token` and stored
-  in the host app's config file with mode `0600`. The agent can read it, as
-  any process can read its own credentials; it can only use it against the
-  one host the allowlist permits for it.
+  in the host app's config file with mode `0600`. The worker and what it
+  starts can read it, as any process can read its own credentials, and
+  with sudo in the box so can root. It works only against the one host the
+  allowlist permits for it.
 - The run's board token, scoped as described above.
+
+**Commits are scanned.** Before the harness commits, it reads each repo's
+staged diff on the host and looks for the Claude token. A repo where it
+appears is not committed (its changes are unstaged and kept), and a ticket
+that would have been done is blocked with the reason. This keeps the
+token out of bundles and out of "Apply to repo". Taking the token out of
+the box entirely, with the proxy adding it to requests, is backlog V-04.
 
 Secrets requested by the agent (a third-party API key) are a later feature.
 When added, they are injected the same way and the agent sees only the

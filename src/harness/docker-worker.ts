@@ -24,9 +24,18 @@ export const dockerShell = (cfg: SandboxConfig, sessionId: string): Shell => ({
   exec: (cmd, opts = {}) => runInSandbox(cfg, sessionId, cmd, { workdir: opts.workdir, timeoutMs: opts.timeoutMs, allowFailure: true, input: opts.input }),
 });
 
-export const dockerWorker = (cfg: SandboxConfig, sessionId: string): WorkerRunner => ({
+/**
+ * The Claude token and the run token reach the worker process only: passed
+ * by name on its `docker exec`, not in the container's environment, so
+ * setup scripts, recipes, gates and harness git never see them.
+ */
+export const dockerWorker = (cfg: SandboxConfig, sessionId: string, claudeToken: () => Promise<string | undefined> = async () => undefined): WorkerRunner => ({
   async run(job: Job, onEvent, signal, opts = {}): Promise<WorkerDone> {
-    const child = execInSandbox(cfg, sessionId, WORKER_COMMAND, { env: opts.runToken ? { VERSTAS_RUN_TOKEN: opts.runToken } : undefined });
+    const claude = await claudeToken();
+    if (!claude) throw new Error("No Claude token configured. Run `claude setup-token` and paste it in Settings.");
+    const secretEnv: Record<string, string> = { CLAUDE_CODE_OAUTH_TOKEN: claude };
+    if (opts.runToken) secretEnv.VERSTAS_RUN_TOKEN = opts.runToken;
+    const child = execInSandbox(cfg, sessionId, WORKER_COMMAND, { secretEnv });
     child.stdin?.end();
     let stderr = "";
     const raw = opts.rawLog ? createWriteStream(opts.rawLog, { flags: "a" }) : null;
@@ -103,14 +112,9 @@ export type RunManagerConfig = {
  * root commands the user approved earlier when a recreate does happen.
  */
 export const ensureSessionSandbox = async (c: RunManagerConfig, session: Session, envFile: string, runToken: string | undefined): Promise<void> => {
-  const env: Record<string, string> = { VERSTAS_SESSION: session.id };
-  if (runToken) {
-    const claude = await c.claudeToken();
-    if (!claude) throw new Error("No Claude token configured. Run `claude setup-token` and paste it in Settings.");
-    env.CLAUDE_CODE_OAUTH_TOKEN = claude;
-    env.VERSTAS_RUN_TOKEN = runToken;
-  }
-  await writeEnvFile(envFile, env);
+  // No secrets in the container's environment (see dockerWorker); fail early if a run will need the token.
+  if (runToken && !(await c.claudeToken())) throw new Error("No Claude token configured. Run `claude setup-token` and paste it in Settings.");
+  await writeEnvFile(envFile, { VERSTAS_SESSION: session.id });
   const h = await c.hub.get(session.id);
   // Sessions created before the proxy directory existed get it here.
   await writeAllowlist(h.paths, session.allowlist);
@@ -184,7 +188,8 @@ export const createDockerRunManager = (c: RunManagerConfig): RunManager =>
     tokens: c.tokens,
     agentApiUrl: c.agentApiUrl,
     shell: (sessionId) => dockerShell(c.sandbox, sessionId),
-    worker: (sessionId) => dockerWorker(c.sandbox, sessionId),
+    worker: (sessionId) => dockerWorker(c.sandbox, sessionId, c.claudeToken),
+    secrets: async () => [await c.claudeToken()].filter((x): x is string => Boolean(x)),
     proxyDenials: (sessionId, since) => proxyDenials(c.sandbox, sessionId)(since),
     ensureSandbox: (session, envFile, token) => ensureSessionSandbox(c, session, envFile, token),
     healSandbox: async (sessionId) => {
