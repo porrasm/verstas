@@ -189,8 +189,17 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
     const h = await d.hub.get(s.id);
     const counts: Record<string, number> = {};
     for (const t of h.board.tickets) counts[t.state] = (counts[t.state] ?? 0) + 1;
-    const run = d.runs.status(s.id) ?? (await lastRun(h.paths.runs));
-    return { session: h.session, counts, run, openRequests: h.inbox.requests.filter((r) => r.state === "open").length, ideas: h.inbox.ideas.filter((i) => !i.promotedTo).length };
+    const runs = await allRuns(h.paths.runs);
+    const live = d.runs.status(s.id);
+    const run = live ?? runs[runs.length - 1];
+    return {
+      session: h.session,
+      counts,
+      run,
+      openRequests: h.inbox.requests.filter((r) => r.state === "open").length,
+      ideas: h.inbox.ideas.filter((i) => !i.promotedTo).length,
+      totals: runTotals(live ? [...runs.filter((r) => r.id !== live.id), live] : runs, h.session.createdAt),
+    };
   };
 
   api.get(
@@ -263,9 +272,12 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
     "/sessions/:id",
     wrap(async (req, res) => {
       const h = await d.hub.get(param(req, "id"));
-      const run = d.runs.status(h.id) ?? (await lastRun(h.paths.runs));
+      const runs = await allRuns(h.paths.runs);
+      const live = d.runs.status(h.id);
+      const run = live ?? runs[runs.length - 1];
       const sandbox = await sandboxStatus(d.sandbox, h.id).catch(() => null);
-      res.json({ session: h.session, board: h.board, inbox: h.inbox, run, sandbox, active: Boolean(d.runs.status(h.id)) });
+      const all = live ? [...runs.filter((r) => r.id !== live.id), live] : runs;
+      res.json({ session: h.session, board: h.board, inbox: h.inbox, run, runs: all, totals: runTotals(all, h.session.createdAt), sandbox, active: Boolean(live) });
     }),
   );
 
@@ -283,6 +295,21 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
       const lines = raw.split("\n").filter(Boolean);
       const limit = Math.min(Number(req.query.limit) || 500, 5000);
       res.json({ runId, events: lines.slice(-limit).map((l) => JSON.parse(l) as unknown) });
+    }),
+  );
+
+  /** Worker reports for one ticket across every run, oldest first; empty when no run touched it. */
+  api.get(
+    "/sessions/:id/tickets/:ticket/reports",
+    wrap(async (req, res) => {
+      const h = await d.hub.get(param(req, "id"));
+      const tid = ticketIdSchema.parse(param(req, "ticket"));
+      const out: { runId: number; text: string }[] = [];
+      for (const r of await allRuns(h.paths.runs)) {
+        const text = await fs.readFile(path.join(h.paths.runs, String(r.id), "tickets", `${tid}.md`), "utf8").catch(() => "");
+        if (text.trim()) out.push({ runId: r.id, text });
+      }
+      res.json({ reports: out });
     }),
   );
 
@@ -635,6 +662,35 @@ const applyRequest = async (d: UiApiDeps, sessionId: string, request: AgentReque
   if (det.kind === "network") return "added to the allowlist";
   if (det.kind === "resources") return "caps updated";
   return "";
+};
+
+/** Every run.json under runs/, oldest first; unreadable ones are skipped. */
+const allRuns = async (runsDir: string): Promise<Run[]> => {
+  const out: Run[] = [];
+  try {
+    const ids = (await fs.readdir(runsDir)).map(Number).filter((n) => Number.isInteger(n) && n > 0).sort((a, b) => a - b);
+    for (const id of ids) {
+      try {
+        out.push(JSON.parse(await fs.readFile(path.join(runsDir, String(id), "run.json"), "utf8")) as Run);
+      } catch {
+        continue;
+      }
+    }
+  } catch {
+    return out;
+  }
+  return out;
+};
+
+/** What the UI shows in a header: money spent over every run, how many runs, when something last happened. */
+const runTotals = (runs: Run[], createdAt: string): { usd: number; runs: number; lastActivityAt: string } => {
+  let last = createdAt;
+  let usd = 0;
+  for (const r of runs) {
+    usd += r.cost.usd ?? 0;
+    for (const t of [r.startedAt, r.endedAt]) if (t && t > last) last = t;
+  }
+  return { usd, runs: runs.length, lastActivityAt: last };
 };
 
 const lastRun = async (runsDir: string): Promise<Run | undefined> => {

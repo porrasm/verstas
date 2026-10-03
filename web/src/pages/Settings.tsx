@@ -8,15 +8,24 @@ export const SettingsPage = ({ status }: { status: Status | null }) => {
   const fail = (e: unknown) => setMsg({ text: (e as Error).message, error: true });
   const [token, setToken] = useState("");
   const [wt, setWt] = useState({ name: "", path: "" });
-  const load = () => api<Config>("GET", "/config").then(setCfg).catch(fail);
+  const [root, setRoot] = useState("");
+  const [ports, setPorts] = useState({ devboxImage: "", agentApiPort: "", uiPort: "" });
+  const load = () =>
+    api<Config>("GET", "/config")
+      .then((c) => {
+        setCfg(c);
+        setRoot(c.sessionsRoot);
+        setPorts({ devboxImage: c.devboxImage, agentApiPort: String(c.agentApiPort), uiPort: String(c.uiPort) });
+      })
+      .catch(fail);
   useEffect(() => {
     load();
   }, []);
-  if (!cfg) return <div className={msg?.error ? "err" : "muted"}>{msg?.text ?? "Loading…"}</div>;
-  const save = async (patch: Partial<Config>) => {
+  if (!cfg) return <div className={msg?.error ? "banner warn" : "loading"}>{msg?.text ?? "Loading…"}</div>;
+  const save = async (patch: Partial<Config>, note = "Saved.") => {
     try {
       setCfg(await api<Config>("PUT", "/config", patch));
-      ok("Saved. Port and sessions-root changes take effect after a restart.");
+      ok(note);
     } catch (e) {
       fail(e);
     }
@@ -24,76 +33,98 @@ export const SettingsPage = ({ status }: { status: Status | null }) => {
   const addTarget = async () => {
     try {
       await api("POST", "/work-targets", wt);
+      ok(`Work target ${wt.name} added.`);
       setWt({ name: "", path: "" });
       load();
-      ok(`Work target ${wt.name} added.`);
     } catch (e) {
       fail(e);
     }
   };
   const removeTarget = async (name: string) => {
-    await api("DELETE", `/work-targets/${encodeURIComponent(name)}`);
-    load();
+    try {
+      await api("DELETE", `/work-targets/${encodeURIComponent(name)}`);
+      ok(`Work target ${name} removed. Existing sessions keep their clones.`);
+      load();
+    } catch (e) {
+      fail(e);
+    }
   };
   const saveToken = async () => {
     try {
       await api("PUT", "/secrets", { claudeToken: token });
       setToken("");
-      ok("Token saved to ~/.verstas/secrets.json (mode 0600).");
+      ok("Token saved to ~/.verstas/secrets.json (mode 0600). It applies to the next worker that starts.");
     } catch (e) {
       fail(e);
     }
   };
+  const portsDirty = ports.devboxImage !== cfg.devboxImage || Number(ports.agentApiPort) !== cfg.agentApiPort || Number(ports.uiPort) !== cfg.uiPort;
   return (
-    <div className="grid" style={{ maxWidth: 820 }}>
-      <h2>Settings</h2>
-      {msg && <div className={`card ${msg.error ? "err" : "ok"}`} role="status">{msg.error ? "Error: " : ""}{msg.text}</div>}
-      <div className="card grid">
-        <h3>Sessions root</h3>
-        <p className="muted small">Every session is a directory under this path. The app creates and deletes them; nothing else on your disk is touched.</p>
-        <div className="row">
-          <input id="root" defaultValue={cfg.sessionsRoot} onBlur={(e) => e.target.value !== cfg.sessionsRoot && save({ sessionsRoot: e.target.value })} />
+    <div className="form">
+      <h1>Settings</h1>
+      {msg && (
+        <div className={`banner ${msg.error ? "warn" : "good"}`} role="status">
+          <span>{msg.error ? "Error: " : ""}{msg.text}</span>
+          <button className="quiet sm end" onClick={() => setMsg(null)}>Dismiss</button>
         </div>
-      </div>
-      <div className="card grid">
+      )}
+
+      <section className="card">
+        <h3>Claude token</h3>
+        <p className="lead">
+          Run <code>claude setup-token</code> in a terminal and paste the result. It is stored in <code>~/.verstas/secrets.json</code> and passed to session containers as <code>CLAUDE_CODE_OAUTH_TOKEN</code>.{" "}
+          {status?.hasClaudeToken ? <span className="ok">A token is configured.</span> : <span className="err">No token yet; nothing can run without one.</span>}
+        </p>
+        <div className="row">
+          <input id="token" type="password" placeholder={status?.hasClaudeToken ? "paste a new token to replace the current one" : "paste token"} value={token} onChange={(e) => setToken(e.target.value)} autoComplete="off" />
+          <button className="pri" onClick={saveToken} disabled={token.length < 10}>Save token</button>
+        </div>
+      </section>
+
+      <section className="card">
         <h3>Work targets</h3>
-        <p className="muted small">Local git repositories a session may be created from. Sessions get a fresh clone; your checkout is never mounted.</p>
+        <p className="lead">Local git repositories a session may be created from. Sessions get a fresh clone; your checkout is never mounted.</p>
         <table>
           <tbody>
             {cfg.workTargets.map((w) => (
-              <tr key={w.name}><td><strong>{w.name}</strong></td><td className="mono">{w.path}</td><td style={{ textAlign: "right" }}><button onClick={() => removeTarget(w.name)}>Remove</button></td></tr>
+              <tr key={w.name}>
+                <td style={{ paddingLeft: 0 }}><strong>{w.name}</strong></td>
+                <td className="mono muted wrap">{w.path}</td>
+                <td style={{ textAlign: "right", paddingRight: 0 }}><button className="quiet sm" onClick={() => removeTarget(w.name)}>Remove</button></td>
+              </tr>
             ))}
-            {cfg.workTargets.length === 0 && <tr><td className="muted" colSpan={3}>None yet.</td></tr>}
+            {cfg.workTargets.length === 0 && <tr><td className="muted" colSpan={3} style={{ paddingLeft: 0 }}>None yet. Add one below.</td></tr>}
           </tbody>
         </table>
         <div className="row">
-          <input id="wt-name" placeholder="name (letters, digits, . _ -)" value={wt.name} onChange={(e) => setWt({ ...wt, name: e.target.value })} style={{ maxWidth: 220 }} />
-          <input id="wt-path" placeholder="/absolute/path/to/repo or ~/path" value={wt.path} onChange={(e) => setWt({ ...wt, path: e.target.value })} />
+          <input id="wt-name" placeholder="name (letters, digits, . _ -)" value={wt.name} onChange={(e) => setWt({ ...wt, name: e.target.value })} style={{ flex: "0 1 220px" }} />
+          <input id="wt-path" className="mono" placeholder="/absolute/path/to/repo or ~/path" value={wt.path} onChange={(e) => setWt({ ...wt, path: e.target.value })} onKeyDown={(e) => e.key === "Enter" && wt.name && wt.path && addTarget()} />
           <button onClick={addTarget} disabled={!wt.name || !wt.path}>Add</button>
         </div>
-        {msg?.error && <div className="err small">{msg.text}</div>}
-      </div>
-      <div className="card grid">
-        <h3>Claude token</h3>
-        <p className="muted small">
-          Run <code>claude setup-token</code> in a terminal and paste the result. It is stored in <code>~/.verstas/secrets.json</code> and passed to session containers as <code>CLAUDE_CODE_OAUTH_TOKEN</code>.
-          {status?.hasClaudeToken ? <span className="ok"> A token is configured.</span> : <span className="err"> No token yet.</span>}
-        </p>
+      </section>
+
+      <section className="card">
+        <h3>Sessions root</h3>
+        <p className="lead">Every session is a directory under this path. The app creates and deletes them; nothing else on your disk is touched. Takes effect after a restart.</p>
         <div className="row">
-          <input id="token" type="password" placeholder="paste token" value={token} onChange={(e) => setToken(e.target.value)} />
-          <button onClick={saveToken} disabled={token.length < 10}>Save</button>
+          <input id="root" className="mono" value={root} onChange={(e) => setRoot(e.target.value)} />
+          <button onClick={() => save({ sessionsRoot: root }, "Saved. The new root is used after a restart.")} disabled={root === cfg.sessionsRoot || !root.trim()}>Save</button>
         </div>
-      </div>
-      <div className="card grid">
+      </section>
+
+      <section className="card">
         <h3>Image and ports</h3>
-        <div className="form two">
-          <label>Dev-box image<input id="image" defaultValue={cfg.devboxImage} onBlur={(e) => e.target.value !== cfg.devboxImage && save({ devboxImage: e.target.value })} /></label>
-          <label>Agent API port (reachable from containers)<input id="agentPort" type="number" defaultValue={cfg.agentApiPort} onBlur={(e) => Number(e.target.value) !== cfg.agentApiPort && save({ agentApiPort: Number(e.target.value) })} /></label>
-          <label>UI port (loopback only)<input id="uiPort" type="number" defaultValue={cfg.uiPort} onBlur={(e) => Number(e.target.value) !== cfg.uiPort && save({ uiPort: Number(e.target.value) })} /></label>
-          <label className="chk" style={{ alignSelf: "end" }}><input type="checkbox" checked={cfg.linuxHost} onChange={(e) => save({ linuxHost: e.target.checked })} /> Linux host (adds host-gateway for the proxy)</label>
+        <div className="three">
+          <label>Dev-box image <span className="help">Build with <code>npm run image:build</code></span><input id="image" className="mono" value={ports.devboxImage} onChange={(e) => setPorts({ ...ports, devboxImage: e.target.value })} /></label>
+          <label>Agent API port <span className="help">Reachable from containers</span><input id="agentPort" type="number" value={ports.agentApiPort} onChange={(e) => setPorts({ ...ports, agentApiPort: e.target.value })} /></label>
+          <label>UI port <span className="help">Loopback only</span><input id="uiPort" type="number" value={ports.uiPort} onChange={(e) => setPorts({ ...ports, uiPort: e.target.value })} /></label>
         </div>
-        <p className="muted small">Build the image with <code>npm run image:build</code> after changing the Dockerfile.</p>
-      </div>
+        <label className="chk"><input type="checkbox" checked={cfg.linuxHost} onChange={(e) => save({ linuxHost: e.target.checked })} /> Linux host <span className="muted">(adds host-gateway so the proxy can reach the agent API)</span></label>
+        <div className="row">
+          <button onClick={() => save({ devboxImage: ports.devboxImage, agentApiPort: Number(ports.agentApiPort), uiPort: Number(ports.uiPort) }, "Saved. Port changes take effect after a restart; the image applies to new sessions.")} disabled={!portsDirty}>Save</button>
+          {portsDirty && <span className="muted small">Unsaved changes</span>}
+        </div>
+      </section>
     </div>
   );
 };

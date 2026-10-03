@@ -46,8 +46,10 @@ export type Session = {
 };
 export type Run = { id: number; state: string; startedAt: string; endedAt?: string; currentTicket?: string; ticketsDone: number; cost: { usd?: number }; pauseReason?: string; resumeAt?: string };
 export type VEvent = { kind: string; t: string; ticket?: string; [k: string]: unknown };
-export type SessionSummary = { session: Session; counts: Record<string, number>; run?: Run; openRequests: number; ideas: number; error?: string };
-export type SessionDetail = { session: Session; board: Board; inbox: Inbox; run?: Run; sandbox: { network: boolean; proxy: string; container: string } | null; active: boolean };
+export type Totals = { usd: number; runs: number; lastActivityAt: string };
+export type SessionSummary = { session: Session; counts: Record<string, number>; run?: Run; openRequests: number; ideas: number; totals?: Totals; error?: string };
+export type Sandbox = { network: boolean; proxy: "running" | "stopped" | "absent"; container: "running" | "stopped" | "absent" };
+export type SessionDetail = { session: Session; board: Board; inbox: Inbox; run?: Run; runs: Run[]; totals: Totals; sandbox: Sandbox | null; active: boolean };
 export type Status = { version: string; docker: { ok: boolean; detail: string }; image: boolean; imageName: string; sessionsRoot: string; hasClaudeToken: boolean };
 export type Config = { sessionsRoot: string; workTargets: { name: string; path: string }[]; uiPort: number; agentApiPort: number; devboxImage: string; linuxHost: boolean };
 
@@ -127,9 +129,48 @@ export const useLive = (onMessage: (m: WsMessage) => void): boolean => {
 
 export const fmtTime = (iso: string): string => {
   const d = new Date(iso);
-  return Number.isNaN(d.getTime()) ? "" : d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  return Number.isNaN(d.getTime()) ? "" : d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
+};
+export const fmtDateTime = (iso: string): string => {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? "" : d.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false });
+};
+/** "just now", "4 min ago", "3 h ago", "2 d ago". */
+export const fmtAgo = (iso: string, now = Date.now()): string => {
+  const t = new Date(iso).getTime();
+  if (Number.isNaN(t)) return "";
+  const s = Math.max(0, Math.round((now - t) / 1000));
+  if (s < 45) return "just now";
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m} min ago`;
+  const h = Math.round(m / 60);
+  if (h < 48) return `${h} h ago`;
+  return `${Math.round(h / 24)} d ago`;
+};
+/** "14 s", "12 min", "2 h 05 min". */
+export const fmtDuration = (fromIso: string, toIso?: string, now = Date.now()): string => {
+  const a = new Date(fromIso).getTime();
+  const b = toIso ? new Date(toIso).getTime() : now;
+  if (Number.isNaN(a) || Number.isNaN(b)) return "";
+  const s = Math.max(0, Math.round((b - a) / 1000));
+  if (s < 90) return `${s} s`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m} min`;
+  return `${Math.floor(m / 60)} h ${String(m % 60).padStart(2, "0")} min`;
 };
 export const fmtUsd = (n?: number): string => (n === undefined ? "" : `$${n.toFixed(2)}`);
+/** A ticking "now" for the relative-time labels; re-renders every `ms`. */
+export const useNow = (ms = 30_000): number => {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), ms);
+    return () => clearInterval(t);
+  }, [ms]);
+  return now;
+};
+
+export const TICKET_STATES = ["backlog", "ready", "in_progress", "review", "waiting", "blocked", "done"] as const;
+export const STATE_LABEL: Record<string, string> = { backlog: "Backlog", ready: "Ready", in_progress: "In progress", review: "Review", waiting: "Waiting", blocked: "Blocked", done: "Done" };
 export const fmtBytes = (n: number): string => (n > 1e9 ? `${(n / 1e9).toFixed(1)} GB` : n > 1e6 ? `${(n / 1e6).toFixed(1)} MB` : `${Math.round(n / 1e3)} kB`);
 
 /** Models offered in the UI; any other id or alias can be typed. */

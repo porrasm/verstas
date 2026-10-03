@@ -5,7 +5,7 @@ import { NewSessionPage } from "./pages/NewSession";
 import { SessionPage } from "./pages/Session";
 import { SettingsPage } from "./pages/Settings";
 
-/** Hash routing: #/ sessions, #/new, #/s/<id>, #/settings. */
+/** Hash routing: #/ sessions, #/new, #/s/<id>, #/s/<id>/t/<ticket>, #/settings. */
 const useRoute = (): string => {
   const [hash, setHash] = useState(location.hash || "#/");
   useEffect(() => {
@@ -27,35 +27,47 @@ export const App = () => {
   }, [route]);
 
   let page: JSX.Element;
-  const m = /^#\/s\/([^/]+)/.exec(route);
-  if (m) page = <SessionPage id={decodeURIComponent(m[1]!)} />;
+  const m = /^#\/s\/([^/]+)(?:\/t\/([^/]+))?/.exec(route);
+  if (m) page = <SessionPage id={decodeURIComponent(m[1]!)} ticketId={m[2] ? decodeURIComponent(m[2]) : null} />;
   else if (route.startsWith("#/new")) page = <NewSessionPage />;
   else if (route.startsWith("#/settings")) page = <SettingsPage status={status} />;
   else page = <SessionsPage status={status} />;
 
+  const onSessions = route === "#/" || route.startsWith("#/s/");
   return (
     <>
       <header className="top">
-        <span className="brand">Verstas</span>
+        <a className="brand" href="#/">Verstas</a>
         <nav>
-          <a href="#/" className={route === "#/" || route.startsWith("#/s/") ? "on" : ""}>Sessions</a>
+          <a href="#/" className={onSessions ? "on" : ""}>Sessions</a>
           <a href="#/new" className={route.startsWith("#/new") ? "on" : ""}>New session</a>
           <a href="#/settings" className={route.startsWith("#/settings") ? "on" : ""}>Settings</a>
         </nav>
         <div className="right">
           {status ? (
             <>
-              <span><span className={`dot ${status.docker.ok ? "good" : "bad"}`} />docker {status.docker.ok ? status.docker.detail : "unavailable"}</span>
-              <span><span className={`dot ${status.image ? "good" : "bad"}`} />image {status.image ? "ready" : "missing"}</span>
-              <span><span className={`dot ${status.hasClaudeToken ? "good" : "bad"}`} />token</span>
-              <span className="mono">v{status.version}</span>
+              <Health ok={status.docker.ok} label={status.docker.ok ? `Docker ${status.docker.detail}` : "Docker unavailable"} title={status.docker.ok ? "Docker daemon reachable" : "Sessions can be edited but not run until Docker is up"} />
+              <Health ok={status.image} label={status.image ? "image ready" : "image missing"} title={status.image ? `${status.imageName} is built` : `Build ${status.imageName} with npm run image:build`} />
+              <Health ok={status.hasClaudeToken} label={status.hasClaudeToken ? "token set" : "no token"} title={status.hasClaudeToken ? "A Claude token is configured" : "Paste a token in Settings"} href="#/settings" />
+              <span className="health mono" title="Verstas version">v{status.version}</span>
             </>
           ) : (
-            <span className="err">host app unreachable</span>
+            <span className="health bad">host app unreachable</span>
           )}
         </div>
       </header>
       <main className="page">{page}</main>
     </>
   );
+};
+
+const Health = ({ ok, label, title, href }: { ok: boolean; label: string; title: string; href?: string }) => {
+  const body = (
+    <>
+      <span className={`dot ${ok ? "good" : "bad"}`} />
+      {label}
+    </>
+  );
+  if (!ok && href) return <a className="health bad" href={href} title={title}>{body}</a>;
+  return <span className={`health ${ok ? "" : "bad"}`} title={title}>{body}</span>;
 };
