@@ -499,3 +499,7 @@ details[open] > summary::before { transform: rotate(90deg); }
 .script-item.on { border-color: var(--accent); }
 
 textarea.invalid { border-color: var(--warn); }
+
+.req .action { border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; display: grid; gap: 6px; margin-top: 6px; }
+.req .action.decided { opacity: .75; }
+.req .action pre { margin: 0; }

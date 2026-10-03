@@ -120,8 +120,13 @@ export type BoardImport = z.infer<typeof boardImportSchema>;
 
 export const HOSTNAME_PATTERN = /^(\*\.)?([a-z0-9-]+\.)+[a-z0-9-]+$/i;
 
-export const requestDetailSchema = z.discriminatedUnion("kind", [
-  /** Handled by Verstas on approval: the host joins the session allowlist and the proxy reloads. */
+/**
+ * One request = a summary for the user plus zero or more actions, each
+ * decided on its own. The ticket parks until every action has a decision.
+ * Kinds Verstas applies itself: network, resources, root_script. Kinds the
+ * user performs or answers: instruction, question.
+ */
+export const actionDetailSchema = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("network"),
     host: z
@@ -130,53 +135,81 @@ export const requestDetailSchema = z.discriminatedUnion("kind", [
       .refine((h) => !/^\d{1,3}(\.\d{1,3}){3}$/.test(h), "IP literals are not allowed"),
     port: z.number().int().min(1).max(65535).optional(),
   }),
-  /** Handled by Verstas on approval: caps and limits change. */
   z.object({
     kind: z.literal("resources"),
     workerMinutes: z.number().int().min(1).max(600).optional(),
     workerTurns: z.number().int().min(1).max(500).optional(),
     memoryMb: z.number().int().min(256).max(65536).optional(),
   }),
-  /**
-   * Shown to the user verbatim; approval runs it as root inside the session
-   * container (sh -c), with the output tail returned as the answer. The one
-   * place agent text reaches a shell, and only after a human read it.
-   */
+  /** Multi-line bash, run as root inside the container with `bash -e` on stdin after the user read it. */
   z.object({
-    kind: z.literal("root_command"),
-    command: z.string().min(1).max(4000),
+    kind: z.literal("root_script"),
+    script: z.string().min(1).max(20_000),
     cwd: z.string().max(500).optional(),
   }),
-  /** Anything a person has to do: a website, a credential placed in a file, a decision. */
+  /** Something a person must do; marked done or declined, with an optional note. */
   z.object({
-    kind: z.literal("ask"),
-    what: z.string().min(1).max(5000),
-    how: z.string().max(5000).optional(),
-    verify: z.string().max(2000).optional(),
+    kind: z.literal("instruction"),
+    text: z.string().min(1).max(5000),
   }),
-  /** Stops the run after the current worker; for problems that make continuing pointless or harmful. */
+  /** A question that needs an answer; options are a convenience, free text is always allowed. */
   z.object({
-    kind: z.literal("halt"),
-    reason: z.string().min(1).max(5000),
-    severity: z.enum(["major", "critical"]),
+    kind: z.literal("question"),
+    text: z.string().min(1).max(5000),
+    options: z.array(z.string().min(1).max(200)).max(8).optional(),
   }),
 ]);
-export type RequestDetail = z.infer<typeof requestDetailSchema>;
-export type RequestKind = RequestDetail["kind"];
+export type ActionDetail = z.infer<typeof actionDetailSchema>;
+export type ActionKind = ActionDetail["kind"];
 
-export const requestStateSchema = z.enum(["open", "approved", "denied"]);
+export const actionStateSchema = z.enum(["open", "approved", "declined"]);
+
+export const actionSchema = z.object({
+  /** a1, a2, … within the request. */
+  id: z.string(),
+  detail: actionDetailSchema,
+  state: actionStateSchema.default("open"),
+  /** What happened: the user's note or answer, a script's exit code and output tail. */
+  outcome: z.string().max(8000).optional(),
+  decidedAt: z.string().optional(),
+});
+export type RequestAction = z.infer<typeof actionSchema>;
+
+export const requestStateSchema = z.enum(["open", "resolved"]);
 
 export const requestSchema = z.object({
   id: z.string(), // R-<n>
   ticketId: ticketIdSchema.optional(),
-  detail: requestDetailSchema,
-  why: z.string().min(1).max(5000),
+  /** What the worker needs and why, for the user. */
+  summary: z.string().min(1).max(8000),
+  actions: z.array(actionSchema).max(20).default([]),
+  /** Set by the `halt` tool: the run stops after the worker; acknowledging resolves it. */
+  halt: z.object({ reason: z.string().min(1).max(5000), severity: z.enum(["major", "critical"]) }).optional(),
   state: requestStateSchema.default("open"),
-  answer: z.string().max(5000).optional(),
+  /** The user's free-text answer for the whole request. */
+  answer: z.string().max(8000).optional(),
   createdAt: z.string(),
   decidedAt: z.string().optional(),
 });
 export type AgentRequest = z.infer<typeof requestSchema>;
+
+/** The outcome block the next worker reads: answer first, then one line per action. */
+export const requestOutcome = (r: AgentRequest): string => {
+  const lines = [`${r.id}${r.state === "resolved" ? "" : " (still open)"}: ${r.summary.replace(/\s+/g, " ").slice(0, 300)}`];
+  if (r.answer) lines.push(`  Answer: ${r.answer}`);
+  for (const a of r.actions) {
+    const d = a.detail;
+    const what =
+      d.kind === "network" ? `network ${d.host}${d.port ? `:${d.port}` : ""}` :
+      d.kind === "resources" ? `resources ${JSON.stringify({ ...d, kind: undefined })}` :
+      d.kind === "root_script" ? `root script (${d.script.split("\n").length} lines)` :
+      d.kind === "instruction" ? `instruction: ${d.text.slice(0, 200)}` :
+      `question: ${d.text.slice(0, 200)}`;
+    lines.push(`  ${a.id} ${what} -> ${a.state}${a.outcome ? `: ${a.outcome}` : ""}`);
+  }
+  if (r.halt) lines.push(`  halt (${r.halt.severity}): ${r.halt.reason.slice(0, 300)} -> ${r.state}`);
+  return lines.join("\n");
+};
 
 export const messageSchema = z.object({
   id: z.string(), // M-<n>
@@ -278,9 +311,9 @@ export const setupResultSchema = z.object({
 });
 export type SetupResult = z.infer<typeof setupResultSchema>;
 
-/** A root command the user approved; replayed when the container is recreated. */
-export const rootCommandRecordSchema = z.object({
-  command: z.string().min(1).max(4000),
+/** A root script the user approved; replayed when the container is recreated. */
+export const rootScriptRecordSchema = z.object({
+  script: z.string().min(1).max(20_000),
   cwd: z.string().max(500).optional(),
   at: z.string(),
   requestId: z.string().optional(),
@@ -311,7 +344,7 @@ export const sessionSchema = z.object({
   allowlist: z.array(z.string()).default([]),
   caps: capsSchema.prefault({}),
   limits: limitsSchema.prefault({}),
-  rootCommands: z.array(rootCommandRecordSchema).default([]),
+  rootScripts: z.array(rootScriptRecordSchema).default([]),
   setupScripts: z.array(sessionSetupScriptSchema).default([]),
   /** Results of the last setup run, one per script, in order. Empty until the container was first created. */
   setup: z.array(setupResultSchema).default([]),

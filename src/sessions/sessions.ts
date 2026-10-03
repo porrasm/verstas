@@ -181,24 +181,45 @@ export const saveSession = async (root: string, session: Session): Promise<void>
 };
 
 /**
- * Request kinds that existed before the four-kind model (2026-10-03):
- * install -> root_command, decision/secret -> ask. Applied on load so old
- * session files keep working; saved back in the new shape on the next write.
+ * Older request shapes are migrated on load so session files keep working:
+ * the single-`detail` requests of 2026-10-03 (install, decision, secret,
+ * network, resources, root_command, ask, halt) become one request with one
+ * action (or a halt flag). Saved back in the new shape on the next write.
  */
 export const migrateInbox = (raw: unknown): unknown => {
   if (!raw || typeof raw !== "object") return raw;
   const r = raw as { requests?: Record<string, unknown>[] };
   if (!Array.isArray(r.requests)) return raw;
   const requests = r.requests.map((req) => {
-    const detail = (req.detail ?? {}) as Record<string, unknown>;
-    if (detail.kind === "install") {
-      const packages = Array.isArray(detail.packages) ? detail.packages.map(String).join(" ") : "";
-      const cmd = detail.manager === "apt" ? `apt-get update && apt-get install -y --no-install-recommends ${packages}` : detail.manager === "npm" ? `npm install -g ${packages}` : `pip install --break-system-packages ${packages}`;
-      return { ...req, detail: { kind: "root_command", command: cmd } };
+    if (Array.isArray(req.actions) || !req.detail) return req;
+    const d = req.detail as Record<string, unknown>;
+    const why = String(req.why ?? "");
+    const oldState = String(req.state ?? "open");
+    const actionState = oldState === "approved" ? "approved" : oldState === "denied" ? "declined" : "open";
+    const base = { id: req.id, ticketId: req.ticketId, summary: why || "(migrated request)", state: oldState === "open" ? "open" : "resolved", answer: req.answer, createdAt: req.createdAt, decidedAt: req.decidedAt };
+    const act = (detail: Record<string, unknown>) => ({ ...base, actions: [{ id: "a1", detail, state: actionState, outcome: req.answer, decidedAt: req.decidedAt }] });
+    switch (d.kind) {
+      case "network":
+      case "resources":
+        return act(d);
+      case "root_command":
+        return act({ kind: "root_script", script: String(d.command ?? ""), cwd: d.cwd });
+      case "install": {
+        const packages = Array.isArray(d.packages) ? d.packages.map(String).join(" ") : "";
+        const cmd = d.manager === "apt" ? `apt-get update && apt-get install -y --no-install-recommends ${packages}` : d.manager === "npm" ? `npm install -g ${packages}` : `pip install --break-system-packages ${packages}`;
+        return act({ kind: "root_script", script: cmd });
+      }
+      case "decision":
+        return act({ kind: "question", text: String(d.question ?? "") });
+      case "secret":
+        return act({ kind: "instruction", text: `Place the secret ${String(d.name ?? "")} in a file under /workspace. ${String(d.purpose ?? "")}` });
+      case "ask":
+        return act({ kind: "instruction", text: [d.what, d.how, d.verify ? `Verify: ${String(d.verify)}` : ""].filter(Boolean).map(String).join(" ") });
+      case "halt":
+        return { ...base, actions: [], halt: { reason: String(d.reason ?? ""), severity: d.severity === "critical" ? "critical" : "major" } };
+      default:
+        return { ...base, actions: [] };
     }
-    if (detail.kind === "decision") return { ...req, detail: { kind: "ask", what: String(detail.question ?? "") } };
-    if (detail.kind === "secret") return { ...req, detail: { kind: "ask", what: `Place the secret ${String(detail.name ?? "")} in a file under /workspace`, how: String(detail.purpose ?? "") } };
-    return req;
   });
   return { ...r, requests };
 };

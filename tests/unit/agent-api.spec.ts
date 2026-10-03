@@ -103,32 +103,41 @@ test("workers may file bugs, not features; notes, reports, priorities and deps f
   }
 });
 
-test("requests, messages and ideas land in the inbox tied to the current ticket", async () => {
+test("requests carry a summary and typed actions; halt is its own tool; messages and ideas land in the inbox", async () => {
   const s = await setup();
   try {
-    const r = await s.call("POST", "/requests", { detail: { kind: "network", host: "fonts.googleapis.com" }, why: "fonts" });
+    const r = await s.call("POST", "/requests", {
+      summary: "Need Postgres and two decisions before the tests can run.",
+      actions: [
+        { kind: "root_script", script: "apt-get update\napt-get install -y postgresql" },
+        { kind: "network", host: "fonts.googleapis.com" },
+        { kind: "question", text: "Fresh empty database, or restore a dump?", options: ["fresh", "dump"] },
+        { kind: "instruction", text: "Place real OPENAI_API_KEY in /workspace/secrets/apps.env if you want LLM features." },
+      ],
+    });
     expect(r.status).toBe(201);
     expect(r.json.id).toBe("R-1");
+    expect(r.json.actions).toEqual(["a1", "a2", "a3", "a4"]);
     expect(String(r.json.next)).toContain("Stop working");
-    const halt = await s.call("POST", "/requests", { detail: { kind: "halt", reason: "spec contradiction", severity: "critical" }, why: "x" });
-    expect(halt.json.id).toBe("R-2");
+    // A pure question: zero actions is fine.
+    expect((await s.call("POST", "/requests", { summary: "Is dev login acceptable here?" })).json.id).toBe("R-2");
+    const halt = await s.call("POST", "/halt", { reason: "spec contradiction", severity: "critical" });
+    expect(halt.json.id).toBe("R-3");
     expect(String(halt.json.next)).toContain("pause");
-    expect((await s.call("POST", "/requests", { detail: { kind: "root_command", command: "apt-get install -y tree" }, why: "x" })).json.id).toBe("R-3");
-    expect((await s.call("POST", "/requests", { detail: { kind: "ask", what: "log in to namecheap and add a CNAME", how: "panel > DNS", verify: "dig" }, why: "x" })).json.id).toBe("R-4");
-    expect((await s.call("POST", "/requests", { detail: { kind: "install", manager: "apt", packages: ["tree"] }, why: "x" })).status).toBe(400);
-    expect((await s.call("POST", "/requests", { detail: { kind: "network", host: "10.0.0.1" }, why: "x" })).status).toBe(400);
+    // Validation still bites per action.
+    expect((await s.call("POST", "/requests", { summary: "x", actions: [{ kind: "network", host: "10.0.0.1" }] })).status).toBe(400);
+    expect((await s.call("POST", "/requests", { summary: "x", actions: [{ kind: "install", manager: "apt", packages: ["tree"] }] })).status).toBe(400);
     expect((await s.call("POST", "/messages", { text: "tests are slow" })).json.id).toBe("M-1");
     expect((await s.call("POST", "/ideas", { title: "Per-track pages", pitch: "would sell" })).json.id).toBe("I-1");
 
     const h = await s.hub.get(s.id);
-    expect(h.inbox.requests.map((r) => [r.id, r.ticketId, r.state])).toEqual([["R-1", "T-2", "open"], ["R-2", "T-2", "open"], ["R-3", "T-2", "open"], ["R-4", "T-2", "open"]]);
+    expect(h.inbox.requests.map((r) => [r.id, r.ticketId, r.state, r.actions.length, Boolean(r.halt)])).toEqual([["R-1", "T-2", "open", 4, false], ["R-2", "T-2", "open", 0, false], ["R-3", "T-2", "open", 0, true]]);
+    expect(h.inbox.requests[0]!.actions.map((a) => a.detail.kind)).toEqual(["root_script", "network", "question", "instruction"]);
     expect(h.inbox.messages[0]).toMatchObject({ ticketId: "T-2", read: false });
     expect(h.inbox.ideas[0]).toMatchObject({ ticketId: "T-2", title: "Per-track pages" });
-    // The ticket's notes record the request.
-    expect(h.board.tickets.find((t) => t.id === "T-2")!.notes.map((n) => n.text).join("\n")).toContain("R-2 (halt)");
-    // Persisted to disk, not just memory.
+    expect(h.board.tickets.find((t) => t.id === "T-2")!.notes.map((n) => n.text).join("\n")).toContain("Halt requested (critical)");
     const onDisk = JSON.parse(await fs.readFile(h.paths.inbox, "utf8")) as { requests: unknown[] };
-    expect(onDisk.requests).toHaveLength(4);
+    expect(onDisk.requests).toHaveLength(3);
   } finally {
     await s.close();
   }

@@ -3,7 +3,6 @@ import {
   connectProxyToBridgeArgs,
   createNetworkArgs,
   execArgs,
-  rootCommandArgs,
   runProxyArgs,
   setupScriptArgs,
   runSessionArgs,
@@ -97,18 +96,12 @@ test("exec runs as the agent in /workspace unless the harness asks for root", ()
   ]);
 });
 
-test("a root command runs as root through sh -c in the given directory", () => {
-  expect(rootCommandArgs("nuppi-mvp", "apt-get update && apt-get install -y tree")).toEqual([
-    "exec", "-u", "root", "-w", "/workspace", "verstas-nuppi-mvp", "sh", "-c", "apt-get update && apt-get install -y tree",
-  ]);
-  expect(rootCommandArgs("nuppi-mvp", "ls", "/tmp").slice(3, 5)).toEqual(["-w", "/tmp"]);
-});
-
 test("the spec fingerprint label is written when given", () => {
   const args = runSessionArgs({ ...spec, fingerprint: "abc" });
   expect(args).toContain("verstas.spec=abc");
 });
 
-test("a setup script is fed on stdin to bash -e as root, non-interactive", () => {
+test("setup scripts and approved root scripts are fed on stdin to bash -e as root, non-interactive", () => {
   expect(setupScriptArgs("nuppi-mvp")).toEqual(["exec", "-i", "-u", "root", "-w", "/workspace", "-e", "DEBIAN_FRONTEND=noninteractive", "verstas-nuppi-mvp", "bash", "-e", "-s"]);
+  expect(setupScriptArgs("nuppi-mvp", "/tmp").slice(4, 6)).toEqual(["-w", "/tmp"]);
 });

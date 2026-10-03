@@ -16,7 +16,6 @@ import {
   proxyName,
   rmArgs,
   rmNetworkArgs,
-  rootCommandArgs,
   runProxyArgs,
   setupScriptArgs,
   runSessionArgs,
@@ -163,9 +162,9 @@ export const execInSandbox = (cfg: SandboxConfig, sessionId: string, cmd: readon
 export const runInSandbox = (cfg: SandboxConfig, sessionId: string, cmd: readonly string[], opts: { timeoutMs?: number; allowFailure?: boolean; input?: string; workdir?: string } = {}) =>
   cfg.docker.run(execArgs(sessionId, cmd, { workdir: opts.workdir, stdin: opts.input !== undefined }), { timeoutMs: opts.timeoutMs ?? 600_000, allowFailure: opts.allowFailure, input: opts.input });
 
-/** The one root operation: a command the user read and approved (docs/SANDBOX.md Boundary 7). */
-export const runRootCommand = async (cfg: SandboxConfig, sessionId: string, command: string, cwd?: string): Promise<{ ok: boolean; code: number; output: string }> => {
-  const r = await cfg.docker.run(rootCommandArgs(sessionId, command, cwd), { allowFailure: true, timeoutMs: 15 * 60_000 });
+/** An approved root script (docs/SANDBOX.md Boundary 7): bash -e on stdin, as root, 15-minute cap. */
+export const runRootScript = async (cfg: SandboxConfig, sessionId: string, script: string, cwd?: string): Promise<{ ok: boolean; code: number; output: string }> => {
+  const r = await cfg.docker.run(setupScriptArgs(sessionId, cwd), { input: script.endsWith("\n") ? script : script + "\n", allowFailure: true, timeoutMs: 15 * 60_000 });
   return { ok: r.code === 0, code: r.code, output: (r.stdout + r.stderr).slice(-6000) };
 };
 

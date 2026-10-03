@@ -183,8 +183,9 @@ test("an open request parks the ticket; a halt pauses the run", async () => {
               requestSchema.parse({
                 id: `R-${d.inbox.requests.length + 1}`,
                 ticketId: job.ticket,
-                detail: kind === "network" ? { kind, host: "fonts.googleapis.com" } : { kind, reason: "spec contradiction", severity: "critical" },
-                why: "need it",
+                summary: "need it",
+                actions: kind === "network" ? [{ id: "a1", detail: { kind, host: "fonts.googleapis.com" } }] : [],
+                halt: kind === "halt" ? { reason: "spec contradiction", severity: "critical" } : undefined,
                 createdAt: now(),
               }),
             ],
@@ -206,7 +207,7 @@ test("an open request parks the ticket; a halt pauses the run", async () => {
     // Answer the request, make T-2 independent, and let T-2 halt the run.
     await h.mutate((d) => ({
       next: {
-        inbox: { ...d.inbox, requests: d.inbox.requests.map((r) => ({ ...r, state: "approved" as const, answer: "allowed", decidedAt: now() })) },
+        inbox: { ...d.inbox, requests: d.inbox.requests.map((r) => ({ ...r, state: "resolved" as const, answer: "allowed", decidedAt: now(), actions: r.actions.map((a) => ({ ...a, state: "approved" as const, outcome: "allowed" })) })) },
         board: { ...d.board, tickets: d.board.tickets.map((t) => (t.id === "T-2" ? { ...t, deps: [] } : t.id === "T-1" ? { ...t, state: "backlog" as const } : t)) },
       },
     }));
@@ -350,7 +351,7 @@ test("preflight: a blocked verdict with a request parks the run before any ticke
       calls++;
       if (job.role === "preflight" && calls === 1) {
         const h = await hub.get(id);
-        await h.mutate((d) => ({ next: { inbox: { ...d.inbox, requests: [...d.inbox.requests, requestSchema.parse({ id: "R-1", detail: { kind: "root_command", command: "apt-get install -y postgresql" }, why: "the tests need a database", createdAt: now() })] } } }));
+        await h.mutate((d) => ({ next: { inbox: { ...d.inbox, requests: [...d.inbox.requests, requestSchema.parse({ id: "R-1", summary: "the tests need a database", actions: [{ id: "a1", detail: { kind: "root_script", script: "apt-get install -y postgresql" } }], createdAt: now() })] } } }));
         return { text: "PREFLIGHT: blocked\nPostgres is missing; filed R-1." };
       }
       if (job.role === "preflight") return { text: "PREFLIGHT: ok\nEverything the board needs is present." };
@@ -368,7 +369,7 @@ test("preflight: a blocked verdict with a request parks the run before any ticke
     expect(worker.jobs.map((j) => j.role)).toEqual(["preflight"]);
 
     // The user approves; the next run checks again and then works.
-    await h.mutate((d) => ({ next: { inbox: { ...d.inbox, requests: d.inbox.requests.map((r) => ({ ...r, state: "approved" as const, answer: "installed", decidedAt: now() })) } } }));
+    await h.mutate((d) => ({ next: { inbox: { ...d.inbox, requests: d.inbox.requests.map((r) => ({ ...r, state: "resolved" as const, answer: "installed", decidedAt: now(), actions: r.actions.map((a) => ({ ...a, state: "approved" as const, outcome: "ran as root, exit 0" })) })) } } }));
     const run2 = await (await mgr.start(s.id)).done;
     expect(run2.state).toBe("finished");
     h = await s.hub.get(s.id);

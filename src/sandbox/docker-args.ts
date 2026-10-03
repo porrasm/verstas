@@ -205,16 +205,12 @@ export const listLabelledNetworksArgs = (): string[] => [
 ];
 export const duArgs = (sessionId: string): string[] => execArgs(sessionId, ["du", "-sm", "/workspace"]);
 
-// --- Root commands approved by the user (docs/SANDBOX.md Boundary 7) -------
+// --- Root scripts approved by the user (docs/SANDBOX.md Boundary 7) --------
 
 /**
- * The argv for a user-approved root command: `sh -c <command>` as root in
- * the given directory. The command string is the agent's, shown to and
- * approved by the user first; it never runs otherwise.
+ * A setup script or an approved root script, fed on stdin: `bash -e -s` as
+ * root. The text is the user's (setup) or the agent's after the user read
+ * it (request action); it never runs otherwise.
  */
-export const rootCommandArgs = (sessionId: string, command: string, cwd = "/workspace"): string[] =>
-  execArgs(sessionId, ["sh", "-c", command], { user: "root", workdir: cwd });
-
-/** A setup script, fed on stdin: `bash -e -s` as root in /workspace. */
-export const setupScriptArgs = (sessionId: string): string[] =>
-  execArgs(sessionId, ["bash", "-e", "-s"], { user: "root", workdir: "/workspace", stdin: true, env: { DEBIAN_FRONTEND: "noninteractive" } });
+export const setupScriptArgs = (sessionId: string, cwd = "/workspace"): string[] =>
+  execArgs(sessionId, ["bash", "-e", "-s"], { user: "root", workdir: cwd, stdin: true, env: { DEBIAN_FRONTEND: "noninteractive" } });

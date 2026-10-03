@@ -177,22 +177,23 @@ Secrets requested by the agent (a third-party API key) are a later feature.
 When added, they are injected the same way and the agent sees only the
 variable name in its context.
 
-## Boundary 7: root commands approved by you
+## Boundary 7: root scripts approved by you
 
 The agent user cannot install system packages or change anything outside
-`/workspace`. When a worker needs that, it files a `root_command` request
-with the exact shell command. The inbox shows the command verbatim. If you
-approve, the host app runs it **as root inside the session container**
-(`docker exec -u root … sh -c <command>`), with a 15-minute cap, and the
-output tail goes back to the worker as the answer. Approved commands are
-recorded on the session and replayed if the container is ever recreated.
+`/workspace`. When a worker needs that, it files a request whose
+`root_script` action carries the bash verbatim. The inbox shows every line.
+If you approve, the host app runs it **as root inside the session
+container** (`docker exec -u root … bash -e -s` with the script on stdin),
+with a 15-minute cap, and the output tail goes back to the worker as the
+action's outcome. Approved scripts are recorded on the session and
+replayed if the container is ever recreated.
 
 This is the one place agent-written text reaches a shell, and the rule
 that makes it acceptable is that nothing runs until a person has read it.
 Root here is root in a capability-less container, not on your machine (see
 Boundary 2 and the Residual risks), but it does own the container: a
 malicious install script could replace `node`, `git` or `claude` for every
-later worker in that session. Read the command, not just the package name.
+later worker in that session. Read the script, not just the package names.
 
 **Setup scripts** are the other root path: bash you wrote in the library,
 copied into the session at creation, run once as root with `bash -e` when
@@ -201,10 +202,10 @@ to `<session>/setup/<name>.log`. The agent never writes or edits them; it
 can read the copies. The hosts a script declares join the session
 allowlist, which is the one place a script widens the boundary, visibly.
 
-Everything else a worker needs from a person goes through the plain `ask`
-request: a website to configure, a decision, a credential placed in a file
-under the workspace. Those run nothing; you act, you answer, the ticket
-resumes.
+Everything else a worker needs from a person goes through the other action
+kinds of the same request: `instruction` (a website to configure, a file
+to place) and `question` (a decision). Those run nothing; you act, you
+answer, the ticket resumes when every action is decided.
 
 The container is created once per session and recreated only when its
 image, limits or mounts change; so what you install stays for the session.
@@ -245,6 +246,7 @@ labelled resources without a matching directory and offers to remove them.
       cloning.
 - [ ] The agent API has no route that touches sessions, Docker or other
       runs, and every route checks the run token first.
-- [ ] A root command runs only after approval in the inbox, as root inside
-      the container only, with a cap, and is recorded on the session.
+- [ ] A root script runs only after approval of that action in the inbox,
+      as root inside the container only, with a cap, and is recorded on
+      the session.
 - [ ] Deleting a session removes network, proxy, container and directory.

@@ -16,6 +16,7 @@ import {
   ticketSizeSchema,
   ticketStateSchema,
   type AgentRequest,
+  type RequestAction,
   type Inbox,
   type Run,
   type Session,
@@ -27,7 +28,7 @@ import type { SessionHub } from "../sessions/hub.js";
 import { createSession, deleteSessionDir, listSessions, sessionPaths } from "../sessions/sessions.js";
 import { applyBundle, ApplyError } from "../sessions/apply.js";
 import type { SessionHandle } from "../sessions/hub.js";
-import { removeSandbox, runRootCommand, sandboxStatus, stopSandbox, type SandboxConfig } from "../sandbox/lifecycle.js";
+import { removeSandbox, runRootScript, sandboxStatus, stopSandbox, type SandboxConfig } from "../sandbox/lifecycle.js";
 import { dockerAvailable } from "../sandbox/docker.js";
 import type { RunManager } from "../harness/run.js";
 import { dockerShell, ensureSessionSandbox, runSetup, type RunManagerConfig } from "../harness/docker-worker.js";
@@ -742,47 +743,81 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
 
   // --- inbox -------------------------------------------------------------------
 
+  /**
+   * Decide one or more actions of a request, with an optional free-text
+   * answer. Approved network/resources/root_script actions are applied here;
+   * instruction and question actions just record what you said. The request
+   * resolves, and the ticket returns to ready, once every action is decided.
+   */
   api.post(
     "/sessions/:id/requests/:rid",
     wrap(async (req, res) => {
-      const { decision, answer } = z.object({ decision: z.enum(["approve", "deny"]), answer: z.string().max(5000).optional() }).parse(req.body);
+      const body = z
+        .object({
+          answer: z.string().max(8000).optional(),
+          actions: z.array(z.object({ id: z.string(), decision: z.enum(["approve", "decline"]), note: z.string().max(8000).optional() })).default([]),
+          declineAll: z.boolean().default(false),
+        })
+        .parse(req.body);
       const h = await d.hub.get(param(req, "id"));
       const request = h.inbox.requests.find((r) => r.id === param(req, "rid"));
       if (!request || request.state !== "open") {
         res.status(404).json({ error: "No open request with that id" });
         return;
       }
-      let applied = "";
-      if (decision === "approve") applied = await applyRequest(d, h.id, request);
-      const state = decision === "approve" ? "approved" : "denied";
-      await h.mutate((docs) => {
-        const inbox: Inbox = { ...docs.inbox, requests: docs.inbox.requests.map((r) => (r.id === request.id ? { ...r, state, answer: [answer, applied].filter(Boolean).join(" ") || undefined, decidedAt: now() } : r)) };
+      const decisions = new Map(body.actions.map((a) => [a.id, a]));
+      if (body.declineAll) for (const a of request.actions) if (a.state === "open" && !decisions.has(a.id)) decisions.set(a.id, { id: a.id, decision: "decline" });
+
+      // Side effects first (they may take minutes), then one atomic update.
+      const outcomes = new Map<string, { state: "approved" | "declined"; outcome: string }>();
+      for (const a of request.actions) {
+        const dec = decisions.get(a.id);
+        if (!dec || a.state !== "open") continue;
+        if (dec.decision === "decline") {
+          outcomes.set(a.id, { state: "declined", outcome: dec.note ? `declined: ${dec.note}` : "declined" });
+          continue;
+        }
+        outcomes.set(a.id, { state: "approved", outcome: await applyAction(d, h.id, a, dec.note) });
+      }
+
+      const result = await h.mutate((docs) => {
+        const cur = docs.inbox.requests.find((r) => r.id === request.id)!;
+        const actions: RequestAction[] = cur.actions.map((a) => {
+          const o = outcomes.get(a.id);
+          return o ? { ...a, state: o.state, outcome: o.outcome, decidedAt: now() } : a;
+        });
+        const allDecided = actions.every((a) => a.state !== "open");
+        const resolved = allDecided && (actions.length > 0 || Boolean(body.answer) || body.declineAll || Boolean(cur.halt) || cur.actions.length === 0);
+        const next: AgentRequest = { ...cur, actions, answer: body.answer ?? cur.answer, state: resolved ? "resolved" : "open", decidedAt: resolved ? now() : cur.decidedAt };
+        const inbox: Inbox = { ...docs.inbox, requests: docs.inbox.requests.map((r) => (r.id === next.id ? next : r)) };
         let board = docs.board;
         let session = docs.session;
-        if (request.ticketId) {
-          const t = getTicket(board, request.ticketId);
-          board = addNote(board, t.id, "user", `${request.id} ${state}${answer ? `: ${answer}` : ""}${applied ? ` (${applied})` : ""}`);
-          if (t.state === "waiting") board = transition(board, t.id, "ready", { by: "harness", text: "Request answered; requeued" });
+        for (const a of actions) {
+          const o = outcomes.get(a.id);
+          if (!o || o.state !== "approved") continue;
+          const det = a.detail;
+          if (det.kind === "network") {
+            const entry = det.port ? `${det.host}:${det.port}` : det.host;
+            if (!session.allowlist.includes(entry)) session = { ...session, allowlist: [...session.allowlist, entry] };
+          } else if (det.kind === "root_script") {
+            session = { ...session, rootScripts: [...session.rootScripts, { script: det.script, cwd: det.cwd, at: now(), requestId: next.id }] };
+          } else if (det.kind === "resources") {
+            session = {
+              ...session,
+              caps: capsSchema.parse({ ...session.caps, ...(det.workerMinutes ? { workerMinutes: det.workerMinutes } : {}), ...(det.workerTurns ? { workerTurns: det.workerTurns } : {}) }),
+              limits: limitsSchema.parse({ ...session.limits, ...(det.memoryMb ? { memory: `${det.memoryMb}m` } : {}) }),
+            };
+          }
         }
-        if (request.detail.kind === "network" && decision === "approve") {
-          const entry = request.detail.port ? `${request.detail.host}:${request.detail.port}` : request.detail.host;
-          if (!session.allowlist.includes(entry)) session = { ...session, allowlist: [...session.allowlist, entry] };
+        if (resolved && next.ticketId) {
+          const t = getTicket(board, next.ticketId);
+          board = addNote(board, t.id, "user", `${next.id} resolved${next.answer ? `: ${next.answer.slice(0, 500)}` : ""} (${actions.map((a) => `${a.id} ${a.state}`).join(", ") || "answered"})`);
+          if (t.state === "waiting") board = transition(board, t.id, "ready", { by: "harness", text: "Request resolved; requeued" });
         }
-        if (request.detail.kind === "root_command" && decision === "approve") {
-          session = { ...session, rootCommands: [...session.rootCommands, { command: request.detail.command, cwd: request.detail.cwd, at: now(), requestId: request.id }] };
-        }
-        if (request.detail.kind === "resources" && decision === "approve") {
-          const r = request.detail;
-          session = {
-            ...session,
-            caps: capsSchema.parse({ ...session.caps, ...(r.workerMinutes ? { workerMinutes: r.workerMinutes } : {}), ...(r.workerTurns ? { workerTurns: r.workerTurns } : {}) }),
-            limits: limitsSchema.parse({ ...session.limits, ...(r.memoryMb ? { memory: `${r.memoryMb}m` } : {}) }),
-          };
-        }
-        if (session.state === "halted" || session.state === "waiting") session = { ...session, state: "paused" };
-        return { next: { inbox, board, session } };
+        if (resolved && (session.state === "halted" || session.state === "waiting")) session = { ...session, state: "paused" };
+        return { next: { inbox, board, session }, result: next };
       });
-      res.json({ ok: true, applied });
+      res.json({ ok: true, request: result });
     }),
   );
 
@@ -817,23 +852,21 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
   return app;
 };
 
-/** Side effects of approving a request that need the sandbox now; the rest is recorded on the session. */
-const applyRequest = async (d: UiApiDeps, sessionId: string, request: AgentRequest): Promise<string> => {
-  const det = request.detail;
-  if (det.kind === "root_command") {
+/** The side effect of approving one action; returns the outcome text the worker will read. */
+const applyAction = async (d: UiApiDeps, sessionId: string, a: RequestAction, note?: string): Promise<string> => {
+  const det = a.detail;
+  if (det.kind === "root_script") {
     const h = await d.hub.get(sessionId);
     const st = await sandboxStatus(d.sandbox, sessionId).catch(() => null);
-    if (st?.container !== "running") {
-      // Bring the box up without a run token: the command does not need one.
-      await ensureSessionSandbox(d.runConfig, h.session, path.join(h.paths.dir, "sandbox.env"), undefined);
-    }
-    const r = await runRootCommand(d.sandbox, sessionId, det.command, det.cwd);
+    if (st?.container !== "running") await ensureSessionSandbox(d.runConfig, h.session, path.join(h.paths.dir, "sandbox.env"), undefined);
+    const r = await runRootScript(d.sandbox, sessionId, det.script, det.cwd);
     const tail = r.output.trim().split("\n").slice(-30).join("\n");
-    return `${r.ok ? "ran as root, exit 0" : `ran as root, exit ${r.code}`}${tail ? `\n--- output (tail) ---\n${tail}` : ""}`;
+    return `${r.ok ? "ran as root, exit 0" : `ran as root, exit ${r.code}`}${note ? ` (${note})` : ""}${tail ? `\n--- output (tail) ---\n${tail}` : ""}`;
   }
-  if (det.kind === "network") return "added to the allowlist";
-  if (det.kind === "resources") return "caps updated";
-  return "";
+  if (det.kind === "network") return `allowed${note ? `: ${note}` : ""}`;
+  if (det.kind === "resources") return `applied${note ? `: ${note}` : ""}`;
+  if (det.kind === "instruction") return note ? `done: ${note}` : "done";
+  return note ? `answer: ${note}` : "answered without text";
 };
 
 /** Every run.json under runs/, oldest first; unreadable ones are skipped. */

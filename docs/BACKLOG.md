@@ -245,6 +245,9 @@ more than a handful of repositories with their own compose stacks.
 
 ## Done
 
+- 2026-10-03 · Requests reshaped: one request = summary + typed actions
+  (network, resources, root_script, instruction, question), each decided
+  on its own; `halt` is a separate tool; old inbox files migrate on load.
 - 2026-10-03 · First real run; fixes: unknown-repo validation at every
   entry point, gates skipped without dependencies, blockers named on pause,
   proxy survives client resets and restarts on failure, sandbox healed per

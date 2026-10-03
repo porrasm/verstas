@@ -103,30 +103,40 @@ export const TOOLS: Tool[] = [
   {
     name: "request",
     description:
-      "Ask the user for something you cannot do yourself, then STOP working on the ticket: the ticket parks until the user answers, and the answer is given to the next worker on it. Kinds: 'network' (a host you need to reach; approval adds it to the allowlist), 'resources' (more minutes, turns or memory), 'root_command' (a command to run as root inside this container, e.g. apt-get install; the user reads it and runs it, you get the output), 'ask' (anything a person must do or decide: a website, a credential placed in a file, a choice), 'halt' (stop the whole run for a critical problem).",
+      "Ask the user for everything you need right now in ONE request, then STOP working on the ticket. Give a summary (what you need and why) and a list of actions. Kinds Verstas performs on approval: 'network' (a host to allow), 'resources' (more minutes/turns/memory), 'root_script' (bash run as root inside this container, e.g. apt-get installs; you get the output). Kinds the user performs or answers: 'instruction' (something only a person can do), 'question' (a decision; offer options). Ask questions rarely: if a sensible choice exists, make it, note the assumption, and continue. The ticket parks until every action is decided; the next worker gets the outcomes.",
     inputSchema: obj(
       {
-        kind: { type: "string", enum: ["network", "resources", "root_command", "ask", "halt"] },
-        why: str("Why you need it, one or two sentences", 5000),
-        host: str("network: hostname or *.suffix", 253),
-        port: { type: "integer", minimum: 1, maximum: 65535 },
-        workerMinutes: { type: "integer", minimum: 1, maximum: 600 },
-        workerTurns: { type: "integer", minimum: 1, maximum: 500 },
-        memoryMb: { type: "integer", minimum: 256, maximum: 65536 },
-        command: str("root_command: the exact shell command, e.g. 'apt-get update && apt-get install -y tree'", 4000),
-        cwd: str("root_command: working directory (default /workspace)", 500),
-        what: str("ask: what you need", 5000),
-        how: str("ask: what the user should do, step by step", 5000),
-        verify: str("ask: how you will check it afterwards", 2000),
-        reason: str("halt: what is wrong", 5000),
-        severity: { type: "string", enum: ["major", "critical"] },
+        summary: str("What you need and why, for the user. One paragraph.", 8000),
+        actions: {
+          type: "array",
+          maxItems: 20,
+          items: {
+            type: "object",
+            properties: {
+              kind: { type: "string", enum: ["network", "resources", "root_script", "instruction", "question"] },
+              host: str("network: hostname or *.suffix", 253),
+              port: { type: "integer", minimum: 1, maximum: 65535 },
+              workerMinutes: { type: "integer", minimum: 1, maximum: 600 },
+              workerTurns: { type: "integer", minimum: 1, maximum: 500 },
+              memoryMb: { type: "integer", minimum: 256, maximum: 65536 },
+              script: str("root_script: the bash to run as root (multi-line is fine)", 20_000),
+              cwd: str("root_script: working directory (default /workspace)", 500),
+              text: str("instruction or question: the text", 5000),
+              options: { type: "array", items: str("question: an option", 200), maxItems: 8 },
+            },
+            required: ["kind"],
+          },
+        },
       },
-      ["kind", "why"],
+      ["summary"],
     ),
-    call: (a) => {
-      const { kind, why, ...rest } = a;
-      return api("POST", `/requests`, { detail: { kind, ...rest }, why });
-    },
+    call: (a) => api("POST", `/requests`, { summary: a.summary, actions: a.actions ?? [] }),
+  },
+  {
+    name: "halt",
+    description: "Stop the whole run after you finish, for a problem that makes continuing pointless or harmful: a security issue, a contradiction that invalidates several tickets, a dependency that cannot be met. Not for ordinary needs; use request for those. Then stop and reply with what you found.",
+    inputSchema: obj({ reason: str("What is wrong", 5000), severity: { type: "string", enum: ["major", "critical"] } }, ["reason", "severity"]),
+    call: (a) => api("POST", `/halt`, { reason: a.reason, severity: a.severity }),
   },
   {
     name: "message",

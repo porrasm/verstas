@@ -4,7 +4,7 @@ import type { Session } from "../core/types.js";
 import type { SessionHub } from "../sessions/hub.js";
 import type { RunTokens } from "../agent-api/agent-api.js";
 import { promises as fs } from "node:fs";
-import { buildSpec, ensureSandboxUp, execInSandbox, healSandbox, proxyLogsSince, runInSandbox, runRootCommand, runSetupScript, writeEnvFile, type SandboxConfig } from "../sandbox/lifecycle.js";
+import { buildSpec, ensureSandboxUp, execInSandbox, healSandbox, proxyLogsSince, runInSandbox, runRootScript, runSetupScript, writeEnvFile, type SandboxConfig } from "../sandbox/lifecycle.js";
 import { now, type SetupResult } from "../core/types.js";
 import { readWorkerStream, RunManager, type Shell, type WorkerDone, type WorkerRunner } from "./run.js";
 import type { Job } from "../worker/worker.js";
@@ -114,9 +114,9 @@ export const ensureSessionSandbox = async (c: RunManagerConfig, session: Session
   const setupPending = session.setupScripts.length > 0 && (recreated || session.setup.length === 0 || session.setup.some((r) => !r.ok));
   if (setupPending) await runSetup(c, session.id);
   if (recreated) {
-    for (const rc of session.rootCommands) {
-      const r = await runRootCommand(c.sandbox, session.id, rc.command, rc.cwd);
-      if (!r.ok) console.warn(`[sandbox ${session.id}] replaying approved root command failed (${r.code}): ${rc.command.slice(0, 120)}`);
+    for (const rc of session.rootScripts) {
+      const r = await runRootScript(c.sandbox, session.id, rc.script, rc.cwd);
+      if (!r.ok) console.warn(`[sandbox ${session.id}] replaying approved root script failed (${r.code}): ${rc.script.slice(0, 120)}`);
     }
   }
 };

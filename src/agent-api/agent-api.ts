@@ -2,10 +2,10 @@ import crypto from "node:crypto";
 import express, { type Request, type Response, type NextFunction } from "express";
 import { z } from "zod";
 import {
+  actionDetailSchema,
   ideaSchema,
   messageSchema,
   now,
-  requestDetailSchema,
   requestSchema,
   ticketIdSchema,
   ticketImportSchema,
@@ -184,29 +184,53 @@ export const createAgentApi = (hub: SessionHub, tokens: RunTokens): express.Expr
   r.post(
     "/requests",
     wrap(async (req, res) => {
-      const { detail, why } = z.object({ detail: requestDetailSchema, why: z.string().min(1).max(5000) }).parse(req.body);
+      const { summary, actions } = z.object({ summary: z.string().min(1).max(8000), actions: z.array(actionDetailSchema).max(20).default([]) }).parse(req.body);
       const h = await hub.get(req.run.sessionId);
       const created = await h.mutate((d) => {
         const request: AgentRequest = requestSchema.parse({
           id: nextId("R", d.inbox.requests),
           ticketId: req.run.currentTicket,
-          detail,
-          why,
+          summary,
+          actions: actions.map((detail, i) => ({ id: `a${i + 1}`, detail, state: "open" })),
           state: "open",
           createdAt: now(),
         });
         const inbox: Inbox = { ...d.inbox, requests: [...d.inbox.requests, request] };
         let board = d.board;
         if (req.run.currentTicket) {
-          board = addNote(board, req.run.currentTicket, "agent", `Request ${request.id} (${detail.kind}): ${why}`);
+          board = addNote(board, req.run.currentTicket, "agent", `Request ${request.id} (${request.actions.map((a) => a.detail.kind).join(", ") || "question"}): ${summary.slice(0, 500)}`);
         }
         return { next: { inbox, board }, result: request };
       });
       res.status(201).json({
         ok: true,
         id: created.id,
-        next: detail.kind === "halt" ? "The run will pause after you finish. Stop now and reply with what you found." : "Stop working on this ticket now and reply with a short status; it will resume when the user answers.",
+        actions: created.actions.map((a) => a.id),
+        next: "Stop working on this ticket now and reply with a short status. The ticket resumes when the user has decided every action; the next worker gets the outcomes.",
       });
+    }),
+  );
+
+  r.post(
+    "/halt",
+    wrap(async (req, res) => {
+      const { reason, severity } = z.object({ reason: z.string().min(1).max(5000), severity: z.enum(["major", "critical"]) }).parse(req.body);
+      const h = await hub.get(req.run.sessionId);
+      const created = await h.mutate((d) => {
+        const request: AgentRequest = requestSchema.parse({
+          id: nextId("R", d.inbox.requests),
+          ticketId: req.run.currentTicket,
+          summary: `Halt (${severity}): ${reason}`,
+          actions: [],
+          halt: { reason, severity },
+          state: "open",
+          createdAt: now(),
+        });
+        let board = d.board;
+        if (req.run.currentTicket) board = addNote(board, req.run.currentTicket, "agent", `Halt requested (${severity}): ${reason.slice(0, 500)}`);
+        return { next: { inbox: { ...d.inbox, requests: [...d.inbox.requests, request] }, board }, result: request };
+      });
+      res.status(201).json({ ok: true, id: created.id, next: "The run pauses after you finish. Stop now and reply with what you found." });
     }),
   );
 

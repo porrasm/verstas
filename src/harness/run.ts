@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
-import { eventSchema, now, runSchema, type Board, type Run, type Session, type Ticket, type TicketState, type VerstasEvent } from "../core/types.js";
+import { eventSchema, now, requestOutcome, runSchema, type Board, type Run, type Session, type Ticket, type TicketState, type VerstasEvent } from "../core/types.js";
 import { addNote, getTicket, hasOpenWork, nextReady, replaceTicket, transition, validateRepos } from "../board/board.js";
 import { writeJsonAtomic } from "../board/store.js";
 import type { SessionHandle, SessionHub } from "../sessions/hub.js";
@@ -145,7 +145,7 @@ export class RunManager {
       if (h.session.caps.preflight && !h.session.preflight?.ok) {
         await setSessionState("checking");
         await status("init check: evaluating the sandbox against the goal and the board");
-        const answers = h.inbox.requests.filter((r) => r.state !== "open" && !r.ticketId).map((r) => `${r.id} (${r.detail.kind}) ${r.state}${r.answer ? `: ${r.answer}` : ""}`);
+        const answers = h.inbox.requests.filter((r) => r.state !== "open" && !r.ticketId).map(requestOutcome);
         const done = await this.runJob(h, run, { role: "preflight", promptText: preflightPrompt(h.session, h.board, answers, "check") }, log, ctl.signal, token);
         addCost(run, done.costUsd);
         await saveRun();
@@ -337,10 +337,10 @@ export class RunManager {
     }
 
     const openForTicket = h.inbox.requests.filter((r) => r.state === "open" && r.ticketId === ticket.id);
-    const halt = openForTicket.find((r) => r.detail.kind === "halt");
+    const halt = openForTicket.find((r) => r.halt);
     if (openForTicket.length) {
       await this.commitInContainer(h, ticket, `${ticket.id} (waiting): ${ticket.title}`);
-      await move("waiting", halt ? `Halt requested: ${halt.detail.kind === "halt" ? halt.detail.reason : ""}` : `Waiting on ${openForTicket.map((r) => `${r.id} (${r.detail.kind})`).join(", ")}`);
+      await move("waiting", halt ? `Halt requested: ${halt.halt?.reason ?? ""}` : `Waiting on ${openForTicket.map((r) => `${r.id} (${r.actions.map((a) => a.detail.kind).join(", ") || "question"})`).join(", ")}`);
       run.currentTicket = undefined;
       return halt ? "halted" : "waiting";
     }
@@ -557,12 +557,11 @@ export const describeBlockers = (board: Board): string => {
     .join("; ");
 };
 
-/** The most recent decided request on this ticket, as text for the next worker. */
+/** The most recent resolved request on this ticket, as the outcome block for the next worker. */
 const latestAnswer = (h: SessionHandle, ticketId: string): string | undefined => {
   const decided = h.inbox.requests.filter((r) => r.ticketId === ticketId && r.state !== "open").sort((a, b) => (b.decidedAt ?? "").localeCompare(a.decidedAt ?? ""));
   const r = decided[0];
-  if (!r) return undefined;
-  return `${r.id} (${r.detail.kind}) was ${r.state}${r.answer ? `: ${r.answer}` : ""}.`;
+  return r ? requestOutcome(r) : undefined;
 };
 
 export const parsePreflight = (text: string): { ok: boolean; summary: string } | null => {

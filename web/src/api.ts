@@ -23,7 +23,14 @@ export type Ticket = {
   updatedAt: string;
 };
 export type Board = { goal: string; tickets: Ticket[] };
-export type AgentRequest = { id: string; ticketId?: string; detail: Record<string, unknown> & { kind: string }; why: string; state: string; answer?: string; createdAt: string };
+export type ActionDetail =
+  | { kind: "network"; host: string; port?: number }
+  | { kind: "resources"; workerMinutes?: number; workerTurns?: number; memoryMb?: number }
+  | { kind: "root_script"; script: string; cwd?: string }
+  | { kind: "instruction"; text: string }
+  | { kind: "question"; text: string; options?: string[] };
+export type RequestAction = { id: string; detail: ActionDetail; state: "open" | "approved" | "declined"; outcome?: string; decidedAt?: string };
+export type AgentRequest = { id: string; ticketId?: string; summary: string; actions: RequestAction[]; halt?: { reason: string; severity: string }; state: "open" | "resolved"; answer?: string; createdAt: string; decidedAt?: string };
 export type Inbox = {
   requests: AgentRequest[];
   messages: { id: string; ticketId?: string; text: string; createdAt: string; read: boolean }[];
@@ -41,7 +48,7 @@ export type Session = {
   allowlist: string[];
   caps: { preflight: boolean; workerMinutes: number; workerTurns: number; runTickets: number; budgetUsd: number; ticketAttempts: number; reviewer: boolean };
   limits: { memory: string; cpus: number; pids: number; workspaceMb: number };
-  rootCommands: { command: string; cwd?: string; at: string; requestId?: string }[];
+  rootScripts: { script: string; cwd?: string; at: string; requestId?: string }[];
   setupScripts: { name: string; description: string; hosts: string[]; note: string; script: string }[];
   setup: { name: string; ok: boolean; code: number; at: string; tail: string }[];
   preflight?: { ok: boolean; at: string; summary: string };

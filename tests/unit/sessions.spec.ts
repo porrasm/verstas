@@ -187,18 +187,26 @@ test("sessionPaths validates the id", () => {
   expect(sessionPaths("/root", "2026-10-03-a").workspace).toBe("/root/2026-10-03-a/workspace");
 });
 
-test("old request kinds are migrated on load", () => {
+test("old request shapes are migrated on load into summary plus actions", () => {
   const old = {
     requests: [
       { id: "R-1", detail: { kind: "install", manager: "apt", packages: ["tree", "jq"] }, why: "x", state: "open", createdAt: "2026-10-03T00:00:00.000Z" },
-      { id: "R-2", detail: { kind: "decision", question: "which cc?" }, why: "x", state: "approved", answer: "11", createdAt: "2026-10-03T00:00:00.000Z" },
-      { id: "R-3", detail: { kind: "network", host: "example.com" }, why: "x", state: "open", createdAt: "2026-10-03T00:00:00.000Z" },
+      { id: "R-2", detail: { kind: "decision", question: "which cc?" }, why: "y", state: "approved", answer: "11", createdAt: "2026-10-03T00:00:00.000Z", decidedAt: "2026-10-03T00:01:00.000Z" },
+      { id: "R-3", detail: { kind: "network", host: "example.com" }, why: "z", state: "denied", createdAt: "2026-10-03T00:00:00.000Z" },
+      { id: "R-4", detail: { kind: "halt", reason: "stop", severity: "critical" }, why: "h", state: "open", createdAt: "2026-10-03T00:00:00.000Z" },
     ],
   };
   const inbox = inboxSchema.parse(migrateInbox(old));
-  expect(inbox.requests.map((r) => r.detail.kind)).toEqual(["root_command", "ask", "network"]);
-  expect(inbox.requests[0]!.detail).toMatchObject({ command: "apt-get update && apt-get install -y --no-install-recommends tree jq" });
-  expect(inbox.requests[1]!.detail).toMatchObject({ what: "which cc?" });
+  expect(inbox.requests.map((r) => [r.id, r.state, r.actions.map((a) => `${a.detail.kind}:${a.state}`).join(","), Boolean(r.halt)])).toEqual([
+    ["R-1", "open", "root_script:open", false],
+    ["R-2", "resolved", "question:approved", false],
+    ["R-3", "resolved", "network:declined", false],
+    ["R-4", "open", "", true],
+  ]);
+  expect(inbox.requests[0]!.actions[0]!.detail).toMatchObject({ script: "apt-get update && apt-get install -y --no-install-recommends tree jq" });
+  expect(inbox.requests[1]!.answer).toBe("11");
+  // Already-new shapes pass through untouched.
+  expect(inboxSchema.parse(migrateInbox(inbox)).requests).toEqual(inbox.requests);
 });
 
 test("setup scripts are copied into the session and their hosts join the allowlist", async () => {

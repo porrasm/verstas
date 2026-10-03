@@ -58,16 +58,16 @@ test("board MCP server speaks JSON-RPC and forwards tool calls with the run toke
     const names = (list.result!.tools as { name: string; inputSchema: { required: string[] } }[]).map((t) => t.name);
     expect(names).toEqual([
       "board_list_tickets", "board_get_ticket", "board_add_note", "board_report", "board_create_ticket",
-      "board_set_priority", "board_add_dep", "request", "message", "idea",
+      "board_set_priority", "board_add_dep", "request", "halt", "message", "idea",
     ]);
 
     const got = await call("tools/call", { name: "board_get_ticket", arguments: { id: "T-1" } });
     expect(got.result).toEqual({ content: [{ type: "text", text: JSON.stringify({ id: "T-1", title: "Schema" }, null, 2) }] });
     expect(seen.at(-1)).toMatchObject({ method: "GET", url: "/agent/tickets/T-1", auth: "Bearer tok-123" });
 
-    const req = await call("tools/call", { name: "request", arguments: { kind: "network", host: "fonts.googleapis.com", why: "fonts" } });
+    const req = await call("tools/call", { name: "request", arguments: { summary: "fonts", actions: [{ kind: "network", host: "fonts.googleapis.com" }] } });
     expect(req.result).toMatchObject({ content: [{ type: "text" }] });
-    expect(JSON.parse(seen.at(-1)!.body)).toEqual({ detail: { kind: "network", host: "fonts.googleapis.com" }, why: "fonts" });
+    expect(JSON.parse(seen.at(-1)!.body)).toEqual({ summary: "fonts", actions: [{ kind: "network", host: "fonts.googleapis.com" }] });
 
     const denied = await call("tools/call", { name: "board_create_ticket", arguments: { title: "x", kind: "feature", spec: "y" } });
     expect(denied.result).toMatchObject({ isError: true, content: [{ type: "text", text: "Error: A worker may not create feature tickets; file an idea instead (HTTP 403)" }] });

@@ -60,7 +60,8 @@ card.
 `/opt/verstas/mcp-server.js` is a dependency-free stdio MCP server exposing
 the board tools: `board_list_tickets`, `board_get_ticket`, `board_add_note`,
 `board_report`, `board_create_ticket`, `board_set_priority`,
-`board_add_dep`, `request`, `message`, `idea`. Each is one call to the
+`board_add_dep`, `request` (summary + actions: network, resources,
+root_script, instruction, question), `halt`, `message`, `idea`. Each is one call to the
 agent API under `/agent/`; the API enforces every rule. A driver that
 speaks MCP can load it with:
 

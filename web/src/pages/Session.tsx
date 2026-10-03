@@ -3,6 +3,7 @@ import {
   api,
   copyText,
   type ApplyResult,
+  type RequestAction,
   fmtAgo,
   fmtDateTime,
   fmtDuration,
@@ -43,12 +44,12 @@ const USER_MOVES: Record<string, string[]> = {
   done: ["ready"],
 };
 
-const REQUEST_LABELS: Record<string, { title: string; yes: string; no: string; tone: string }> = {
-  network: { title: "Wants to reach a host", yes: "Allow host", no: "Deny", tone: "sig" },
-  resources: { title: "Wants more resources", yes: "Apply", no: "Deny", tone: "sig" },
-  root_command: { title: "Wants a command run as root", yes: "Run as root in the box", no: "Decline", tone: "warn" },
-  ask: { title: "Needs something only you can do", yes: "Done, continue", no: "Decline", tone: "sig" },
-  halt: { title: "Stopped itself", yes: "Acknowledge", no: "Dismiss", tone: "warn" },
+const ACTION_LABELS: Record<string, { title: string; yes: string; no: string; tone: string }> = {
+  network: { title: "Allow a host", yes: "Allow", no: "Decline", tone: "sig" },
+  resources: { title: "Change caps", yes: "Apply", no: "Decline", tone: "sig" },
+  root_script: { title: "Run as root in the box", yes: "Run as root", no: "Decline", tone: "warn" },
+  instruction: { title: "For you to do", yes: "Done", no: "Decline", tone: "sig" },
+  question: { title: "A question", yes: "Answer", no: "Skip", tone: "info" },
 };
 
 const PAUSE_REASON: Record<string, string> = {
@@ -206,7 +207,7 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
       const parts = [`Imported ${r.created.length} new`, r.updated.length ? `updated ${r.updated.length}` : ""].filter(Boolean).join(", ");
       setNotice(r.skipped.length ? `${parts}. Skipped: ${r.skipped.map((s) => `${s.title} (${s.reason})`).join("; ")}` : `${parts}.`);
     });
-  const decide = (rid: string, decision: "approve" | "deny", answer: string) => tryAct(decision, () => api("POST", `${base}/requests/${rid}`, { decision, answer: answer || undefined }));
+  const decide = (rid: string, body: { answer?: string; actions?: { id: string; decision: "approve" | "decline"; note?: string }[]; declineAll?: boolean }) => tryAct("deciding", () => api("POST", `${base}/requests/${rid}`, body));
   const openTicket = (tid: string | null) => {
     location.hash = tid ? `#/s/${encodeURIComponent(id)}/t/${encodeURIComponent(tid)}` : `#/s/${encodeURIComponent(id)}`;
   };
@@ -716,39 +717,59 @@ const ConfirmButton = ({ label, confirm, onConfirm, disabled, className }: { lab
 
 // --- requests ---------------------------------------------------------------
 
-const RequestItem = ({ r, onDecide, onOpenTicket }: { r: AgentRequest; onDecide: (rid: string, d: "approve" | "deny", answer: string) => void; onOpenTicket: (tid: string) => void }) => {
+const RequestItem = ({ r, onDecide, onOpenTicket }: { r: AgentRequest; onDecide: (rid: string, body: { answer?: string; actions?: { id: string; decision: "approve" | "decline"; note?: string }[]; declineAll?: boolean }) => void; onOpenTicket: (tid: string) => void }) => {
   const [answer, setAnswer] = useState("");
-  const d = r.detail;
-  const l = REQUEST_LABELS[d.kind] ?? { title: d.kind, yes: "Approve", no: "Deny", tone: "sig" };
+  const [notes, setNotes] = useState<Record<string, string>>({});
+  const open = r.actions.filter((a) => a.state === "open");
+  const kinds = [...new Set(r.actions.map((a) => a.detail.kind))];
+  const one = (a: RequestAction, decision: "approve" | "decline") => onDecide(r.id, { answer: answer || undefined, actions: [{ id: a.id, decision, note: notes[a.id] || undefined }] });
   return (
     <div className="req">
       <div className="head">
-        <span className={`pill ${l.tone}`}>{d.kind.replace("_", " ")}</span>
-        <strong style={{ color: "var(--text)" }}>{l.title}</strong>
+        <span className={`pill ${r.halt ? "warn" : kinds.includes("root_script") ? "warn" : "sig"}`}>{r.halt ? "halt" : kinds.length ? kinds.map((k) => k.replace("_", " ")).join(" · ") : "question"}</span>
+        <strong style={{ color: "var(--text)" }}>{r.halt ? "The agent stopped the run" : `${r.actions.length} action${r.actions.length === 1 ? "" : "s"}, ${open.length} open`}</strong>
         {r.ticketId && <a href="#" onClick={(e) => { e.preventDefault(); onOpenTicket(r.ticketId!); }} className="mono">{r.ticketId}</a>}
         <span title={fmtDateTime(r.createdAt)}>{fmtTime(r.createdAt)}</span>
       </div>
-      {d.kind === "root_command" && (
-        <>
-          <pre className="mono">{String(d.command)}</pre>
-          <div className="muted small">Runs as root inside the session container{d.cwd ? ` in ${String(d.cwd)}` : ""}. Read it first; the output tail goes back to the worker.</div>
-        </>
-      )}
-      {d.kind === "ask" && (
-        <div className="kv">
-          <div><b>Needs</b>{String(d.what)}</div>
-          {d.how ? <div><b>Please</b>{String(d.how)}</div> : null}
-          {d.verify ? <div className="muted"><b>Will verify by</b>{String(d.verify)}</div> : null}
-        </div>
-      )}
-      {d.kind === "network" && <div className="mono">allow {String(d.host)}{d.port ? `:${String(d.port)}` : ""} (HTTPS)</div>}
-      {d.kind === "resources" && <div className="mono small">{["workerMinutes", "workerTurns", "memoryMb"].filter((k) => d[k] !== undefined).map((k) => `${k}: ${String(d[k])}`).join(" · ")}</div>}
-      {d.kind === "halt" && <div className="err">{String(d.severity)}: {String(d.reason)}</div>}
-      <div className="why">{r.why}</div>
-      <textarea placeholder={d.kind === "ask" ? "What you did: paths, decisions, anything the worker needs to continue" : "Note for the worker (optional)"} value={answer} onChange={(e) => setAnswer(e.target.value)} style={{ minHeight: d.kind === "ask" ? 70 : 38 }} />
+      <div className="why" style={{ whiteSpace: "pre-wrap" }}>{r.summary}</div>
+      {r.halt && <div className="err">{r.halt.severity}: {r.halt.reason}</div>}
+      {r.actions.map((a) => {
+        const d = a.detail;
+        const l = ACTION_LABELS[d.kind] ?? { title: d.kind, yes: "Approve", no: "Decline", tone: "sig" };
+        const decided = a.state !== "open";
+        return (
+          <div key={a.id} className={`action ${decided ? "decided" : ""}`}>
+            <div className="row" style={{ gap: 8 }}>
+              <span className={`pill ${l.tone}`}>{a.id} · {d.kind.replace("_", " ")}</span>
+              <span className="muted small">{l.title}</span>
+              {decided && <span className={`pill ${a.state === "approved" ? "good" : "quiet"} end`}>{a.state}</span>}
+            </div>
+            {d.kind === "root_script" && <pre className="mono">{d.script}</pre>}
+            {d.kind === "root_script" && !decided && <div className="muted small">Runs as root inside the session container{d.cwd ? ` in ${d.cwd}` : ""}. Read every line; the output tail goes back to the worker.</div>}
+            {d.kind === "network" && <div className="mono">allow {d.host}{d.port ? `:${d.port}` : ""} (HTTPS)</div>}
+            {d.kind === "resources" && <div className="mono small">{(["workerMinutes", "workerTurns", "memoryMb"] as const).filter((k) => d[k] !== undefined).map((k) => `${k}: ${String(d[k])}`).join(" · ")}</div>}
+            {(d.kind === "instruction" || d.kind === "question") && <div style={{ whiteSpace: "pre-wrap" }}>{d.text}</div>}
+            {d.kind === "question" && d.options && !decided && (
+              <div className="row" style={{ gap: 6 }}>
+                {d.options.map((o) => <button key={o} className="sm" onClick={() => onDecide(r.id, { answer: answer || undefined, actions: [{ id: a.id, decision: "approve", note: o }] })}>{o}</button>)}
+              </div>
+            )}
+            {decided && a.outcome && <pre className="mono small" style={{ whiteSpace: "pre-wrap", maxHeight: 160, overflow: "auto" }}>{a.outcome}</pre>}
+            {!decided && (
+              <div className="row">
+                <input placeholder={d.kind === "question" ? "your answer (or pick an option above)" : d.kind === "instruction" ? "what you did (optional)" : "note (optional)"} value={notes[a.id] ?? ""} onChange={(e) => setNotes({ ...notes, [a.id]: e.target.value })} />
+                <button className={l.tone === "warn" ? "warn sm" : "pri sm"} onClick={() => one(a, "approve")} disabled={d.kind === "question" && !(notes[a.id] ?? "").trim()}>{l.yes}</button>
+                <button className="sm" onClick={() => one(a, "decline")}>{l.no}</button>
+              </div>
+            )}
+          </div>
+        );
+      })}
+      <textarea placeholder="Answer for the whole request (optional): context, decisions, anything the worker should know" value={answer} onChange={(e) => setAnswer(e.target.value)} style={{ minHeight: 48 }} />
       <div className="row">
-        <button className={l.tone === "warn" ? "warn" : "pri"} onClick={() => onDecide(r.id, "approve", answer)}>{l.yes}</button>
-        <button onClick={() => onDecide(r.id, "deny", answer)}>{l.no}</button>
+        {r.actions.length === 0 && <button className="pri" onClick={() => onDecide(r.id, { answer: answer || undefined, actions: [] })} disabled={!r.halt && !answer.trim()}>{r.halt ? "Acknowledge" : "Answer"}</button>}
+        {r.actions.length > 0 && answer.trim() && open.length > 0 && <button onClick={() => onDecide(r.id, { answer })}>Save answer</button>}
+        {open.length > 0 && <button className="quiet sm end" onClick={() => onDecide(r.id, { answer: answer || undefined, declineAll: true })}>Decline all</button>}
       </div>
     </div>
   );
@@ -804,7 +825,7 @@ const TicketCard = ({ t, doneIds, request, active, open, onOpen, onRetry, onAppr
           {t.diff && <span className="pill quiet mono">+{t.diff.added} −{t.diff.removed}</span>}
         </div>
       )}
-      {t.state === "waiting" && <div className="why">Waiting for you: {request ? REQUEST_LABELS[request.detail.kind]?.title.toLowerCase() ?? request.detail.kind : "an answer"}</div>}
+      {t.state === "waiting" && <div className="why">Waiting for you: {request ? `${request.actions.filter((a) => a.state === "open").length || "an"} open ${request.actions.length ? "action" : "question"}${request.actions.filter((a) => a.state === "open").length === 1 ? "" : "s"}` : "an answer"}</div>}
       {t.state === "blocked" && lastNote && <div className="why warn">{lastNote.text.slice(0, 160)}{lastNote.text.length > 160 ? "…" : ""}</div>}
       {t.state === "blocked" && (
         <div className="act" onClick={(e) => e.stopPropagation()}>
@@ -1065,8 +1086,8 @@ const InboxPanel = ({ inbox, onRead, onPromote, onOpenTicket }: { inbox: Inbox; 
           <div className="decided">
             {decided.map((r) => (
               <div key={r.id}>
-                <span className={`pill ${r.state === "approved" ? "good" : "quiet"}`}>{r.state}</span>
-                <span>{r.detail.kind.replace("_", " ")}</span>
+                <span className={`pill ${r.actions.some((a) => a.state === "approved") ? "good" : "quiet"}`}>{r.actions.length ? `${r.actions.filter((a) => a.state === "approved").length}/${r.actions.length} approved` : r.halt ? "halt" : "answered"}</span>
+                <span>{[...new Set(r.actions.map((a) => a.detail.kind.replace("_", " ")))].join(", ") || (r.halt ? "halt" : "question")}</span>
                 {r.ticketId && <a href="#" className="mono" onClick={(e) => { e.preventDefault(); onOpenTicket(r.ticketId!); }}>{r.ticketId}</a>}
                 <span className="faint" title={fmtDateTime(r.createdAt)}>{fmtAgo(r.createdAt)}</span>
                 <span className="wrap" style={{ flexBasis: "100%", color: "var(--text-2)" }}>{requestSummary(r)}{r.answer ? <span className="faint"> · {r.answer.split("\n")[0]}</span> : null}</span>
@@ -1079,21 +1100,7 @@ const InboxPanel = ({ inbox, onRead, onPromote, onOpenTicket }: { inbox: Inbox; 
   );
 };
 
-const requestSummary = (r: AgentRequest): string => {
-  const d = r.detail;
-  switch (d.kind) {
-    case "network":
-      return `allow ${String(d.host)}${d.port ? `:${String(d.port)}` : ""}`;
-    case "root_command":
-      return String(d.command).split("\n")[0]!.slice(0, 90);
-    case "ask":
-      return String(d.what).slice(0, 120);
-    case "halt":
-      return `${String(d.severity)}: ${String(d.reason)}`.slice(0, 120);
-    default:
-      return r.why.slice(0, 120);
-  }
-};
+const requestSummary = (r: AgentRequest): string => r.summary.split("\n")[0]!.slice(0, 120);
 
 // --- settings --------------------------------------------------------------
 
@@ -1171,7 +1178,7 @@ const SessionSettings = ({ session, onSave }: { session: Session; onSave: (patch
           <span className={`state ${state === "saved" ? "ok" : state === "error" ? "err" : ""}`}>{state === "saving" ? "Saving…" : state === "saved" ? "Saved" : state === "error" ? msg : state === "dirty" ? "Unsaved changes" : ""}</span>
         </div>
         <div className="small muted">
-          Root commands approved so far: {session.rootCommands.length ? session.rootCommands.map((c) => <code key={c.at} style={{ marginRight: 6 }}>{c.command.slice(0, 60)}</code>) : "none"}. They are replayed if the container is recreated.
+          Root scripts approved so far: {session.rootScripts.length ? session.rootScripts.map((c) => <code key={c.at} style={{ marginRight: 6 }}>{c.script.split("\n")[0]!.slice(0, 60)}</code>) : "none"}. They are replayed if the container is recreated.
         </div>
         <div className="small faint mono">{session.image} · {session.id}</div>
       </div>
