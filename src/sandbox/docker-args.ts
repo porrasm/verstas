@@ -55,7 +55,10 @@ export const AGENT_HOME = "/home/agent";
 
 export type SandboxSpec = {
   sessionId: string;
+  /** The session's base image (part of the fingerprint). */
   image: string;
+  /** What the container is created from: the session snapshot when usable, else `image`. */
+  runImage?: string;
   /** Host path of <session>/workspace, bind-mounted at /workspace. */
   workspaceHostPath: string;
   /** Host path of <session>/proxy/, mounted read-only into the proxy; holds allowlist.json. */
@@ -77,6 +80,19 @@ export type SandboxSpec = {
 };
 
 const label = (sessionId: string): string[] => ["--label", `${LABEL_KEY}=${sessionId}`];
+
+/** The image a confirmed environment is committed to. */
+export const snapshotImageName = (sessionId: string): string => `verstas-session-${sessionId}:latest`;
+
+/** docker commit of the session container, labelled so cleanup finds every version. Volumes and bind mounts are not included. */
+export const commitArgs = (sessionId: string): string[] => [
+  "commit",
+  "--change",
+  `LABEL ${LABEL_KEY}=${sessionId}`,
+  containerName(sessionId),
+  snapshotImageName(sessionId),
+];
+export const listSnapshotImagesArgs = (sessionId: string): string[] => ["image", "ls", "-q", "--no-trunc", "--filter", `label=${LABEL_KEY}=${sessionId}`];
 
 /** Idempotent: creating an existing volume is a no-op. */
 export const createHomeVolumeArgs = (sessionId: string): string[] => ["volume", "create", ...label(sessionId), homeVolumeName(sessionId)];
@@ -205,7 +221,7 @@ export const runSessionArgs = (spec: SandboxSpec): string[] => [
   `HOME=${AGENT_HOME}`,
   "-e",
   "TMPDIR=/tmp",
-  spec.image,
+  spec.runImage ?? spec.image,
   "sleep",
   "infinity",
 ];

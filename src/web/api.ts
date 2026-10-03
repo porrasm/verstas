@@ -29,7 +29,7 @@ import type { SessionHub } from "../sessions/hub.js";
 import { createSession, deleteSessionDir, listSessions, sessionPaths } from "../sessions/sessions.js";
 import { applyBundle, ApplyError } from "../sessions/apply.js";
 import type { SessionHandle } from "../sessions/hub.js";
-import { removeSandbox, runRootScript, sandboxStatus, stopSandbox, type SandboxConfig } from "../sandbox/lifecycle.js";
+import { removeSandbox, runRootScript, sandboxStatus, snapshotSandbox, stopSandbox, type SandboxConfig } from "../sandbox/lifecycle.js";
 import { dockerAvailable } from "../sandbox/docker.js";
 import type { RunManager } from "../harness/run.js";
 import { dockerShell, ensureSessionSandbox, runSetup, type RunManagerConfig } from "../harness/docker-worker.js";
@@ -553,9 +553,28 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
         res.status(409).json({ error: "The setup worker has not reported the environment ready. Run setup again, or clear the requirements to skip the setup phase." });
         return;
       }
-      await h.mutate((docs) => ({ next: { session: { ...docs.session, readiness: { ...docs.session.readiness!, confirmedAt: now() }, state: docs.session.state === "setup" ? "created" : docs.session.state } } }));
+      // Commit the box as it is now, so a recreate starts from a set-up environment. Best effort: a failed snapshot leaves the recipe as the fallback.
+      let snapshot: { image: string; baseImageId: string } | undefined;
+      let snapshotError: string | undefined;
+      if (d.runs.status(h.id)) snapshotError = "a run is active; no snapshot taken";
+      else if ((await sandboxStatus(d.sandbox, h.id).catch(() => null))?.container === "running") {
+        snapshot = await snapshotSandbox(d.sandbox, h.session).catch((e: Error) => {
+          snapshotError = e.message;
+          return undefined;
+        });
+      } else snapshotError = "the container is not running; no snapshot taken";
+      await h.mutate((docs) => ({
+        next: {
+          session: {
+            ...docs.session,
+            readiness: { ...docs.session.readiness!, confirmedAt: now() },
+            snapshot: snapshot ? { ...snapshot, at: now() } : docs.session.snapshot,
+            state: docs.session.state === "setup" ? "created" : docs.session.state,
+          },
+        },
+      }));
       if (start) await d.runs.start(h.id);
-      res.json({ ok: true });
+      res.json({ ok: true, snapshot: snapshot?.image ?? null, snapshotError });
     }),
   );
 

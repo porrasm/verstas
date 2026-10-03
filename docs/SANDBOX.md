@@ -260,8 +260,19 @@ image, limits, mounts or sandbox flags change (the flags are versioned in
 ## Cleanup
 
 Everything a session creates is labelled `verstas.session=<id>`: the
-network, the proxy, the session container and the home volume. Deleting a
-session stops and removes all four, then removes the directory. `verstas doctor` lists
+network, the proxy, the session container, the home volume and the
+snapshot images. Deleting a session removes all of them, then the
+directory.
+
+## Snapshots
+
+When you confirm the environment, the host commits the session container
+to `verstas-session-<id>:latest` (`docker commit`; the workspace bind mount
+and the home volume are not part of it). A recreated container starts from
+that image while the base image is the one it was taken from; otherwise the
+recipe is replayed on the base image. The snapshot holds whatever the agent
+installed, so it is exactly as trusted as the session: it is never used for
+another session and never pushed anywhere. `verstas doctor` lists
 labelled resources without a matching directory and offers to remove them.
 
 ## Residual risks, stated plainly

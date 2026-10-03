@@ -7,8 +7,11 @@ import {
   PROXY_SPEC_LABEL,
   SANDBOX_VERSION,
   SPEC_LABEL,
+  commitArgs,
   connectProxyToBridgeArgs,
   createHomeVolumeArgs,
+  listSnapshotImagesArgs,
+  snapshotImageName,
   rmVolumeArgs,
   containerName,
   createNetworkArgs,
@@ -72,10 +75,11 @@ export const writeEnvFile = async (file: string, env: Record<string, string>): P
   await fs.writeFile(file, body + "\n", { mode: 0o600 });
 };
 
-export const buildSpec = (cfg: SandboxConfig, session: Session, paths: SessionPaths, envFileHostPath: string): SandboxSpec => {
+export const buildSpec = (cfg: SandboxConfig, session: Session, paths: SessionPaths, envFileHostPath: string, runImage?: string): SandboxSpec => {
   const spec: SandboxSpec = {
   sessionId: session.id,
   image: session.image,
+  runImage,
   workspaceHostPath: paths.workspace,
   allowlistDirHostPath: paths.proxyDir,
   proxyDistHostPath: cfg.proxyDistHostPath,
@@ -167,7 +171,43 @@ export const removeSandbox = async (cfg: SandboxConfig, sessionId: string, opts:
   await cfg.docker.run(rmArgs(containerName(sessionId)), { allowFailure: true });
   await cfg.docker.run(rmArgs(proxyName(sessionId)), { allowFailure: true });
   await cfg.docker.run(rmNetworkArgs(sessionId), { allowFailure: true });
-  if (opts.everything) await cfg.docker.run(rmVolumeArgs(sessionId), { allowFailure: true });
+  if (opts.everything) {
+    await cfg.docker.run(rmVolumeArgs(sessionId), { allowFailure: true });
+    await removeSnapshots(cfg, sessionId);
+  }
+};
+
+const imageId = async (docker: DockerRunner, ref: string): Promise<string | null> => {
+  const r = await docker.run(["image", "inspect", "--format", "{{.Id}}", ref], { allowFailure: true, timeoutMs: 15_000 });
+  return r.code === 0 ? r.stdout.trim() : null;
+};
+
+/**
+ * Commits the running session container to verstas-session-<id>:latest and
+ * returns what to record on the session. Older snapshot images of the
+ * session are removed when nothing uses them.
+ */
+export const snapshotSandbox = async (cfg: SandboxConfig, session: Session): Promise<{ image: string; baseImageId: string }> => {
+  const baseImageId = await imageId(cfg.docker, session.image);
+  if (!baseImageId) throw new Error(`Base image ${session.image} not found`);
+  const before = (await cfg.docker.run(listSnapshotImagesArgs(session.id), { allowFailure: true })).stdout.split("\n").filter(Boolean);
+  await cfg.docker.run(commitArgs(session.id), { timeoutMs: 15 * 60_000 });
+  const now = await imageId(cfg.docker, snapshotImageName(session.id));
+  for (const old of before) if (old !== now) await cfg.docker.run(["image", "rm", old], { allowFailure: true });
+  return { image: snapshotImageName(session.id), baseImageId };
+};
+
+/** The snapshot to create the container from, or undefined when there is none or the base image changed since. */
+export const usableSnapshot = async (cfg: SandboxConfig, session: Session): Promise<string | undefined> => {
+  const snap = session.snapshot;
+  if (!snap) return undefined;
+  const [base, img] = await Promise.all([imageId(cfg.docker, session.image), imageId(cfg.docker, snap.image)]);
+  return base && img && base === snap.baseImageId ? snap.image : undefined;
+};
+
+export const removeSnapshots = async (cfg: SandboxConfig, sessionId: string): Promise<void> => {
+  const ids = (await cfg.docker.run(listSnapshotImagesArgs(sessionId), { allowFailure: true })).stdout.split("\n").filter(Boolean);
+  for (const id of ids) await cfg.docker.run(["image", "rm", "-f", id], { allowFailure: true });
 };
 
 /** Starts a process in the session container as the agent user; the caller owns the child. */

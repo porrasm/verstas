@@ -4,7 +4,7 @@ import type { Session } from "../core/types.js";
 import type { SessionHub } from "../sessions/hub.js";
 import type { RunTokens } from "../agent-api/agent-api.js";
 import { promises as fs } from "node:fs";
-import { buildSpec, ensureSandboxUp, execInSandbox, healSandbox, proxyLogsSince, runInSandbox, runRootScript, runSetupScript, writeEnvFile, type SandboxConfig } from "../sandbox/lifecycle.js";
+import { buildSpec, ensureSandboxUp, execInSandbox, healSandbox, proxyLogsSince, runInSandbox, runRootScript, runSetupScript, usableSnapshot, writeEnvFile, type SandboxConfig } from "../sandbox/lifecycle.js";
 import { now, type SetupResult } from "../core/types.js";
 import { writeAllowlist } from "../sessions/sessions.js";
 import { readWorkerStream, RunManager, type Shell, type WorkerDone, type WorkerRunner } from "./run.js";
@@ -114,15 +114,20 @@ export const ensureSessionSandbox = async (c: RunManagerConfig, session: Session
   const h = await c.hub.get(session.id);
   // Sessions created before the proxy directory existed get it here.
   await writeAllowlist(h.paths, session.allowlist);
-  const { recreated } = await ensureSandboxUp(c.sandbox, buildSpec(c.sandbox, session, h.paths, envFile));
+  // sudo logs here (see the image's sudoers); it must exist before the first sudo, including a recipe replay.
+  await fs.mkdir(path.join(h.paths.workspace, ".verstas", "logs"), { recursive: true });
+  // A confirmed environment was committed to an image: a recreated box starts from it, already set up.
+  const snapshot = await usableSnapshot(c.sandbox, session);
+  const { recreated } = await ensureSandboxUp(c.sandbox, buildSpec(c.sandbox, session, h.paths, envFile, snapshot));
+  const fromSnapshot = recreated && Boolean(snapshot);
   // Setup scripts run on a fresh container, and also when a previous setup never completed.
-  const setupPending = session.setupScripts.length > 0 && (recreated || session.setup.length === 0 || session.setup.some((r) => !r.ok));
+  const setupPending = !fromSnapshot && session.setupScripts.length > 0 && (recreated || session.setup.length === 0 || session.setup.some((r) => !r.ok));
   if (setupPending) await runSetup(c, session.id);
   // Services the agent registered with svc come back after a container restart; a no-op when they run.
   const up = await runInSandbox(c.sandbox, session.id, ["svc", "up"], { allowFailure: true, timeoutMs: 180_000 });
   if (up.code !== 0 && up.stdout + up.stderr) console.warn(`[sandbox ${session.id}] svc up: ${(up.stdout + up.stderr).trim().slice(-500)}`);
-  if (recreated) await replayRecipe(c, session.id);
-  if (recreated) {
+  if (recreated && !fromSnapshot) await replayRecipe(c, session.id);
+  if (recreated && !fromSnapshot) {
     for (const rc of session.rootScripts) {
       const r = await runRootScript(c.sandbox, session.id, rc.script, rc.cwd);
       if (!r.ok) console.warn(`[sandbox ${session.id}] replaying approved root script failed (${r.code}): ${rc.script.slice(0, 120)}`);

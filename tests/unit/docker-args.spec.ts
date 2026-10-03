@@ -113,3 +113,11 @@ test("setup scripts and approved root scripts are fed on stdin to bash -e as roo
   expect(setupScriptArgs("nuppi-mvp")).toEqual(["exec", "-i", "-u", "root", "-w", "/workspace", "-e", "DEBIAN_FRONTEND=noninteractive", "verstas-nuppi-mvp", "bash", "-e", "-s"]);
   expect(setupScriptArgs("nuppi-mvp", "/tmp").slice(4, 6)).toEqual(["-w", "/tmp"]);
 });
+
+test("a snapshot is a labelled commit of the session container, and the container can be created from it", async () => {
+  const { commitArgs, listSnapshotImagesArgs, snapshotImageName } = await import("../../src/sandbox/docker-args.js");
+  expect(commitArgs("nuppi-mvp")).toEqual(["commit", "--change", "LABEL verstas.session=nuppi-mvp", "verstas-nuppi-mvp", "verstas-session-nuppi-mvp:latest"]);
+  expect(listSnapshotImagesArgs("nuppi-mvp")).toEqual(["image", "ls", "-q", "--no-trunc", "--filter", "label=verstas.session=nuppi-mvp"]);
+  const args = runSessionArgs({ ...spec, runImage: snapshotImageName("nuppi-mvp") });
+  expect(args.slice(-3)).toEqual(["verstas-session-nuppi-mvp:latest", "sleep", "infinity"]);
+});

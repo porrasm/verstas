@@ -376,6 +376,12 @@ export const sessionSchema = z.object({
   prompts: z
     .array(z.object({ at: z.string(), runId: z.number().int(), text: z.string().max(20_000), reply: z.string().max(8000).default(""), stopReason: z.string().default("") }))
     .default([]),
+  /**
+   * The box as it was when you confirmed the environment, committed to an
+   * image. A recreated container starts from it instead of replaying the
+   * setup, as long as the base image has not changed since.
+   */
+  snapshot: z.object({ image: z.string(), at: z.string(), baseImageId: z.string() }).optional(),
   /** The setup worker's last verdict on the requirements, and whether you confirmed it. */
   readiness: readinessSchema.optional(),
   /** Per-session auto-approval rules (P2); present in the schema so files stay forward-compatible. */
