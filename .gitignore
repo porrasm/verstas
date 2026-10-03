@@ -1,0 +1,12 @@
+node_modules/
+dist/
+*.tsbuildinfo
+.env
+.env.*
+*.log
+.DS_Store
+test-results/
+playwright-report/
+.last-run.json
+# Local data: the sessions root is configured, never inside the repo
+/data/

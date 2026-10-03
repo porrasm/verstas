@@ -1,0 +1,34 @@
+{
+  "name": "verstas",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Verstas: a local, dockerized workshop where agents work through a kanban board on fresh clones of your repositories",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "dev": "tsx watch src/main.ts",
+    "start": "node dist/src/main.js",
+    "test": "npm run test:unit",
+    "test:unit": "playwright test --project=unit",
+    "image:build": "docker build -t verstas-devbox:local images/devbox"
+  },
+  "dependencies": {
+    "adm-zip": "^0.6.1",
+    "express": "^4.21.0",
+    "ws": "^8.18.0",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.50.0",
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.10.0",
+    "@types/ws": "^8.5.13",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  }
+}
