@@ -73,6 +73,7 @@ test("the proxy is read-only, unprivileged, and only mounts its code and the all
   expect(pairs("--user")).toEqual(["1000:1000"]);
   expect(pairs("--network")).toEqual(["verstas-nuppi-mvp"]);
   expect(pairs("--network-alias")).toEqual(["proxy"]);
+  expect(pairs("--restart")).toEqual(["on-failure:5"]);
   expect(pairs("-v")).toEqual([
     `${spec.proxyDistHostPath}:/proxy:ro`,
     `${spec.allowlistHostPath}:/allowlist.json:ro`,

@@ -3,7 +3,7 @@ import path from "node:path";
 import type { Session } from "../core/types.js";
 import type { SessionHub } from "../sessions/hub.js";
 import type { RunTokens } from "../agent-api/agent-api.js";
-import { buildSpec, ensureSandboxUp, execInSandbox, installInSandbox, proxyLogsSince, runInSandbox, writeEnvFile, type SandboxConfig } from "../sandbox/lifecycle.js";
+import { buildSpec, ensureSandboxUp, execInSandbox, healSandbox, installInSandbox, proxyLogsSince, runInSandbox, writeEnvFile, type SandboxConfig } from "../sandbox/lifecycle.js";
 import { readWorkerStream, RunManager, type Shell, type WorkerDone, type WorkerRunner } from "./run.js";
 import type { Job } from "../worker/worker.js";
 
@@ -121,6 +121,7 @@ export const createDockerRunManager = (c: RunManagerConfig): RunManager =>
     worker: (sessionId) => dockerWorker(c.sandbox, sessionId),
     proxyDenials: (sessionId, since) => proxyDenials(c.sandbox, sessionId)(since),
     ensureSandbox: (session, envFile, token) => ensureSessionSandbox(c, session, envFile, token),
+    healSandbox: (sessionId) => healSandbox(c.sandbox, sessionId),
   });
 
 export const proxyDistPath = (distRoot: string): string => path.join(distRoot, "src", "proxy");

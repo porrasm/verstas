@@ -41,6 +41,8 @@ export type RunDeps = {
   worker: (sessionId: string) => WorkerRunner;
   /** Called once before the loop; brings the sandbox up with the env file at the given path. */
   ensureSandbox: (session: Session, envFile: string, token: string) => Promise<void>;
+  /** Called before every ticket: starts a stopped proxy or container; never recreates. */
+  healSandbox?: (sessionId: string) => Promise<string[]>;
   agentApiUrl: string;
   /** Proxy "denied" lines since a timestamp, for the log. */
   proxyDenials?: (sessionId: string, since: string) => Promise<{ host: string; port: number }[]>;
@@ -165,6 +167,10 @@ export class RunManager {
           run.state = "finished";
           await status(`run ticket cap of ${h.session.caps.runTickets} reached`);
           break;
+        }
+        if (d.healSandbox) {
+          const healed = await d.healSandbox(h.id).catch((e: Error) => [`heal failed: ${e.message}`]);
+          for (const line of healed) await status(line);
         }
         const ticket = nextReady(h.board);
         if (!ticket) {
@@ -375,6 +381,7 @@ export class RunManager {
       systemPromptFile: `/workspace/${WORKSPACE_FILES}/system.md`,
       caps: { minutes: h.session.caps.workerMinutes, turns: h.session.caps.workerTurns, budgetUsd: h.session.caps.budgetUsd },
       mcpConfigFile: `/workspace/${WORKSPACE_FILES}/mcp.json`,
+      model: h.session.model || undefined,
     };
     if (DEBUG) spec.debug = true;
     await fs.writeFile(path.join(dir, "job.json"), JSON.stringify(spec, null, 2));

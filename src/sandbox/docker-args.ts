@@ -68,8 +68,10 @@ export const runProxyArgs = (spec: SandboxSpec): string[] => [
   "256m",
   "--cpus",
   "0.5",
+  // Our own stateless code: if it ever dies, come back, because the session
+  // has no egress without it. The session container keeps --restart no.
   "--restart",
-  "no",
+  "on-failure:5",
   "--init",
   "-v",
   `${spec.proxyDistHostPath}:/proxy:ro`,

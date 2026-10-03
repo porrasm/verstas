@@ -91,6 +91,7 @@ export type CreateSessionInput = {
   zips: { name: string; file: string }[];
   allowlist?: string[];
   image: string;
+  model?: string;
   caps?: Partial<Session["caps"]>;
   limits?: Partial<Session["limits"]>;
 };
@@ -121,6 +122,7 @@ export const createSession = async (root: string, input: CreateSessionInput): Pr
     goal: input.goal,
     createdAt: now(),
     image: input.image,
+    model: input.model?.trim() || undefined,
     allowlist: input.allowlist ?? [...DEFAULT_ALLOWLIST],
     caps: input.caps ?? {},
     limits: input.limits ?? {},

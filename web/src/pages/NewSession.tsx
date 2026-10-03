@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, fmtBytes, upload, type Config } from "../api";
+import { api, fmtBytes, MODEL_CHOICES, upload, type Config } from "../api";
 
 type RepoPick = { target: string; branch: string; branches: string[]; on: boolean };
 
@@ -14,6 +14,7 @@ export const NewSessionPage = () => {
   const [caps, setCaps] = useState({ workerMinutes: 25, workerTurns: 60, runTickets: 40, budgetUsd: 50, ticketAttempts: 2, reviewer: true });
   const [limits, setLimits] = useState({ memory: "4g", cpus: 2, workspaceMb: 20000 });
   const [plan, setPlan] = useState(false);
+  const [model, setModel] = useState("claude-sonnet-5-5");
   const [busy, setBusy] = useState("");
   const [err, setErr] = useState("");
 
@@ -55,6 +56,7 @@ export const NewSessionPage = () => {
         allowlist: allowlist.split(/\n/).map((s) => s.trim()).filter(Boolean),
         caps,
         limits,
+        model: model.trim() || undefined,
         board: board.trim() || undefined,
         plan,
       });
@@ -74,7 +76,14 @@ export const NewSessionPage = () => {
       {err && <div className="err">{err}</div>}
       <div className="two">
         <label>Name<input id="name" value={name} onChange={(e) => setName(e.target.value)} placeholder="Nuppi MVP" /></label>
+        <label>Model for every worker (empty = the token's default)
+          <input id="model" list="models" value={model} onChange={(e) => setModel(e.target.value)} placeholder="claude-sonnet-5-5" />
+          <datalist id="models">{MODEL_CHOICES.map((m) => <option key={m} value={m} />)}</datalist>
+        </label>
+      </div>
+      <div className="two">
         <label>Image<input id="image" value={cfg.devboxImage} readOnly /></label>
+        <span />
       </div>
       <label>Goal (the planner turns this into tickets, unless you paste a board below)
         <textarea id="goal" value={goal} onChange={(e) => setGoal(e.target.value)} placeholder="Build the Nuppi desktop app MVP: layout editor, mapping engine, mock MIDI output…" />

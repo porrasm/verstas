@@ -61,6 +61,7 @@ reload();
 setInterval(reload, RELOAD_POLL_MS).unref();
 
 const server = http.createServer((req, res) => {
+  req.socket.on("error", (e) => log({ kind: "client_error", error: e.message }));
   const url = req.url ?? "";
   const decision = decideHttp(AGENT_API, url);
   if (!decision.allow) {
@@ -96,6 +97,10 @@ const server = http.createServer((req, res) => {
 
 server.on("connect", (req, socketRaw, head) => {
   const socket = socketRaw as net.Socket;
+  // A client may reset the connection at any point (curl does, right after a
+  // 403). Without a listener that is an unhandled 'error' and the process
+  // dies, taking the whole session's egress with it.
+  socket.on("error", (e) => log({ kind: "client_error", error: e.message }));
   const [hostRaw = "", portRaw = ""] = (req.url ?? "").split(":");
   const port = Number(portRaw);
   const decision = Number.isInteger(port) ? decideConnect(allowlist, hostRaw, port) : { allow: false as const, reason: "bad port" };
@@ -135,8 +140,13 @@ server.on("connect", (req, socketRaw, head) => {
 });
 
 server.on("clientError", (_e, socket) => {
+  socket.on("error", () => undefined);
   socket.end("HTTP/1.1 400 Bad Request\r\n\r\n");
 });
+
+// Last line of defence: a proxy must keep serving. Log and carry on.
+process.on("uncaughtException", (e) => log({ kind: "uncaught", error: e.message, stack: String(e.stack).slice(0, 500) }));
+process.on("unhandledRejection", (e) => log({ kind: "unhandled_rejection", error: String(e) }));
 
 server.listen(PORT, "0.0.0.0", () => {
   log({ kind: "listening", port: PORT, agentApi: AGENT_API ? `${AGENT_API.host}:${AGENT_API.port}` : null });

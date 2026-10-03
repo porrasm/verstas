@@ -106,6 +106,22 @@ export const ensureSandboxUp = async (cfg: SandboxConfig, spec: SandboxSpec, opt
   }
 };
 
+/** Starts whatever is stopped, recreates nothing; returns what it did, for the log. */
+export const healSandbox = async (cfg: SandboxConfig, sessionId: string): Promise<string[]> => {
+  const st = await sandboxStatus(cfg, sessionId);
+  const did: string[] = [];
+  if (st.proxy === "stopped") {
+    await cfg.docker.run(["start", proxyName(sessionId)]);
+    did.push("proxy was stopped; started it again");
+  }
+  if (st.container === "stopped") {
+    await cfg.docker.run(["start", containerName(sessionId)]);
+    did.push("session container was stopped; started it again");
+  }
+  if (st.proxy === "absent" || st.container === "absent" || !st.network) throw new Error(`sandbox is missing parts (network ${st.network}, proxy ${st.proxy}, container ${st.container}); stop and start the run to recreate it`);
+  return did;
+};
+
 export const stopSandbox = async (cfg: SandboxConfig, sessionId: string): Promise<void> => {
   await cfg.docker.run(stopArgs(containerName(sessionId)), { allowFailure: true, timeoutMs: 30_000 });
   await cfg.docker.run(stopArgs(proxyName(sessionId)), { allowFailure: true, timeoutMs: 30_000 });

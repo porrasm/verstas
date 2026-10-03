@@ -35,6 +35,7 @@ export type Session = {
   goal: string;
   createdAt: string;
   image: string;
+  model?: string;
   repos: { name: string; sourcePath: string; branch: string; runBranch: string }[];
   attachments: { name: string; dir: string; bytes: number; skipped: string[] }[];
   allowlist: string[];
@@ -130,3 +131,6 @@ export const fmtTime = (iso: string): string => {
 };
 export const fmtUsd = (n?: number): string => (n === undefined ? "" : `$${n.toFixed(2)}`);
 export const fmtBytes = (n: number): string => (n > 1e9 ? `${(n / 1e9).toFixed(1)} GB` : n > 1e6 ? `${(n / 1e6).toFixed(1)} MB` : `${Math.round(n / 1e3)} kB`);
+
+/** Models offered in the UI; any other id or alias can be typed. */
+export const MODEL_CHOICES = ["claude-sonnet-5-5", "claude-opus-5-5", "claude-fable-5-1", "claude-haiku-4-5-20251001", "sonnet", "opus", "haiku"];

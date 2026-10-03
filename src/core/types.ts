@@ -266,6 +266,8 @@ export const sessionSchema = z.object({
   goal: z.string().max(20_000),
   createdAt: z.string(),
   image: z.string().min(1).default("verstas-devbox:local"),
+  /** Model for every worker (`claude --model`); empty means the token's default. Aliases like "sonnet" work. */
+  model: z.string().max(100).optional(),
   repos: z.array(repoSpecSchema).default([]),
   attachments: z.array(attachmentSchema).default([]),
   allowlist: z.array(z.string()).default([]),

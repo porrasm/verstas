@@ -207,6 +207,7 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
     repos: z.array(z.object({ target: z.string(), branch: z.string().optional(), name: z.string().optional() })).default([]),
     uploads: z.array(z.object({ id: z.string().regex(/^[a-f0-9]{16}$/), name: z.string() })).default([]),
     allowlist: z.array(z.string()).optional(),
+    model: z.string().max(100).optional(),
     caps: capsSchema.partial().optional(),
     limits: limitsSchema.partial().optional(),
     board: z.string().optional(),
@@ -514,9 +515,18 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
   api.put(
     "/sessions/:id/caps",
     wrap(async (req, res) => {
-      const body = z.object({ caps: capsSchema.partial().optional(), limits: limitsSchema.partial().optional() }).parse(req.body);
+      const body = z.object({ caps: capsSchema.partial().optional(), limits: limitsSchema.partial().optional(), model: z.string().max(100).nullable().optional() }).parse(req.body);
       const h = await d.hub.get(param(req, "id"));
-      await h.mutate((docs) => ({ next: { session: { ...docs.session, caps: capsSchema.parse({ ...docs.session.caps, ...body.caps }), limits: limitsSchema.parse({ ...docs.session.limits, ...body.limits }) } } }));
+      await h.mutate((docs) => ({
+        next: {
+          session: {
+            ...docs.session,
+            caps: capsSchema.parse({ ...docs.session.caps, ...body.caps }),
+            limits: limitsSchema.parse({ ...docs.session.limits, ...body.limits }),
+            model: body.model === undefined ? docs.session.model : body.model?.trim() || undefined,
+          },
+        },
+      }));
       res.json({ ok: true });
     }),
   );

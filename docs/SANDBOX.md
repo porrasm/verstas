@@ -97,6 +97,10 @@ or other Docker networks. The only member besides the session container is a
 bind-mounted read-only) that is attached to both the internal network and
 the default bridge, so it alone has egress.
 
+- The proxy runs with `--restart on-failure:5`: it is stateless code of
+  ours, and a session has no egress without it. The session container
+  itself keeps `--restart no`. The loop also checks that proxy and
+  container are up before every ticket and starts a stopped one.
 - The session container gets `HTTPS_PROXY=http://proxy:3128` and the same
   for `HTTP_PROXY`. Tools that honour the variables (git, npm, pip, curl,
   Claude Code) work; tools that do not simply fail to connect, which is the

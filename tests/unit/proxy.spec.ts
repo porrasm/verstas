@@ -83,6 +83,20 @@ test("proxy allows CONNECT to listed host:port, forwards agent api under /agent/
     // Listed host, right port, but the proxy cannot resolve it here: that is a 502 or a 403, never a 200.
     expect(await rawRequest(proxyPort, "CONNECT api.anthropic.com:80 HTTP/1.1\r\nHost: api.anthropic.com\r\n\r\n")).toContain("403");
 
+    // A client that resets right after a refusal must not take the proxy down (it did once).
+    await new Promise<void>((resolve) => {
+      const s = net.connect(proxyPort, "127.0.0.1", () => {
+        s.write("CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n");
+        s.once("data", () => {
+          s.resetAndDestroy();
+          resolve();
+        });
+      });
+    });
+    await new Promise((r) => setTimeout(r, 200));
+    expect(child.exitCode).toBeNull();
+    expect(await rawRequest(proxyPort, `CONNECT localhost:${echoPort + 1} HTTP/1.1\r\nHost: x\r\n\r\n`)).toContain("403");
+
     // Plain HTTP to the agent api under the prefix: forwarded.
     const ok = await rawRequest(proxyPort, `GET http://127.0.0.1:${apiPort}/agent/board HTTP/1.1\r\nHost: 127.0.0.1:${apiPort}\r\nConnection: close\r\n\r\n`);
     expect(ok).toContain("200");

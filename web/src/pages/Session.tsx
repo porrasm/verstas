@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { api, fmtTime, fmtUsd, useLive, type Board, type Inbox, type Run, type Session, type SessionDetail, type Ticket, type VEvent } from "../api";
+import { api, fmtTime, fmtUsd, MODEL_CHOICES, useLive, type Board, type Inbox, type Run, type Session, type SessionDetail, type Ticket, type VEvent } from "../api";
 
 const COLUMNS: { key: string; title: string; states: string[] }[] = [
   { key: "backlog", title: "Backlog", states: ["backlog"] },
@@ -165,7 +165,7 @@ export const SessionPage = ({ id }: { id: string }) => {
       </div>
       {err && <div className="err small">{err}</div>}
       {busy && <div className="muted small">{busy}…</div>}
-      <div className="muted small">Goal: {session.goal || "(none)"} · repos: <span className="mono">{session.repos.map((r) => r.name).join(", ") || "none"}</span> · allowlist: <span className="mono">{session.allowlist.join(", ")}</span></div>
+      <div className="muted small">Goal: {session.goal || "(none)"} · model: <span className="mono">{session.model ?? "token default"}</span> · repos: <span className="mono">{session.repos.map((r) => r.name).join(", ") || "none"}</span> · allowlist: <span className="mono">{session.allowlist.join(", ")}</span></div>
 
       {exportInfo && (
         <div className="card">
@@ -224,7 +224,7 @@ export const SessionPage = ({ id }: { id: string }) => {
           <InboxPanel inbox={inbox} onDecide={decide} onRead={(mid) => act("read", () => api("POST", `/sessions/${encodeURIComponent(id)}/messages/${mid}/read`))} onPromote={(iid) => act("promote", () => api("POST", `/sessions/${encodeURIComponent(id)}/ideas/${iid}/promote`))} />
           <SessionSettings session={session} onSave={(patch) => act("saving", async () => {
             if (patch.allowlist) await api("PUT", `/sessions/${encodeURIComponent(id)}/allowlist`, { allowlist: patch.allowlist });
-            if (patch.caps || patch.limits) await api("PUT", `/sessions/${encodeURIComponent(id)}/caps`, { caps: patch.caps, limits: patch.limits });
+            if (patch.caps || patch.limits || patch.model !== undefined) await api("PUT", `/sessions/${encodeURIComponent(id)}/caps`, { caps: patch.caps, limits: patch.limits, model: patch.model });
           })} />
         </div>
       </div>
@@ -293,7 +293,7 @@ const InboxPanel = ({ inbox, onDecide, onRead, onPromote }: { inbox: Inbox; onDe
   );
 };
 
-const SessionSettings = ({ session, onSave }: { session: Session; onSave: (patch: { allowlist?: string[]; caps?: Partial<Session["caps"]>; limits?: Partial<Session["limits"]> }) => void }) => {
+const SessionSettings = ({ session, onSave }: { session: Session; onSave: (patch: { allowlist?: string[]; caps?: Partial<Session["caps"]>; limits?: Partial<Session["limits"]>; model?: string | null }) => void }) => {
   const [allow, setAllow] = useState(session.allowlist.join("\n"));
   useEffect(() => setAllow(session.allowlist.join("\n")), [session.allowlist]);
   return (
@@ -302,6 +302,10 @@ const SessionSettings = ({ session, onSave }: { session: Session; onSave: (patch
       <div className="grid" style={{ marginTop: 10 }}>
         <label>Network allowlist (applies live)
           <textarea id="allow" value={allow} onChange={(e) => setAllow(e.target.value)} onBlur={() => onSave({ allowlist: allow.split(/\n/).map((s) => s.trim()).filter(Boolean) })} />
+        </label>
+        <label>Model for every worker (applies to the next worker; empty = token default)
+          <input list="models-s" defaultValue={session.model ?? ""} onBlur={(e) => e.target.value.trim() !== (session.model ?? "") && onSave({ model: e.target.value.trim() || null })} placeholder="claude-sonnet-5-5" />
+          <datalist id="models-s">{MODEL_CHOICES.map((m) => <option key={m} value={m} />)}</datalist>
         </label>
         <div className="form two">
           <label>Worker minutes<input type="number" defaultValue={session.caps.workerMinutes} onBlur={(e) => onSave({ caps: { workerMinutes: Number(e.target.value) } })} /></label>
