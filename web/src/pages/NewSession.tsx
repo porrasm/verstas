@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, copyText, fmtBytes, MODEL_CHOICES, upload, type Config, type SetupScript } from "../api";
+import { api, copyText, fmtBytes, MODEL_CHOICES, upload, type Config, type NetworkPack, type SetupScript } from "../api";
 
 type RepoPick = { target: string; branch: string; branches: string[]; on: boolean };
 
@@ -10,7 +10,10 @@ export const NewSessionPage = () => {
   const [repos, setRepos] = useState<RepoPick[]>([]);
   const [uploads, setUploads] = useState<{ id: string; name: string; bytes: number }[]>([]);
   const [board, setBoard] = useState("");
-  const [allowlist, setAllowlist] = useState("api.anthropic.com\nregistry.npmjs.org\npypi.org\nfiles.pythonhosted.org\ngithub.com\nobjects.githubusercontent.com\ndeb.debian.org\nsecurity.debian.org");
+  const [extraHosts, setExtraHosts] = useState("");
+  const [packList, setPackList] = useState<NetworkPack[]>([]);
+  const [packs, setPacks] = useState<string[]>(["node", "python", "debian", "github"]);
+  const [detected, setDetected] = useState<Record<string, string[]>>({});
   const [caps, setCaps] = useState({ preflight: false, workerMinutes: 25, workerTurns: 60, runTickets: 40, budgetUsd: 50, ticketAttempts: 2, reviewer: true });
   const [scripts, setScripts] = useState<SetupScript[]>([]);
   const [picked, setPicked] = useState<string[]>([]);
@@ -34,7 +37,20 @@ export const NewSessionPage = () => {
       })
       .catch((e: Error) => setErr(e.message));
     api<SetupScript[]>("GET", "/scripts").then(setScripts).catch(() => setScripts([]));
+    api<NetworkPack[]>("GET", "/network/packs").then(setPackList).catch(() => setPackList([]));
   }, []);
+
+  /** Ticking a repository ticks the packs its manifests imply; unticking leaves your choice alone. */
+  const pickRepo = async (i: number, on: boolean) => {
+    const r = repos[i]!;
+    setRepos(repos.map((x, j) => (j === i ? { ...x, on } : x)));
+    if (!on) return;
+    const found = detected[r.target] ?? (await api<{ packs: string[] }>("GET", `/work-targets/${encodeURIComponent(r.target)}/packs`).then((x) => x.packs).catch(() => []));
+    setDetected((d) => ({ ...d, [r.target]: found }));
+    setPacks((p) => [...new Set([...p, ...found.filter((n) => n !== "anthropic")])]);
+  };
+  const detectedBy = (pack: string) => repos.filter((r) => r.on && detected[r.target]?.includes(pack)).map((r) => r.target);
+  const hostCount = new Set([...packList.filter((p) => p.name === "anthropic" || packs.includes(p.name)).flatMap((p) => p.hosts), ...extraHosts.split(/\n/).map((s) => s.trim()).filter(Boolean)]).size;
 
   const validateBoard = async (text: string) => {
     if (!text.trim()) return setPreview(null);
@@ -81,7 +97,8 @@ export const NewSessionPage = () => {
         goal,
         repos: repos.filter((r) => r.on).map((r) => ({ target: r.target, branch: r.branch || undefined })),
         uploads: uploads.map((u) => ({ id: u.id, name: u.name })),
-        allowlist: allowlist.split(/\n/).map((s) => s.trim()).filter(Boolean),
+        packs,
+        allowlist: extraHosts.split(/\n/).map((s) => s.trim()).filter(Boolean),
         caps,
         limits,
         model: model.trim() || undefined,
@@ -128,7 +145,7 @@ export const NewSessionPage = () => {
         {repos.length === 0 && <div className="muted small">No work targets yet.</div>}
         {repos.map((r, i) => (
           <div className="repo-row" key={r.target}>
-            <label className="chk"><input type="checkbox" checked={r.on} onChange={(e) => setRepos(repos.map((x, j) => (j === i ? { ...x, on: e.target.checked } : x)))} /> <strong>{r.target}</strong></label>
+            <label className="chk"><input type="checkbox" checked={r.on} onChange={(e) => void pickRepo(i, e.target.checked)} /> <strong>{r.target}</strong></label>
             <select value={r.branch} disabled={!r.on} onChange={(e) => setRepos(repos.map((x, j) => (j === i ? { ...x, branch: e.target.value } : x)))}>
               {r.branches.map((b) => <option key={b} value={b}>{b}</option>)}
             </select>
@@ -178,10 +195,24 @@ export const NewSessionPage = () => {
 
       <section className="card">
         <h3>Network</h3>
+        <p className="lead">HTTPS only, through the session's proxy. Tick the toolchains the project downloads from; ticking a repository ticks the packs its manifests imply. The Claude API is always on. The worker can ask for a pack or a host during the run.</p>
+        <div className="packs">
+          {packList.filter((p) => p.name !== "anthropic").map((p) => {
+            const by = detectedBy(p.name);
+            return (
+              <label className="chk" key={p.name} title={p.hosts.join("\n")}>
+                <input type="checkbox" checked={packs.includes(p.name)} onChange={(e) => setPacks(e.target.checked ? [...packs, p.name] : packs.filter((n) => n !== p.name))} />
+                <strong>{p.name}</strong> <span className="muted">{p.title}</span>
+                {by.length > 0 && <span className="pill quiet" style={{ marginLeft: 6 }}>found in {by.join(", ")}</span>}
+              </label>
+            );
+          })}
+        </div>
         <label>
-          Allowlist <span className="help">One host per line, HTTPS only; <code>*.suffix</code> allowed. The worker can ask for more hosts during the run.</span>
-          <textarea id="allowlist" className="mono" value={allowlist} onChange={(e) => setAllowlist(e.target.value)} style={{ minHeight: 130 }} />
+          Extra hosts <span className="help">One per line; <code>*.suffix</code> allowed</span>
+          <textarea id="allowlist" className="mono" value={extraHosts} onChange={(e) => setExtraHosts(e.target.value)} placeholder="fonts.googleapis.com" style={{ minHeight: 60 }} />
         </label>
+        <div className="small faint">{hostCount} hosts in the allowlist. Hover a pack to see its hosts.</div>
       </section>
 
       <section className="card">

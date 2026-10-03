@@ -34,6 +34,7 @@ import type { RunManager } from "../harness/run.js";
 import { dockerShell, ensureSessionSandbox, runSetup, type RunManagerConfig } from "../harness/docker-worker.js";
 import { deleteScript, getScript, hostsFromScript, listScripts, saveScript, setupScriptSchema } from "../scripts/library.js";
 import { buildContext, probeImage } from "../context/context.js";
+import { detectPacksInRepo, NETWORK_PACKS, packHosts } from "../network/packs.js";
 
 /**
  * The UI's API, on 127.0.0.1 only. Everything the agent API refuses lives
@@ -168,6 +169,21 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
     }),
   );
 
+  /** Packs a work target's manifests imply, for the new-session form. */
+  api.get(
+    "/work-targets/:name/packs",
+    wrap(async (req, res) => {
+      const t = d.getConfig().workTargets.find((w) => w.name === param(req, "name"));
+      if (!t) {
+        res.status(404).json({ error: "No such work target" });
+        return;
+      }
+      res.json({ packs: await detectPacksInRepo(t.path).catch(() => []) });
+    }),
+  );
+
+  api.get("/network/packs", (_req, res) => res.json(NETWORK_PACKS));
+
   // --- setup script library ------------------------------------------------------
 
   api.get(
@@ -293,6 +309,7 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
     repos: z.array(z.object({ target: z.string(), branch: z.string().optional(), name: z.string().optional() })).default([]),
     uploads: z.array(z.object({ id: z.string().regex(/^[a-f0-9]{16}$/), name: z.string() })).default([]),
     allowlist: z.array(z.string()).optional(),
+    packs: z.array(z.string()).optional(),
     model: z.string().max(100).optional(),
     setupScripts: z.array(z.string()).default([]),
     caps: capsSchema.partial().optional(),
@@ -799,6 +816,8 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
           if (det.kind === "network") {
             const entry = det.port ? `${det.host}:${det.port}` : det.host;
             if (!session.allowlist.includes(entry)) session = { ...session, allowlist: [...session.allowlist, entry] };
+          } else if (det.kind === "pack") {
+            session = { ...session, packs: [...new Set([...session.packs, det.pack])], allowlist: [...new Set([...session.allowlist, ...packHosts([det.pack])])] };
           } else if (det.kind === "root_script") {
             session = { ...session, rootScripts: [...session.rootScripts, { script: det.script, cwd: det.cwd, at: now(), requestId: next.id }] };
           } else if (det.kind === "resources") {
@@ -864,6 +883,7 @@ const applyAction = async (d: UiApiDeps, sessionId: string, a: RequestAction, no
     return `${r.ok ? "ran as root, exit 0" : `ran as root, exit ${r.code}`}${note ? ` (${note})` : ""}${tail ? `\n--- output (tail) ---\n${tail}` : ""}`;
   }
   if (det.kind === "network") return `allowed${note ? `: ${note}` : ""}`;
+  if (det.kind === "pack") return `allowed ${packHosts([det.pack]).filter((h) => h !== "api.anthropic.com").join(", ")}${note ? ` (${note})` : ""}`;
   if (det.kind === "resources") return `applied${note ? `: ${note}` : ""}`;
   if (det.kind === "instruction") return note ? `done: ${note}` : "done";
   return note ? `answer: ${note}` : "answered without text";

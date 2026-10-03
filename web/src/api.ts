@@ -25,6 +25,7 @@ export type Ticket = {
 export type Board = { goal: string; tickets: Ticket[] };
 export type ActionDetail =
   | { kind: "network"; host: string; port?: number }
+  | { kind: "pack"; pack: string }
   | { kind: "resources"; workerMinutes?: number; workerTurns?: number; memoryMb?: number }
   | { kind: "root_script"; script: string; cwd?: string }
   | { kind: "instruction"; text: string }
@@ -46,6 +47,7 @@ export type Session = {
   repos: { name: string; sourcePath: string; branch: string; runBranch: string; baseCommit?: string }[];
   attachments: { name: string; dir: string; bytes: number; skipped: string[] }[];
   allowlist: string[];
+  packs: string[];
   caps: { preflight: boolean; workerMinutes: number; workerTurns: number; runTickets: number; budgetUsd: number; ticketAttempts: number; reviewer: boolean };
   limits: { memory: string; cpus: number; pids: number; workspaceMb: number };
   rootScripts: { script: string; cwd?: string; at: string; requestId?: string }[];
@@ -54,6 +56,7 @@ export type Session = {
   preflight?: { ok: boolean; at: string; summary: string };
   state: string;
 };
+export type NetworkPack = { name: string; title: string; hosts: string[] };
 export type SetupScript = { name: string; description: string; hosts: string[]; note: string; script: string };
 export type Run = { id: number; state: string; startedAt: string; endedAt?: string; currentTicket?: string; ticketsDone: number; cost: { usd?: number }; pauseReason?: string; resumeAt?: string };
 export type VEvent = { kind: string; t: string; ticket?: string; [k: string]: unknown };

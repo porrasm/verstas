@@ -13,6 +13,7 @@ import {
 import { writeJsonAtomic, saveBoard } from "../board/store.js";
 import { emptyBoard } from "../board/board.js";
 import type { WorkTarget } from "../config.js";
+import { allowlistFor, DEFAULT_PACKS } from "../network/packs.js";
 import { cloneWorkTarget, extractZip, type CloneResult, type ExtractResult } from "./workspace.js";
 
 /**
@@ -96,7 +97,9 @@ export type CreateSessionInput = {
   goal: string;
   repos: { target: WorkTarget; branch?: string; name?: string }[];
   zips: { name: string; file: string }[];
+  /** Extra hosts beyond the packs; with no packs given, the whole allowlist (older callers). */
   allowlist?: string[];
+  packs?: string[];
   image: string;
   model?: string;
   setupScripts?: SessionSetupScript[];
@@ -133,8 +136,14 @@ export const createSession = async (root: string, input: CreateSessionInput): Pr
     image: input.image,
     model: input.model?.trim() || undefined,
     setupScripts: input.setupScripts ?? [],
-    // Hosts the chosen scripts download from join the allowlist.
-    allowlist: [...new Set([...(input.allowlist ?? [...DEFAULT_ALLOWLIST]), ...(input.setupScripts ?? []).flatMap((x) => x.hosts)])],
+    // Packs plus extra hosts; hosts the chosen scripts download from join too.
+    packs: input.packs ?? (input.allowlist ? [] : [...DEFAULT_PACKS]),
+    allowlist: [
+      ...new Set([
+        ...(input.packs ? allowlistFor(input.packs, input.allowlist ?? []) : (input.allowlist ?? [...DEFAULT_ALLOWLIST])),
+        ...(input.setupScripts ?? []).flatMap((x) => x.hosts),
+      ]),
+    ],
     caps: input.caps ?? {},
     limits: input.limits ?? {},
   });

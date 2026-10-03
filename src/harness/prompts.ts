@@ -1,4 +1,5 @@
 import type { Board, Session, Ticket } from "../core/types.js";
+import { NETWORK_PACKS } from "../network/packs.js";
 
 /**
  * Everything a worker reads before it starts. VERSTAS.md tells it where it
@@ -23,7 +24,9 @@ ${session.repos.map((r) => `  - \`/workspace/${r.name}\` (from \`${r.branch}\`)`
   them is ${agentApi} with your run token in \`VERSTAS_RUN_TOKEN\`.
 - Network: only these hosts, over HTTPS, through the proxy already set in
   \`HTTPS_PROXY\`: ${session.allowlist.join(", ") || "(none)"}. Anything else
-  is refused with 403. Ask with \`request\` kind \`network\` if you need more.
+  is refused with 403. Ask with \`request\` kind \`pack\` for a whole toolchain
+  or kind \`network\` for one host. Packs on: ${session.packs.join(", ") || "(none recorded)"}.
+  Packs you can ask for: ${NETWORK_PACKS.filter((p) => p.name !== "anthropic" && !session.packs.includes(p.name)).map((p) => `\`${p.name}\` (${p.title})`).join(", ")}.
 - Setup scripts the user chose ran once as root when this container was created:
 ${session.setupScripts.length ? session.setupScripts.map((x) => `  - ${x.name}: ${x.note || x.description || "(no note)"}`).join("\n") : "  - (none)"}
 - There is no sudo and no Docker. The user is a person with hands. One

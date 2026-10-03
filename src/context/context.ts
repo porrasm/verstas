@@ -2,6 +2,7 @@ import type { Session } from "../core/types.js";
 import type { Config } from "../config.js";
 import type { SetupScript } from "../scripts/library.js";
 import type { DockerRunner } from "../sandbox/docker.js";
+import { DEFAULT_PACKS, NETWORK_PACKS, packHosts } from "../network/packs.js";
 
 /**
  * "Copy context for an LLM": a Markdown block assembled from live facts, to
@@ -121,7 +122,7 @@ export const buildContext = (i: ContextInput): string => {
     out.push("- Output only the script, nothing else.");
     out.push("- Start with `#!/usr/bin/env bash` and `set -euo pipefail`; it runs as root, non-interactive (`export DEBIAN_FRONTEND=noninteractive`, use `-y`).");
     out.push("- Idempotent: safe to run twice.");
-    out.push("- Second line: `# needs-hosts: host1 host2` listing every host the script downloads from; downloads go through an HTTPS proxy to those hosts only. Default-allowed: api.anthropic.com registry.npmjs.org pypi.org files.pythonhosted.org github.com objects.githubusercontent.com deb.debian.org security.debian.org (apt works out of the box, over HTTPS).");
+    out.push(`- Second line: \`# needs-hosts: host1 host2\` listing every host the script downloads from; downloads go through an HTTPS proxy to those hosts only. Allowed by default: ${packHosts(i.session?.packs ?? DEFAULT_PACKS).join(" ")} (apt works out of the box, over HTTPS). Named packs the user can tick: ${NETWORK_PACKS.map((p) => `${p.name} (${p.hosts.join(" ")})`).join("; ")}.`);
     out.push("- Third line: `# note: ...` one sentence for the agent on how to use what you installed (paths, how to start a service).");
     out.push("- Detect the architecture with `uname -m` (x86_64 or aarch64) when downloading binaries.");
     out.push("- End with a verification command that fails the script if the install did not work.");

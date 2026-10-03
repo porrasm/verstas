@@ -119,9 +119,16 @@ the default bridge, so it alone has egress.
   stdout; the host app collects container logs and shows them on the
   session page. A denied host is one click from becoming a request to
   approve.
-- The default allowlist for a new session: `api.anthropic.com`,
-  `registry.npmjs.org`, `pypi.org`, `files.pythonhosted.org`,
-  `github.com`, `objects.githubusercontent.com`. Edit it per session.
+- **Network packs.** The allowlist is built from named packs of toolchain
+  download hosts (`src/network/packs.ts`: node, python, debian, github,
+  playwright, cypress, chromium, rust, go, jvm, ruby) plus extra hosts you
+  type. A new session gets node, python, debian and github; ticking a
+  repository on the New session form ticks the packs its tracked manifests
+  imply (read on the host as data, never run). `api.anthropic.com` is
+  always in. A worker can ask for a whole pack with a `pack` request; you
+  approve it like a host. Each pack host is a place data can go, like any
+  allowlisted host; `storage.googleapis.com` (chromium, go) is the
+  broadest of them.
 - DNS inside the internal network resolves only container names. External
   names are resolved by the proxy, which is one more reason tools without
   proxy support cannot reach out.

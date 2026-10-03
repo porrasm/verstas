@@ -46,6 +46,7 @@ const USER_MOVES: Record<string, string[]> = {
 
 const ACTION_LABELS: Record<string, { title: string; yes: string; no: string; tone: string }> = {
   network: { title: "Allow a host", yes: "Allow", no: "Decline", tone: "sig" },
+  pack: { title: "Allow a toolchain's hosts", yes: "Allow all", no: "Decline", tone: "sig" },
   resources: { title: "Change caps", yes: "Apply", no: "Decline", tone: "sig" },
   root_script: { title: "Run as root in the box", yes: "Run as root", no: "Decline", tone: "warn" },
   instruction: { title: "For you to do", yes: "Done", no: "Decline", tone: "sig" },
@@ -747,6 +748,7 @@ const RequestItem = ({ r, onDecide, onOpenTicket }: { r: AgentRequest; onDecide:
             {d.kind === "root_script" && <pre className="mono">{d.script}</pre>}
             {d.kind === "root_script" && !decided && <div className="muted small">Runs as root inside the session container{d.cwd ? ` in ${d.cwd}` : ""}. Read every line; the output tail goes back to the worker.</div>}
             {d.kind === "network" && <div className="mono">allow {d.host}{d.port ? `:${d.port}` : ""} (HTTPS)</div>}
+            {d.kind === "pack" && <div className="mono">allow the {d.pack} pack (HTTPS; the hosts are listed under Network on the New session form)</div>}
             {d.kind === "resources" && <div className="mono small">{(["workerMinutes", "workerTurns", "memoryMb"] as const).filter((k) => d[k] !== undefined).map((k) => `${k}: ${String(d[k])}`).join(" · ")}</div>}
             {(d.kind === "instruction" || d.kind === "question") && <div style={{ whiteSpace: "pre-wrap" }}>{d.text}</div>}
             {d.kind === "question" && d.options && !decided && (

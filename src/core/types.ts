@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { DEFAULT_PACKS, packHosts, PACK_NAMES } from "../network/packs.js";
 
 /**
  * Verstas data model. Everything here is plain JSON on disk: a session is a
@@ -148,6 +149,11 @@ export const actionDetailSchema = z.discriminatedUnion("kind", [
     script: z.string().min(1).max(20_000),
     cwd: z.string().max(500).optional(),
   }),
+  /** A named bundle of hosts (src/network/packs.ts), e.g. "playwright"; approval adds them all. */
+  z.object({
+    kind: z.literal("pack"),
+    pack: z.enum(PACK_NAMES),
+  }),
   /** Something a person must do; marked done or declined, with an optional note. */
   z.object({
     kind: z.literal("instruction"),
@@ -202,6 +208,7 @@ export const requestOutcome = (r: AgentRequest): string => {
     const d = a.detail;
     const what =
       d.kind === "network" ? `network ${d.host}${d.port ? `:${d.port}` : ""}` :
+      d.kind === "pack" ? `network pack ${d.pack}` :
       d.kind === "resources" ? `resources ${JSON.stringify({ ...d, kind: undefined })}` :
       d.kind === "root_script" ? `root script (${d.script.split("\n").length} lines)` :
       d.kind === "instruction" ? `instruction: ${d.text.slice(0, 200)}` :
@@ -343,6 +350,8 @@ export const sessionSchema = z.object({
   repos: z.array(repoSpecSchema).default([]),
   attachments: z.array(attachmentSchema).default([]),
   allowlist: z.array(z.string()).default([]),
+  /** Network packs the allowlist was built from (src/network/packs.ts); the allowlist is what the proxy enforces. */
+  packs: z.array(z.string()).default([]),
   caps: capsSchema.prefault({}),
   limits: limitsSchema.prefault({}),
   rootScripts: z.array(rootScriptRecordSchema).default([]),
@@ -361,17 +370,8 @@ export const sessionSchema = z.object({
 });
 export type Session = z.infer<typeof sessionSchema>;
 
-/** Hosts a fresh session may reach. Edited per session; see docs/SANDBOX.md. */
-export const DEFAULT_ALLOWLIST = [
-  "api.anthropic.com",
-  "registry.npmjs.org",
-  "pypi.org",
-  "files.pythonhosted.org",
-  "github.com",
-  "objects.githubusercontent.com",
-  "deb.debian.org",
-  "security.debian.org",
-] as const;
+/** Hosts a fresh session may reach when nothing is chosen: the default packs. Edited per session; see docs/SANDBOX.md. */
+export const DEFAULT_ALLOWLIST: readonly string[] = packHosts(DEFAULT_PACKS);
 
 export const runStateSchema = z.enum(["running", "paused", "halted", "stopped", "finished", "failed"]);
 
