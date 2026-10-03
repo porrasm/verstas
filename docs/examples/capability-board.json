@@ -1,0 +1,182 @@
+{
+  "verstas": 1,
+  "goal": "Capability test of the Verstas sandbox itself. This is not a development task. Every ticket probes one property of the box (network, filesystem, tools, repositories, board tools, requests, limits) and APPENDS its findings to /workspace/capability/REPORT.md. Report what you find, including anything unexpected or broken; never fix, patch or work around anything, and never try to circumvent a restriction. Probing is the task; bypassing is out of scope. Keep each section factual: commands run, trimmed output, a PASS / FAIL / UNEXPECTED line per check, and an Issues list (empty if none).",
+  "tickets": [
+    {
+      "id": "T-1",
+      "title": "Orientation: environment summary and report scaffold",
+      "kind": "chore",
+      "repo": "capability",
+      "size": "S",
+      "priority": 1,
+      "pinned": true,
+      "state": "ready",
+      "spec": "Read /workspace/VERSTAS.md and /workspace/notes/INDEX.md. Create /workspace/capability/REPORT.md with a title, the date, and a section '## T-1 Environment' containing the output of: uname -a; id; echo $HOME; pwd; node --version; npm --version; python3 --version; pip --version; git --version; claude --version; env | grep -iE 'proxy|verstas' (redact any token value: print only the variable names and the first 4 characters of values). Also list the top-level contents of /workspace. End the file with a line '## Issues (running list)' that later tickets append to. Every later ticket appends its own '## T-n <title>' section ABOVE the issues list and adds its issues to the list.",
+      "acceptance": [
+        "REPORT.md exists with the environment section and the running issues list",
+        "No token value is printed in full",
+        "A report was filed with board_report"
+      ]
+    },
+    {
+      "id": "T-2",
+      "title": "Network: only allowlisted hosts over HTTPS through the proxy",
+      "kind": "chore",
+      "repo": "capability",
+      "size": "S",
+      "priority": 10,
+      "deps": ["T-1"],
+      "state": "ready",
+      "spec": "Probe, record, do not circumvent. Use curl with a 10 second timeout (-m 10 -sS -o /dev/null -w '%{http_code}') and record the exit code and HTTP code for each: (1) https://api.anthropic.com/ through the proxy (expected: a response, any HTTP status, the point is that the tunnel opens); (2) https://registry.npmjs.org/zod (expected: 200); (3) https://example.com/ (expected: refused by the proxy with 403 or a tunnel failure); (4) http://example.com/ plain HTTP (expected: 403 from the proxy); (5) https://api.anthropic.com/ with --noproxy '*' (expected: cannot connect, no route out); (6) getent hosts example.com or nslookup example.com (expected: no resolution inside the internal network; note what happens); (7) https://1.1.1.1/ (expected: refused, IP literals are never allowed); (8) http://proxy:3128/ GET (expected: 403, plain HTTP is only for the agent API). Also report the values of HTTPS_PROXY, HTTP_PROXY and NO_PROXY. Verdict per probe. Any probe whose result differs from the expectation is an Issue; describe it precisely and move on.",
+      "acceptance": [
+        "All eight probes recorded with exit code, HTTP code and PASS/FAIL/UNEXPECTED",
+        "No attempt to tunnel, pivot or bypass; only the listed probes",
+        "Report filed"
+      ]
+    },
+    {
+      "id": "T-3",
+      "title": "Filesystem and privileges: one writable mount, non-root, no capabilities",
+      "kind": "chore",
+      "repo": "capability",
+      "size": "S",
+      "priority": 11,
+      "deps": ["T-1"],
+      "state": "ready",
+      "spec": "Record: id -u and id -g (expected 1000); whether sudo exists (command -v sudo; expected absent); touch a file under /workspace (expected ok) and remove it; attempt to write under /etc, /usr/local, /opt/verstas and / (expected: permission denied in every case); write and read a file in /tmp (expected ok; report the filesystem type from mount | grep ' /tmp '); test -e /var/run/docker.sock (expected absent); grep -E 'Cap(Eff|Prm|Bnd)|NoNewPrivs' /proc/self/status (expected: capability masks of all zeros, NoNewPrivs: 1); cat /sys/fs/cgroup/memory.max /sys/fs/cgroup/pids.max /sys/fs/cgroup/cpu.max if present (report values); mount | grep -E 'workspace|tmp' to list the mounts. Do not attempt privilege escalation beyond these read-only checks and the write attempts listed.",
+      "acceptance": [
+        "Each check recorded with expected vs observed and a verdict",
+        "Issues list updated for every deviation",
+        "Report filed"
+      ]
+    },
+    {
+      "id": "T-4",
+      "title": "Toolchain: node, python with pip over the proxy, git, build tools",
+      "kind": "chore",
+      "repo": "capability",
+      "size": "S",
+      "priority": 12,
+      "deps": ["T-1"],
+      "state": "ready",
+      "spec": "Verify the tools a developer would need. Node: create /workspace/capability/scratch-node, run npm init -y and npm install zod (expected: succeeds through the proxy), run node -e \"require('zod'); console.log('ok')\". Python: python3 -m venv /workspace/capability/scratch-venv, activate it, pip install requests (expected: succeeds via pypi.org and files.pythonhosted.org), python -c 'import requests; print(requests.__version__)'. Git: git config --system --list and git config --global --list (report user.name, user.email, core.hooksPath); confirm git works in a repo (git -C /workspace/capability log --oneline | head). C toolchain: gcc --version; compile and run a one-line hello world in /tmp. Also: jq --version, unzip -v | head -1, claude --version. Remove the scratch-node and scratch-venv directories at the end so they are not committed; keep only REPORT.md changes.",
+      "acceptance": [
+        "npm install and pip install both recorded as working or failing with the exact error",
+        "Scratch directories removed; only REPORT.md changed",
+        "Report filed"
+      ]
+    },
+    {
+      "id": "T-5",
+      "title": "Repositories: fresh clones, run branch, no origin, no hooks, no secrets",
+      "kind": "chore",
+      "repo": "capability",
+      "size": "S",
+      "priority": 13,
+      "deps": ["T-1"],
+      "state": "ready",
+      "spec": "For every git repository directly under /workspace (expected: capability and kapula): record git branch --show-current (expected verstas/<session id>, see VERSTAS.md), git remote -v (expected empty), ls .git/hooks (expected empty or absent), test -e .env (expected absent), git log --oneline | head -3, and git status --short (expected clean apart from REPORT.md in capability). For kapula also list the top-level files and confirm package.json names the workspaces. Confirm /workspace/attachments exists and list its contents (there may be none). Confirm /workspace/notes/INDEX.md and learnings.md exist. Do not commit anything; the harness commits.",
+      "acceptance": [
+        "Every repository under /workspace covered",
+        "Deviations listed as Issues",
+        "Report filed"
+      ]
+    },
+    {
+      "id": "T-6",
+      "title": "Board tools: every MCP tool, including the ones that must refuse",
+      "kind": "chore",
+      "repo": "capability",
+      "size": "S",
+      "priority": 14,
+      "deps": ["T-1"],
+      "state": "ready",
+      "spec": "Exercise each board tool once and record the result. board_list_tickets (all, then state=done); board_get_ticket for T-6; board_add_note on T-6 with 'capability test note'; board_create_ticket with kind chore, title 'Capability test: sample chore (ignore)', spec 'Created by T-6 to test ticket creation; close without work.' (expected: created in backlog); board_create_ticket with kind feature (expected: REFUSED, features are not a worker's to create); board_set_priority on T-1 (expected: REFUSED, T-1 is pinned); board_set_priority on the sample chore you created, to 999, reason 'capability test' (expected: ok); board_add_dep making the sample chore depend on T-1 (expected ok); idea with title 'Capability test idea (ignore)'; message with text 'Capability test message from T-6 (ignore)'. Record for each: the tool name, the arguments, whether it succeeded or was refused, and the response text. A refusal that was expected is a PASS.",
+      "acceptance": [
+        "All ten tool calls recorded with outcome",
+        "The two expected refusals happened",
+        "Report filed with board_report"
+      ]
+    },
+    {
+      "id": "T-7",
+      "title": "Request flow: a network request parks the ticket and resumes with the answer",
+      "kind": "chore",
+      "repo": "capability",
+      "size": "S",
+      "priority": 20,
+      "deps": ["T-2"],
+      "state": "ready",
+      "spec": "This ticket runs in two attempts on purpose. ATTEMPT 1 (your prompt contains no 'The user answered your request' section): append a short section '## T-7 Request flow, attempt 1' to REPORT.md saying that you are filing a network request, then call request with kind network, host example.com, why 'Capability test of the request flow; no real need.' and STOP immediately with a one-line reply. Do not probe example.com yet. ATTEMPT 2 (your prompt contains the user's answer): record the answer text verbatim. If it was approved, run curl -m 10 -sS -o /dev/null -w '%{http_code}' https://example.com/ (expected: now reachable through the proxy, a 200). If it was denied, run the same curl and expect 403 or a tunnel failure. Append '## T-7 Request flow, attempt 2' with the answer, the probe result and a verdict on whether the flow behaved: the ticket parked, the answer reached you, the allowlist changed accordingly.",
+      "acceptance": [
+        "Attempt 1 filed exactly one network request and stopped",
+        "Attempt 2 recorded the answer and the probe result",
+        "Report filed in attempt 2"
+      ]
+    },
+    {
+      "id": "T-8",
+      "title": "Install request flow: a package install through the harness",
+      "kind": "chore",
+      "repo": "capability",
+      "size": "S",
+      "priority": 21,
+      "deps": ["T-4"],
+      "state": "ready",
+      "spec": "Two attempts on purpose, like T-7. ATTEMPT 1: check command -v tree. If present already, record UNEXPECTED (the image should not have it), skip the request, and file the report. If absent: append '## T-8 Install request, attempt 1' noting tree is absent, call request with kind install, manager apt, packages ['tree'], why 'Capability test of the install flow.', and STOP with a one-line reply. ATTEMPT 2 (the prompt has the user's answer): if approved, run tree --version and tree -L 1 /workspace (expected: works, installed by the harness as root between attempts); if denied, confirm tree is still absent. Append '## T-8 Install request, attempt 2' with the answer and the result.",
+      "acceptance": [
+        "Attempt 1 filed exactly one install request and stopped (or recorded that tree already existed)",
+        "Attempt 2 recorded the outcome",
+        "Report filed"
+      ]
+    },
+    {
+      "id": "T-9",
+      "title": "Services as processes: a local server works, nothing reaches it from outside",
+      "kind": "chore",
+      "repo": "capability",
+      "size": "S",
+      "priority": 22,
+      "deps": ["T-4"],
+      "state": "ready",
+      "spec": "Start python3 -m http.server 8080 --directory /workspace/capability in the background (nohup, redirect output to /tmp/http.log). Wait two seconds. curl -m 5 -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/ (expected 200; NO_PROXY covers localhost) and the same for http://localhost:8080/REPORT.md. Record whether curl went through the proxy or direct (compare with and without --noproxy '*'). Then kill the server and confirm the port is free. Also record: ps aux | head -20 (what else runs in the container), nproc, free -m, df -h /workspace /tmp. Report whether PostgreSQL or Redis binaries exist (command -v postgres pg_ctl redis-server; expected absent in this image, which is informational, not an issue).",
+      "acceptance": [
+        "Local server reachable and stopped cleanly",
+        "Process, CPU, memory and disk figures recorded",
+        "Report filed"
+      ]
+    },
+    {
+      "id": "T-10",
+      "title": "Memory and notes: learnings for the next worker",
+      "kind": "chore",
+      "repo": "capability",
+      "size": "S",
+      "priority": 23,
+      "deps": ["T-1"],
+      "state": "ready",
+      "spec": "Append to /workspace/notes/learnings.md three short facts a future worker in this session would want (for example how to reach the allowlist test hosts, where REPORT.md lives, that scratch directories must be removed). Verify /workspace/notes/INDEX.md lists learnings.md. Confirm the notes directory is outside every git repository (git -C /workspace/notes rev-parse 2>&1 should fail). Confirm that the recent reports of other tickets appear in your own prompt (your prompt has a 'Recent reports from other workers' section; list which ticket ids it contained). Append '## T-10 Memory' to REPORT.md with these observations.",
+      "acceptance": [
+        "learnings.md extended with concrete facts",
+        "Observations about notes and recent reports recorded",
+        "Report filed"
+      ]
+    },
+    {
+      "id": "T-11",
+      "title": "Summary: one table of results and the consolidated issues",
+      "kind": "chore",
+      "repo": "capability",
+      "size": "S",
+      "priority": 90,
+      "deps": ["T-2", "T-3", "T-4", "T-5", "T-6", "T-7", "T-8", "T-9", "T-10"],
+      "state": "ready",
+      "spec": "Read the whole of REPORT.md. Insert, directly under the title, a section '## Summary' with a table: one row per ticket T-1 to T-10, columns Area, Result (PASS / FAIL / PARTIAL), Notes. Below it, a consolidated, deduplicated '## Issues found' list, each issue with the ticket that found it and a one-line description, or the single line 'None.' Then send a message (the message tool) with a three-line summary for the user: how many areas passed, how many issues, and the single most important finding. Do not fix anything.",
+      "acceptance": [
+        "Summary table covers T-1 to T-10",
+        "Consolidated issues list present",
+        "Message sent and report filed"
+      ]
+    }
+  ]
+}
