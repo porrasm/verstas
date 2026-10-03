@@ -70,7 +70,7 @@ test("board MCP server speaks JSON-RPC and forwards tool calls with the run toke
     expect(JSON.parse(seen.at(-1)!.body)).toEqual({ detail: { kind: "network", host: "fonts.googleapis.com" }, why: "fonts" });
 
     const denied = await call("tools/call", { name: "board_create_ticket", arguments: { title: "x", kind: "feature", spec: "y" } });
-    expect(denied.result).toMatchObject({ isError: true, content: [{ type: "text", text: "Error: A worker may not create feature tickets; file an idea instead" }] });
+    expect(denied.result).toMatchObject({ isError: true, content: [{ type: "text", text: "Error: A worker may not create feature tickets; file an idea instead (HTTP 403)" }] });
 
     const unknown = await call("tools/call", { name: "nope", arguments: {} });
     expect(unknown.error?.code).toBe(-32602);
