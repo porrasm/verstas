@@ -20,7 +20,7 @@ import { translateLine } from "./translate.js";
 import type { VerstasEvent } from "../core/types.js";
 
 export type Job = {
-  role: "implementer" | "reviewer" | "planner" | "setup";
+  role: "implementer" | "reviewer" | "planner" | "setup" | "prompt";
   ticket?: string;
   /** Path of the user prompt (the ticket, the context). */
   promptFile: string;

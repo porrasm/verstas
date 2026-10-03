@@ -60,7 +60,7 @@ ${session.setupScripts.length ? session.setupScripts.map((x) => `  - ${x.name}: 
   commit, do not rewrite history, do not create branches.
 `;
 
-export const systemMd = (role: "implementer" | "reviewer" | "planner" | "setup"): string => {
+export const systemMd = (role: "implementer" | "reviewer" | "planner" | "setup" | "prompt"): string => {
   const common = `You are one worker in a long-running Verstas session. Read /workspace/VERSTAS.md first.
 
 Rules that apply to every role:
@@ -108,6 +108,8 @@ then one line per requirement, as a checklist, in the user's words:
 - [x] <requirement> (how you verified it)
 - [ ] <requirement> (what is missing)
 then a short summary. "ready" means every requirement is checked and work can start now. "needs" means something is missing; say what, and file the request.`,
+    prompt: `
+Role: the user's direct request. The user typed the task below on the session page; do exactly that. There is no ticket and no reviewer. You may install and configure (with sudo), start services, investigate, and update the notes (env.md, setup.sh, brief.md, learnings.md) when what you do changes what they say. Change repository files only if the request asks for it; the harness commits any repository change as one commit after you. Do not work on board tickets. End with a reply for the user, a few lines: what you did, what you found, anything they should decide.`,
     planner: `
 Role: planner. Turn the session goal into tickets with \`board_create_ticket\`: small (S) or medium (M) where possible, each with a clear spec, acceptance criteria that a reviewer can check, the repository it touches, and dependencies by id when order matters. You may create feature tickets; keep them within the goal. Prefer ten good tickets over thirty vague ones. When the board already has tickets, add only what is missing and do not duplicate. Reply with a short summary of the plan and stop.`,
   };
@@ -190,6 +192,12 @@ ${session.repos.map((r) => `- /workspace/${r.name} (branch ${r.branch})`).join("
 ${board.tickets.length ? board.tickets.map((t) => `- ${t.id} [${t.state}] ${t.title} (${t.kind}, ${t.size}${t.repo ? `, ${t.repo}` : ""})${t.spec ? `: ${t.spec.replace(/\s+/g, " ").slice(0, 300)}` : ""}`).join("\n") : "- empty"}
 ${answers.length ? `\n# Your earlier setup requests were answered\n${answers.map((a) => `- ${a}`).join("\n")}\n` : ""}
 Read /workspace/VERSTAS.md and the existing notes (env.md, setup.sh, brief.md) first; a previous setup worker may have done most of the work. Reply starting with SETUP: ready or SETUP: needs.`;
+
+export const userPrompt = (text: string): string => `# Request from the user
+
+${text.trim()}
+
+Read /workspace/VERSTAS.md first if you have not. Reply with what you did and found.`;
 
 export const plannerPrompt = (session: Session, board: Board): string => `# Session goal
 ${session.goal || "(no goal given; ask with a decision request)"}

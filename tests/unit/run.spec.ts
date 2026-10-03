@@ -592,3 +592,31 @@ test("recover after a host crash: stops the orphaned worker, requeues held ticke
     await fs.rm(s.root, { recursive: true, force: true });
   }
 });
+
+test("a prompt runs one worker with your text and the notes, commits a change as one commit, keeps the reply, and is allowed during setup", async () => {
+  const s = await makeSession({ requirements: "the e2e suite runs" });
+  try {
+    await fs.mkdir(s.paths.notes, { recursive: true });
+    await fs.writeFile(path.join(s.paths.notes, "env.md"), "# Environment\n- node 22\n");
+    const shell = fakeShell();
+    let promptText = "";
+    const worker = fakeWorker(s.hub, s.id, async (job) => {
+      promptText = await fs.readFile(job.promptFile.replace("/workspace", s.paths.workspace), "utf8");
+      return { text: "Installed the browsers; the e2e suite runs (12 passed). env.md updated." };
+    });
+    const run = await (await manager(s, shell, worker).start(s.id, { prompt: "Make sure the e2e suite runs\nand update env.md" })).done;
+    expect(run.state).toBe("finished");
+    expect(worker.jobs.map((j) => [j.role, j.ticket])).toEqual([["prompt", undefined]]);
+    expect(promptText).toContain("# Request from the user");
+    expect(promptText).toContain("node 22");
+    expect(shell.commits).toEqual(["Prompt: Make sure the e2e suite runs"]);
+    const h = await s.hub.get(s.id);
+    expect(h.session.prompts).toHaveLength(1);
+    expect(h.session.prompts[0]).toMatchObject({ runId: 1, reply: expect.stringContaining("12 passed") });
+    expect(h.board.tickets.every((t) => t.state === "ready")).toBe(true);
+    expect(h.session.state).toBe("setup"); // still gated: a prompt is not a confirmation
+    await expect(manager(s, shell, worker).start(s.id, { prompt: "  " })).rejects.toThrow(/empty/);
+  } finally {
+    await fs.rm(s.root, { recursive: true, force: true });
+  }
+});

@@ -427,12 +427,12 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
   api.post(
     "/sessions/:id/run",
     wrap(async (req, res) => {
-      const { action } = z.object({ action: z.enum(["start", "plan", "brief", "setup", "pause", "stop"]) }).parse(req.body);
+      const { action, prompt } = z.object({ action: z.enum(["start", "plan", "brief", "setup", "prompt", "pause", "stop"]), prompt: z.string().max(20_000).optional() }).parse(req.body);
       const id = param(req, "id");
-      if (action === "start" || action === "plan" || action === "brief" || action === "setup") {
+      if (action === "start" || action === "plan" || action === "brief" || action === "setup" || action === "prompt") {
         let ctl;
         try {
-          ctl = await d.runs.start(id, { plan: action === "plan", brief: action === "brief", setup: action === "setup" });
+          ctl = await d.runs.start(id, { plan: action === "plan", brief: action === "brief", setup: action === "setup", prompt: action === "prompt" ? (prompt ?? "") : undefined });
         } catch (e) {
           res.status(409).json({ error: (e as Error).message });
           return;

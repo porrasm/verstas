@@ -356,6 +356,7 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
           <InboxPanel inbox={inbox} onRead={(mid) => tryAct("read", () => api("POST", `${base}/messages/${mid}/read`))} onPromote={(iid) => tryAct("promote", () => api("POST", `${base}/ideas/${iid}/promote`))} onOpenTicket={openTicket} />
           <WorkPanel session={session} base={base} active={active} done={done} onExport={doExport} />
           <SetupPanel session={session} base={base} active={active} onDone={refreshRun} />
+          <PromptBox session={session} base={base} active={active} onDone={refreshRun} />
           <SessionSettings
             session={session}
             onSave={async (patch) => {
@@ -561,6 +562,50 @@ const SetupPanel = ({ session, base, active, onDone }: { session: Session; base:
         </div>
       )}
       {msg && <div className="muted small">{msg}</div>}
+    </section>
+  );
+};
+
+// --- prompt box -------------------------------------------------------------
+
+/** One worker, your text, the notes in front, no ticket: "make sure the e2e suite runs", "why is the dev server slow?". */
+const PromptBox = ({ session, base, active, onDone }: { session: Session; base: string; active: boolean; onDone: () => Promise<void> }) => {
+  const [text, setText] = useState("");
+  const [msg, setMsg] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [all, setAll] = useState(false);
+  const send = async () => {
+    setBusy(true);
+    setMsg("");
+    try {
+      await api("POST", `${base}/run`, { action: "prompt", prompt: text });
+      setText("");
+      setMsg("Running; the reply appears here when the worker finishes.");
+    } catch (e) {
+      setMsg((e as Error).message);
+    } finally {
+      setBusy(false);
+      await onDone();
+    }
+  };
+  const shown = all ? [...session.prompts].reverse() : session.prompts.slice(-1);
+  return (
+    <section className="card stack" style={{ gap: 8 }}>
+      <h3>Ask the box</h3>
+      <p className="lead">One worker with your text, the brief and env.md, outside any ticket. It can install, configure and investigate; a repository change becomes one commit.</p>
+      <textarea id="prompt" value={text} onChange={(e) => setText(e.target.value)} placeholder="Make sure you can run the e2e suite and the dev server, and update env.md." style={{ minHeight: 70 }} />
+      <div className="row">
+        <button className="pri sm" onClick={send} disabled={busy || active || !text.trim()} title={active ? "Wait for the run to finish, or pause it" : "Run one worker with this prompt"}>Run prompt</button>
+        <span className="muted small">{msg}</span>
+      </div>
+      {shown.map((p) => (
+        <div key={p.at} className="small" style={{ borderTop: "1px solid var(--line)", paddingTop: 6 }}>
+          <div className="muted">{fmtAgo(p.at)} · run {p.runId}{p.stopReason && p.stopReason !== "success" ? ` · ${p.stopReason}` : ""}</div>
+          <div style={{ whiteSpace: "pre-wrap" }}><strong>You:</strong> {p.text.slice(0, 600)}</div>
+          <div style={{ whiteSpace: "pre-wrap", marginTop: 4 }}><strong>Reply:</strong> {p.reply || "(no reply)"}</div>
+        </div>
+      ))}
+      {session.prompts.length > 1 && <button className="quiet sm" onClick={() => setAll(!all)}>{all ? "Show the latest only" : `Show all ${session.prompts.length}`}</button>}
     </section>
   );
 };

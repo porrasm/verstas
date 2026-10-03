@@ -55,6 +55,7 @@ export type Session = {
   setup: { name: string; ok: boolean; code: number; at: string; tail: string }[];
   requirements: string;
   readiness?: Readiness;
+  prompts: { at: string; runId: number; text: string; reply: string; stopReason: string }[];
   state: string;
 };
 export type Readiness = { verdict: "ready" | "needs"; at: string; summary: string; checks: { text: string; ok: boolean }[]; confirmedAt?: string };

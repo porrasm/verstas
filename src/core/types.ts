@@ -372,6 +372,10 @@ export const sessionSchema = z.object({
    * box meet them and reports; tickets run only after you confirm.
    */
   requirements: z.string().max(20_000).default(""),
+  /** Prompts you ran from the session page (one worker, no ticket) and their replies; newest last, at most 20. */
+  prompts: z
+    .array(z.object({ at: z.string(), runId: z.number().int(), text: z.string().max(20_000), reply: z.string().max(8000).default(""), stopReason: z.string().default("") }))
+    .default([]),
   /** The setup worker's last verdict on the requirements, and whether you confirmed it. */
   readiness: readinessSchema.optional(),
   /** Per-session auto-approval rules (P2); present in the schema so files stay forward-compatible. */
@@ -413,7 +417,7 @@ export type Run = z.infer<typeof runSchema>;
  * one vendor's format.
  */
 export const eventSchema = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("text"), t: z.string(), ticket: ticketIdSchema.optional(), role: z.enum(["implementer", "reviewer", "planner", "setup"]).optional(), text: z.string() }),
+  z.object({ kind: z.literal("text"), t: z.string(), ticket: ticketIdSchema.optional(), role: z.enum(["implementer", "reviewer", "planner", "setup", "prompt"]).optional(), text: z.string() }),
   z.object({ kind: z.literal("tool_use"), t: z.string(), ticket: ticketIdSchema.optional(), tool: z.string(), summary: z.string() }),
   z.object({ kind: z.literal("tool_result"), t: z.string(), ticket: ticketIdSchema.optional(), tool: z.string(), ok: z.boolean(), summary: z.string() }),
   z.object({ kind: z.literal("status"), t: z.string(), ticket: ticketIdSchema.optional(), text: z.string() }),
@@ -429,7 +433,7 @@ export const eventSchema = z.discriminatedUnion("kind", [
     kind: z.literal("worker_done"),
     t: z.string(),
     ticket: ticketIdSchema.optional(),
-    role: z.enum(["implementer", "reviewer", "planner", "setup"]),
+    role: z.enum(["implementer", "reviewer", "planner", "setup", "prompt"]),
     ok: z.boolean(),
     stopReason: z.string(),
     rateLimited: z.boolean(),

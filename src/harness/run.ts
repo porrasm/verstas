@@ -7,7 +7,7 @@ import { writeJsonAtomic } from "../board/store.js";
 import type { SessionHandle, SessionHub } from "../sessions/hub.js";
 import type { RunTokens } from "../agent-api/agent-api.js";
 import { workspaceSizeMb } from "../sessions/sessions.js";
-import { implementerPrompt, mcpConfig, notesIndexMd, plannerPrompt, reviewerPrompt, setupPrompt, systemMd, verstasMd, withContext, workspaceClaudeMd } from "./prompts.js";
+import { implementerPrompt, mcpConfig, notesIndexMd, plannerPrompt, reviewerPrompt, setupPrompt, systemMd, userPrompt, verstasMd, withContext, workspaceClaudeMd } from "./prompts.js";
 import type { Job } from "../worker/worker.js";
 
 /**
@@ -72,13 +72,15 @@ export class RunManager {
   /**
    * plan: run the planner first. brief: refresh the brief and stop. setup:
    * run the setup worker against the session requirements and stop.
-   * Without any of them this is a work run, which the setup gate refuses
-   * while requirements are set and not confirmed.
+   * prompt: run one worker with your text, no ticket, and stop. Without any
+   * of them this is a work run, which the setup gate refuses while
+   * requirements are set and not confirmed.
    */
-  async start(sessionId: string, opts: { plan?: boolean; brief?: boolean; setup?: boolean } = {}): Promise<RunControl> {
+  async start(sessionId: string, opts: { plan?: boolean; brief?: boolean; setup?: boolean; prompt?: string } = {}): Promise<RunControl> {
     if (this.active.has(sessionId)) throw new Error("A run is already active for this session");
     const h = await this.deps.hub.get(sessionId);
-    if (!opts.setup && !opts.brief && !opts.plan && needsSetup(h.session)) {
+    if (opts.prompt !== undefined && !opts.prompt.trim()) throw new Error("The prompt is empty");
+    if (!opts.setup && !opts.brief && !opts.plan && opts.prompt === undefined && needsSetup(h.session)) {
       throw new Error(
         h.session.readiness?.verdict === "ready"
           ? "The setup worker reported the environment ready; confirm it on the session page to start work."
@@ -173,7 +175,7 @@ export class RunManager {
   private async loop(
     h: SessionHandle,
     run: Run,
-    opts: { plan?: boolean; brief?: boolean; setup?: boolean },
+    opts: { plan?: boolean; brief?: boolean; setup?: boolean; prompt?: string },
     ctl: { isPause: () => boolean; isStop: () => boolean; signal: AbortSignal },
   ): Promise<Run> {
     const d = this.deps;
@@ -236,6 +238,20 @@ export class RunManager {
             await status(open ? `setup needs you: ${readiness.summary.slice(0, 300)}` : `setup not ready: ${readiness.summary.slice(0, 300)}`);
           }
         }
+      }
+
+      // Your prompt: one worker, your text, the notes in front, no ticket. Any
+      // repository change becomes one commit; the reply is kept on the session.
+      if (opts.prompt !== undefined) {
+        proceed = false;
+        const text = opts.prompt;
+        await status(`prompt: ${text.trim().split("\n")[0]!.slice(0, 120)}`);
+        const done = await this.runJob(h, run, { role: "prompt", promptText: await this.withNotes(h, userPrompt(text)) }, log, ctl.signal, token);
+        addCost(run, done.costUsd);
+        await this.commitInContainer(h, `Prompt: ${text.trim().split("\n")[0]!.slice(0, 72)}`);
+        const entry = { at: clock(), runId: run.id, text: text.slice(0, 20_000), reply: done.text.slice(0, 8000), stopReason: done.stopReason };
+        await h.mutate((docs) => ({ next: { session: { ...docs.session, prompts: [...docs.session.prompts, entry].slice(-20) } } }));
+        run.state = ctl.signal.aborted ? "stopped" : "finished";
       }
 
       // Brief only: refresh notes/brief.md with a setup worker in brief mode, then stop.
@@ -411,7 +427,7 @@ export class RunManager {
     const openForTicket = h.inbox.requests.filter((r) => r.state === "open" && r.ticketId === ticket.id);
     const halt = openForTicket.find((r) => r.halt);
     if (openForTicket.length) {
-      await this.commitInContainer(h, ticket, `${ticket.id} (waiting): ${ticket.title}`);
+      await this.commitInContainer(h, `${ticket.id} (waiting): ${ticket.title}`);
       await move("waiting", halt ? `Halt requested: ${halt.halt?.reason ?? ""}` : `Waiting on ${openForTicket.map((r) => `${r.id} (${r.actions.map((a) => a.detail.kind).join(", ") || "question"})`).join(", ")}`);
       run.currentTicket = undefined;
       return halt ? "halted" : "waiting";
@@ -441,7 +457,7 @@ export class RunManager {
       await this.writeTicketReport(h, run, ticket.id, "reviewer", rev);
       if (rev.rateLimited) {
         // Keep the work; the loop sleeps and the ticket goes back to ready for a fresh review next time.
-        await this.commitInContainer(h, ticket, `${ticket.id} (wip): ${ticket.title}`);
+        await this.commitInContainer(h, `${ticket.id} (wip): ${ticket.title}`);
         await move("ready", "Reviewer was rate limited; requeued with the work kept");
         return "rate_limited";
       }
@@ -463,7 +479,7 @@ export class RunManager {
     await h.mutate((docs) => ({ next: { board: replaceTicket(docs.board, { ...getTicket(docs.board, ticket.id), attempts }) } }));
 
     if (verdict === "ok") {
-      await this.commitInContainer(h, ticket, `${ticket.id}: ${ticket.title}`);
+      await this.commitInContainer(h, `${ticket.id}: ${ticket.title}`);
       await h.mutate((docs) => {
         const t = getTicket(docs.board, ticket.id);
         return { next: { board: replaceTicket(docs.board, { ...t, diff: numstat, cost: { ...(t.cost ?? { inputTokens: 0, outputTokens: 0 }), usd: (t.cost?.usd ?? 0) + impl.costUsd } }) } };
@@ -474,12 +490,12 @@ export class RunManager {
       return "done";
     }
     if (verdict === "fixable" && attempts < caps.ticketAttempts) {
-      await this.commitInContainer(h, ticket, `${ticket.id} (wip attempt ${attempts}): ${ticket.title}`);
+      await this.commitInContainer(h, `${ticket.id} (wip attempt ${attempts}): ${ticket.title}`);
       await move("ready", `Not done yet (${verdictNote || "see reviewer notes"}); attempt ${attempts} of ${caps.ticketAttempts}`);
       run.currentTicket = undefined;
       return "requeued";
     }
-    await this.commitInContainer(h, ticket, `${ticket.id} (blocked): ${ticket.title}`);
+    await this.commitInContainer(h, `${ticket.id} (blocked): ${ticket.title}`);
     await move("blocked", verdict === "blocked" ? `Reviewer: blocked. ${verdictNote}` : `Gave up after ${attempts} attempts: ${verdictNote || "not accepted"}`);
     run.currentTicket = undefined;
     return "blocked";
@@ -598,8 +614,8 @@ export class RunManager {
     return { stat: stat.stdout.trim(), numstat: { added, removed, files }, diff: diff.stdout };
   }
 
-  /** Commits everything staged in every repo of the session, inside the container (docs/SANDBOX.md Boundary 5). */
-  private async commitInContainer(h: SessionHandle, _ticket: Ticket, message: string): Promise<void> {
+  /** Commits every change in every repo of the session, inside the container (docs/SANDBOX.md Boundary 5). */
+  private async commitInContainer(h: SessionHandle, message: string): Promise<void> {
     const sh = this.deps.shell(h.id);
     for (const repo of h.session.repos) {
       const dir = `/workspace/${repo.name}`;

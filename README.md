@@ -66,14 +66,18 @@ Then, in the web app:
    brief), `notes/env.md` (what is installed, services, verified
    commands) and `notes/setup.sh` (the recipe that rebuilds the box after
    the container is recreated).
-6. **Apply to repo** when you want the work: the session page's Work panel
+6. **Ask the box** (on the session page): one worker with your text, the
+   brief and env.md, outside any ticket. "Make sure you can run the e2e
+   suite", "why is the dev server slow?". It can install and configure; a
+   repository change becomes one commit; the reply stays on the page.
+7. **Apply to repo** when you want the work: the session page's Work panel
    puts a repository's commits on the branch `verstas/<session>` in your
    real checkout, one commit per ticket, without touching the branch you
    have checked out. Merge, rebase or cherry-pick from there. Export
    bundles remain for moving work to another machine: one `git fetch` line per
    repository is shown. Bundles are pure data; nothing from the repository
    runs on your machine.
-7. **Delete** the session when done. Its containers, network and directory
+8. **Delete** the session when done. Its containers, network and directory
    go with it.
 
 Run `npm run dev` in a terminal that stays open; the host app stops its
