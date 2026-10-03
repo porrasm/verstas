@@ -20,17 +20,16 @@ export const AGENT_API_HOST = "host.docker.internal";
  * created under older rules is recreated on the next start instead of
  * silently keeping them (it joins the spec fingerprint).
  */
-export const SANDBOX_VERSION = 2;
+export const SANDBOX_VERSION = 3;
 
 /**
  * Capabilities the session container keeps: Docker's default set minus
- * NET_RAW (raw sockets, packet spoofing), MKNOD (device nodes) and
- * AUDIT_WRITE. The agent runs as uid 1000, so these do nothing for it; they
- * exist so that root inside the box (setup scripts, approved root scripts)
- * can install packages: apt drops to its _apt user (SETUID/SETGID), dpkg
- * chowns files (CHOWN/FOWNER), installers write into root-owned trees
- * (DAC_OVERRIDE). None of them crosses a namespace. docs/SANDBOX.md
- * Boundary 2 explains the trade.
+ * NET_RAW (raw sockets, packet spoofing) and MKNOD (device nodes).
+ * AUDIT_WRITE stays because sudo warns on every call without it. They are what root inside the box (the agent through sudo,
+ * setup scripts) needs to install packages: apt drops to its _apt user
+ * (SETUID/SETGID), dpkg chowns files (CHOWN/FOWNER), installers write into
+ * root-owned trees (DAC_OVERRIDE). None of them crosses a namespace.
+ * docs/SANDBOX.md Boundary 2 explains the trade.
  */
 export const SESSION_CAPS = [
   "CHOWN",
@@ -44,6 +43,7 @@ export const SESSION_CAPS = [
   "SETFCAP",
   "NET_BIND_SERVICE",
   "SYS_CHROOT",
+  "AUDIT_WRITE",
 ] as const;
 
 export const networkName = (sessionId: string): string => `verstas-${sessionId}`;
@@ -158,8 +158,8 @@ export const runSessionArgs = (spec: SandboxSpec): string[] => [
   "--cap-drop",
   "ALL",
   ...SESSION_CAPS.flatMap((c) => ["--cap-add", c]),
-  "--security-opt",
-  "no-new-privileges",
+  // No no-new-privileges: it would block sudo, and root inside the box is
+  // intended. The default seccomp profile stays.
   "--pids-limit",
   String(spec.limits.pids),
   "--memory",

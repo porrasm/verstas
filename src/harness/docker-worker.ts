@@ -118,6 +118,9 @@ export const ensureSessionSandbox = async (c: RunManagerConfig, session: Session
   // Setup scripts run on a fresh container, and also when a previous setup never completed.
   const setupPending = session.setupScripts.length > 0 && (recreated || session.setup.length === 0 || session.setup.some((r) => !r.ok));
   if (setupPending) await runSetup(c, session.id);
+  // Services the agent registered with svc come back after a container restart; a no-op when they run.
+  const up = await runInSandbox(c.sandbox, session.id, ["svc", "up"], { allowFailure: true, timeoutMs: 180_000 });
+  if (up.code !== 0 && up.stdout + up.stderr) console.warn(`[sandbox ${session.id}] svc up: ${(up.stdout + up.stderr).trim().slice(-500)}`);
   if (recreated) {
     for (const rc of session.rootScripts) {
       const r = await runRootScript(c.sandbox, session.id, rc.script, rc.cwd);
@@ -159,7 +162,14 @@ export const createDockerRunManager = (c: RunManagerConfig): RunManager =>
     worker: (sessionId) => dockerWorker(c.sandbox, sessionId),
     proxyDenials: (sessionId, since) => proxyDenials(c.sandbox, sessionId)(since),
     ensureSandbox: (session, envFile, token) => ensureSessionSandbox(c, session, envFile, token),
-    healSandbox: (sessionId) => healSandbox(c.sandbox, sessionId),
+    healSandbox: async (sessionId) => {
+      const did = await healSandbox(c.sandbox, sessionId);
+      if (did.some((l) => l.startsWith("session container"))) {
+        const up = await runInSandbox(c.sandbox, sessionId, ["svc", "up"], { allowFailure: true, timeoutMs: 180_000 });
+        did.push(`svc up: ${(up.stdout + up.stderr).trim().split("\n").slice(-3).join("; ") || "no services"}`);
+      }
+      return did;
+    },
   });
 
 export const proxyDistPath = (distRoot: string): string => path.join(distRoot, "src", "proxy");

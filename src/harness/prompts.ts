@@ -29,17 +29,21 @@ ${session.repos.map((r) => `  - \`/workspace/${r.name}\` (from \`${r.branch}\`)`
   Packs you can ask for: ${NETWORK_PACKS.filter((p) => p.name !== "anthropic" && !session.packs.includes(p.name)).map((p) => `\`${p.name}\` (${p.title})`).join(", ")}.
 - Setup scripts the user chose ran once as root when this container was created:
 ${session.setupScripts.length ? session.setupScripts.map((x) => `  - ${x.name}: ${x.note || x.description || "(no note)"}`).join("\n") : "  - (none)"}
-- There is no sudo and no Docker. The user is a person with hands. One
-  \`request\` carries everything you need at once: a summary plus actions
-  of kinds \`root_script\` (bash run as root in this container, e.g. apt-get
-  installs; you get the output), \`network\` (a host to allow), \`resources\`,
-  \`instruction\` (something only a person can do) and \`question\` (a
-  decision). The ticket parks until every action is decided.
-  Services you need (a database, a dev server, a Kapula server) you start
-  as ordinary processes in this container. Background processes outlive
-  the worker that started them and stay up for the whole session, so check
-  with \`ps\` before starting a second copy, and free a port with
-  \`pkill\` or \`fuser -k\` if an earlier worker left a server on it.
+- You have passwordless \`sudo\`. Install what you need yourself
+  (\`sudo apt-get install -y …\`, \`sudo npm install -g …\`); every sudo
+  command is logged for the user. Start services with \`svc\` so they get a
+  name, a log and survive a container restart:
+  \`svc start pg --port 5432 -- postgres -D /workspace/.pg\`, then
+  \`svc status\`, \`svc logs pg\`, \`svc stop pg\`. There is no Docker.
+- The user is a person with hands, and asleep most of the time. Ask only
+  for what you cannot do yourself. One \`request\` carries everything at
+  once: a summary plus actions of kinds \`network\` / \`pack\` (hosts to
+  allow), \`resources\`, \`instruction\` (something only a person can do)
+  and \`question\` (a decision). The ticket parks until every action is
+  decided, which usually means until morning.
+  Services (a database, a dev server) outlive the worker that started them
+  and stay up for the whole session: \`svc status\` before starting a
+  second copy.
 - Caps per worker: ${session.caps.workerMinutes} minutes, ${session.caps.workerTurns} turns, ${session.caps.budgetUsd} USD.
   The harness stops you at a cap; file your report early rather than late.
 - Commits are made by the harness after you finish, one per ticket. Do not

@@ -443,8 +443,11 @@ const SetupPanel = ({ session, base, active, onDone }: { session: Session; base:
   const [logs, setLogs] = useState<Record<string, string>>({});
   const [brief, setBrief] = useState<{ text: string; updatedAt: string | null; words: number } | null>(null);
   const [showBrief, setShowBrief] = useState(false);
+  const [sudo, setSudo] = useState<{ count: number; commands: string[] } | null>(null);
+  const [showSudo, setShowSudo] = useState(false);
   useEffect(() => {
     api<{ text: string; updatedAt: string | null; words: number }>("GET", `${base}/brief`).then(setBrief).catch(() => setBrief(null));
+    api<{ count: number; commands: string[] }>("GET", `${base}/sudo-log`).then(setSudo).catch(() => setSudo(null));
   }, [base, session.preflight?.at, active]);
   const refreshBrief = async () => {
     setBusy(true);
@@ -516,6 +519,12 @@ const SetupPanel = ({ session, base, active, onDone }: { session: Session; base:
         {brief?.text && <button className="quiet sm" onClick={() => setShowBrief(!showBrief)}>{showBrief ? "hide" : "view"}</button>}{" "}
         <button className="quiet sm" onClick={refreshBrief} disabled={busy || active} title={active ? "Pause or stop the run first" : "Run an orientation worker that writes or refreshes the brief"}>{brief?.text ? "Refresh brief" : "Write brief"}</button>
         {showBrief && brief?.text && <pre className="mono" style={{ whiteSpace: "pre-wrap", maxHeight: 360, overflow: "auto", marginTop: 6 }}>{brief.text}</pre>}
+      </div>
+      <div className="small" style={{ borderTop: "1px solid var(--line)", paddingTop: 8 }}>
+        <span className="dot" /> <strong>Run as root</strong>{" "}
+        <span className="muted">{sudo?.count ? `${sudo.count} sudo command${sudo.count === 1 ? "" : "s"} by the agent` : "nothing yet"}</span>{" "}
+        {Boolean(sudo?.count) && <button className="quiet sm" onClick={() => setShowSudo(!showSudo)}>{showSudo ? "hide" : "view"}</button>}
+        {showSudo && sudo && <pre className="mono" style={{ whiteSpace: "pre-wrap", maxHeight: 240, overflow: "auto", marginTop: 6 }}>{sudo.commands.join("\n")}</pre>}
       </div>
       {(session.caps.preflight || session.preflight) && (
         <div className="small" style={{ borderTop: "1px solid var(--line)", paddingTop: 8 }}>

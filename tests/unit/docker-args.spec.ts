@@ -41,10 +41,11 @@ test("the session container has exactly the documented boundaries", () => {
   expect(pairs("--network")).toEqual(["verstas-nuppi-mvp"]);
   expect(pairs("--user")).toEqual(["1000:1000"]);
   expect(pairs("--cap-drop")).toEqual(["ALL"]);
-  // Docker's defaults minus NET_RAW, MKNOD and AUDIT_WRITE: enough for root in the box to install packages.
-  expect(pairs("--cap-add")).toEqual(["CHOWN", "DAC_OVERRIDE", "FOWNER", "FSETID", "KILL", "SETGID", "SETUID", "SETPCAP", "SETFCAP", "NET_BIND_SERVICE", "SYS_CHROOT"]);
-  for (const never of ["NET_RAW", "MKNOD", "AUDIT_WRITE", "SYS_ADMIN", "NET_ADMIN", "SYS_PTRACE", "SYS_MODULE", "ALL"]) expect(pairs("--cap-add")).not.toContain(never);
-  expect(pairs("--security-opt")).toEqual(["no-new-privileges"]);
+  // Docker's defaults minus NET_RAW and MKNOD: enough for root in the box to install packages.
+  expect(pairs("--cap-add")).toEqual(["CHOWN", "DAC_OVERRIDE", "FOWNER", "FSETID", "KILL", "SETGID", "SETUID", "SETPCAP", "SETFCAP", "NET_BIND_SERVICE", "SYS_CHROOT", "AUDIT_WRITE"]);
+  for (const never of ["NET_RAW", "MKNOD", "SYS_ADMIN", "NET_ADMIN", "SYS_PTRACE", "SYS_MODULE", "ALL"]) expect(pairs("--cap-add")).not.toContain(never);
+  // sudo is the point; seccomp stays at Docker's default (no unconfined, no apparmor override).
+  expect(pairs("--security-opt")).toEqual([]);
   expect(pairs("--pids-limit")).toEqual(["2048"]);
   expect(pairs("--memory")).toEqual(["4g"]);
   expect(pairs("--cpus")).toEqual(["2"]);

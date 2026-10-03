@@ -69,10 +69,10 @@ export type ContextInput = {
 };
 
 const RULES = [
-  "The agent runs as uid 1000 with no sudo; its only writable place that survives is /workspace (plus /tmp, a 1 GB tmpfs). Everything else is read-only to it.",
+  "The agent runs as uid 1000 with passwordless sudo (logged). /workspace is the bind mount that survives a container recreate; /tmp is a 2 GB tmpfs.",
   "Network: HTTPS only, through a proxy, to an allowlist of hosts. Plain HTTP is refused, so are IP literals, and names outside the list do not resolve. Tools that honour HTTPS_PROXY work (curl, git, npm, pip, Claude Code); tools that do not cannot connect.",
-  "Setup scripts run once as root when the session's container is created (bash -e, non-interactive), with their output logged. After that there is no root except commands the user approves one by one.",
-  "No systemd and no Docker inside the box. Services (Postgres, Redis, dev servers) run as plain processes started by the agent or by a setup script; they stay up for the whole session.",
+  "Setup scripts run once as root when the session's container is created (bash -e, non-interactive), with their output logged. The agent can also install with sudo during the session.",
+  "No systemd and no Docker inside the box. Services (Postgres, Redis, dev servers) run as plain processes under `svc` (svc start <name> --port N -- <cmd>), which remembers them and restarts them after a container restart.",
   "Repositories arrive as fresh git clones under /workspace/<name> on a run branch; git-ignored files (.env, keys) are not there. Zip attachments are extracted under /workspace/attachments.",
   "The agent commits nothing; the harness commits once per ticket. Work is exported as git bundles.",
 ];

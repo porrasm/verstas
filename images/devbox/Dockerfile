@@ -5,15 +5,16 @@
 #
 #   docker build -f images/devbox/Dockerfile -t verstas-devbox:local .
 #
-# What is in here is what the agent can use without asking: Node 22, git,
-# Python 3 with pip, a C toolchain for native modules, and Claude Code. Add
-# tools here when the request log shows the same install being approved
-# again and again. There is no sudo; the harness installs as root through
-# `docker exec` (docs/SANDBOX.md Boundary 7).
+# What is in here is what the agent can use from the first minute: Node 22,
+# git, Python 3 with pip, a C toolchain for native modules, the shared
+# libraries and fonts a headless browser needs, Claude Code, and `svc` for
+# services. Anything else the agent installs itself with sudo (apt-get,
+# npm -g), which is logged; add tools here when the same install shows up in
+# session after session.
 #
 # The agent runs as uid 1000 (`node`, already present in the base image) with
-# HOME=/workspace/.home set by the harness, so every dotfile it writes stays
-# in the bind mount.
+# passwordless sudo. The container is the boundary, not the user inside it
+# (docs/SANDBOX.md, "Capability inside, boundary outside").
 
 FROM node:22-bookworm
 
@@ -27,7 +28,30 @@ RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g; s|http://security.
       git ca-certificates curl jq unzip zip less procps lsof psmisc iproute2 \
       python3 python3-pip python3-venv \
       build-essential pkg-config \
+      sudo \
+ && apt-get install -y --no-install-recommends \
+      fonts-liberation fonts-noto-color-emoji \
+      libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libatspi2.0-0 libcups2 \
+      libdrm2 libdbus-1-3 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 \
+      libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2 libx11-xcb1 \
+      libxshmfence1 libxss1 libgtk-3-0 \
  && rm -rf /var/lib/apt/lists/*
+
+# Passwordless sudo for the agent. Every command is logged to a file in the
+# workspace, which the session page shows. A log the agent could edit is a
+# record, not a control; the controls are the container's flags.
+RUN printf '%s\n' \
+      'node ALL=(ALL:ALL) NOPASSWD: ALL' \
+      'Defaults logfile=/workspace/.verstas/logs/sudo.log' \
+      'Defaults !lecture, !syslog' \
+      'Defaults env_keep += "HTTPS_PROXY HTTP_PROXY https_proxy http_proxy NO_PROXY DEBIAN_FRONTEND"' \
+      > /etc/sudoers.d/verstas \
+ && chmod 0440 /etc/sudoers.d/verstas \
+ && visudo -cf /etc/sudoers.d/verstas
+
+# svc: start, stop and remember services (Postgres, Redis, dev servers).
+COPY images/devbox/svc /usr/local/bin/svc
+RUN chmod 0755 /usr/local/bin/svc
 
 # Claude Code CLI, pinned; bump deliberately. The worker drives it with
 # `claude -p` and translates its stream-json into Verstas events.

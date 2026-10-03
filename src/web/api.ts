@@ -492,6 +492,17 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
     }),
   );
 
+  /** What ran as root in the box through sudo: workspace/.verstas/logs/sudo.log, newest last. */
+  api.get(
+    "/sessions/:id/sudo-log",
+    wrap(async (req, res) => {
+      const h = await d.hub.get(param(req, "id"));
+      const text = await fs.readFile(path.join(h.paths.workspace, ".verstas", "logs", "sudo.log"), "utf8").catch(() => "");
+      const commands = [...text.matchAll(/COMMAND=(.*)$/gm)].map((m) => m[1]!.trim());
+      res.json({ count: commands.length, commands: commands.slice(-200) });
+    }),
+  );
+
   /** Forget the last preflight verdict so the next run checks again. */
   api.post(
     "/sessions/:id/preflight/reset",

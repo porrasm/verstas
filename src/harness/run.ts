@@ -498,7 +498,7 @@ export class RunManager {
     const ws = h.paths.workspace;
     await fs.writeFile(path.join(ws, "VERSTAS.md"), verstasMd(h.session, this.deps.agentApiUrl));
     await fs.writeFile(path.join(ws, "CLAUDE.md"), workspaceClaudeMd());
-    await fs.mkdir(path.join(ws, WORKSPACE_FILES), { recursive: true });
+    await fs.mkdir(path.join(ws, WORKSPACE_FILES, "logs"), { recursive: true });
     await fs.writeFile(path.join(ws, WORKSPACE_FILES, "mcp.json"), JSON.stringify(mcpConfig(), null, 2));
     await fs.mkdir(h.paths.notes, { recursive: true });
     const index = path.join(h.paths.notes, "INDEX.md");

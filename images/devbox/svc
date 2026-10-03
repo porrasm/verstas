@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+# svc: a tiny service supervisor for the Verstas box.
+#
+# Services (a database, a dev server) outlive the worker that started them
+# and stay up for the whole session. svc gives them a name, a pid file and a
+# log, and remembers how to start them so the harness can bring them back
+# after the container restarts (`svc up`).
+#
+#   svc start <name> [--port N] [--cwd DIR] -- <command...>
+#                             start in the background unless already running;
+#                             with --port, wait up to 60 s for it to listen
+#   svc stop <name>           stop it (TERM, then KILL after 10 s) and forget it
+#   svc restart <name>        stop, then start with the remembered command
+#   svc status [name]         one line per service: running or stopped
+#   svc logs <name> [lines]   the tail of its log (default 50)
+#   svc up                    start every remembered service that is not running
+#
+# State lives in $SVC_DIR (default $HOME/.svc): <name>.cmd, .cwd, .port,
+# .pid, .log. Services run as whoever calls svc; use `sudo svc` only for a
+# service that must be root.
+set -euo pipefail
+
+DIR="${SVC_DIR:-$HOME/.svc}"
+mkdir -p "$DIR"
+
+usage() { sed -n '4,20p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+valid() { [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || { echo "svc: bad name '$1'" >&2; exit 2; }; }
+running() { local p; p=$(cat "$DIR/$1.pid" 2>/dev/null) && [ -n "$p" ] && kill -0 "$p" 2>/dev/null; }
+
+wait_port() {
+  local name=$1 port=$2
+  for _ in $(seq 1 120); do
+    if (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then return 0; fi
+    running "$name" || { echo "svc: $name exited before listening on $port; last log lines:" >&2; tail -n 20 "$DIR/$name.log" >&2; return 1; }
+    sleep 0.5
+  done
+  echo "svc: $name is running but nothing listens on $port after 60 s" >&2
+  return 1
+}
+
+launch() {
+  local name=$1
+  local cwd port
+  cwd=$(cat "$DIR/$name.cwd" 2>/dev/null || pwd)
+  port=$(cat "$DIR/$name.port" 2>/dev/null || true)
+  if running "$name"; then echo "$name already running (pid $(cat "$DIR/$name.pid"))"; return 0; fi
+  # setsid: its own process group, so `svc stop` gets the children too and a
+  # worker's exit cannot take it down. stdout/stderr go to the log, never to
+  # the caller's pipe (a held pipe would keep the worker waiting).
+  (cd "$cwd" && setsid bash -c "$(cat "$DIR/$name.cmd")" >>"$DIR/$name.log" 2>&1 </dev/null & echo $! >"$DIR/$name.pid")
+  sleep 0.3
+  if ! running "$name"; then echo "svc: $name exited at once; last log lines:" >&2; tail -n 20 "$DIR/$name.log" >&2; return 1; fi
+  if [ -n "$port" ]; then wait_port "$name" "$port"; fi
+  echo "$name started (pid $(cat "$DIR/$name.pid"))${port:+, listening on $port}"
+}
+
+stop() {
+  local name=$1 p
+  p=$(cat "$DIR/$name.pid" 2>/dev/null || true)
+  if [ -n "$p" ] && kill -0 "$p" 2>/dev/null; then
+    kill -TERM -- "-$p" 2>/dev/null || kill -TERM "$p" 2>/dev/null || true
+    for _ in $(seq 1 20); do kill -0 "$p" 2>/dev/null || break; sleep 0.5; done
+    kill -KILL -- "-$p" 2>/dev/null || true
+  fi
+  rm -f "$DIR/$name.pid"
+}
+
+cmd=${1:-}; shift || true
+case "$cmd" in
+  start)
+    name=${1:-}; [ -n "$name" ] || usage; valid "$name"; shift
+    port=""; cwd=$(pwd)
+    while [ $# -gt 0 ] && [ "$1" != "--" ]; do
+      case "$1" in
+        --port) port=$2; shift 2 ;;
+        --cwd) cwd=$2; shift 2 ;;
+        *) usage ;;
+      esac
+    done
+    [ "${1:-}" = "--" ] || usage; shift
+    [ $# -gt 0 ] || usage
+    if running "$name"; then echo "$name already running (pid $(cat "$DIR/$name.pid"))"; exit 0; fi
+    printf '%q ' "$@" >"$DIR/$name.cmd"
+    printf '%s' "$cwd" >"$DIR/$name.cwd"
+    if [ -n "$port" ]; then printf '%s' "$port" >"$DIR/$name.port"; else rm -f "$DIR/$name.port"; fi
+    launch "$name"
+    ;;
+  stop)
+    name=${1:-}; [ -n "$name" ] || usage; valid "$name"
+    stop "$name"; rm -f "$DIR/$name.cmd" "$DIR/$name.cwd" "$DIR/$name.port"; echo "$name stopped"
+    ;;
+  restart)
+    name=${1:-}; [ -n "$name" ] || usage; valid "$name"
+    [ -f "$DIR/$name.cmd" ] || { echo "svc: no service $name" >&2; exit 1; }
+    stop "$name"; launch "$name"
+    ;;
+  status)
+    shopt -s nullglob
+    files=("$DIR"/*.cmd)
+    [ -n "${1:-}" ] && files=("$DIR/$1.cmd")
+    for f in "${files[@]}"; do
+      n=$(basename "$f" .cmd)
+      if running "$n"; then s="running pid $(cat "$DIR/$n.pid")"; else s="stopped"; fi
+      echo "$n  $s  $(cat "$f")"
+    done
+    ;;
+  logs)
+    name=${1:-}; [ -n "$name" ] || usage; valid "$name"
+    tail -n "${2:-50}" "$DIR/$name.log"
+    ;;
+  up)
+    shopt -s nullglob
+    rc=0
+    for f in "$DIR"/*.cmd; do launch "$(basename "$f" .cmd)" || rc=1; done
+    exit $rc
+    ;;
+  *) usage ;;
+esac

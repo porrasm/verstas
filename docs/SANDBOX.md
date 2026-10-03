@@ -23,6 +23,29 @@ Out of scope: escaping the Docker Desktop virtual machine itself, and the
 model provider. Anthropic's API is the one trusted external party by
 decision; your code goes there.
 
+## Capability inside, boundary outside
+
+The box is meant to become whatever development environment a project
+needs, without a person approving each install at night. So power goes
+into the box and control stays outside it:
+
+- **Inside**, the agent is uid 1000 with passwordless `sudo`. It installs
+  packages, runs services, writes anywhere in the container. Every sudo
+  command is logged to `workspace/.verstas/logs/sudo.log` and shown on the
+  session page; that log is a record, not a control, since root can edit it.
+- **Outside** are the boundaries that protect your machine, and none of
+  them depends on the user inside the container: one bind mount (the
+  workspace), the internal network whose only exit is the allowlist proxy,
+  no Docker socket, no `--privileged`, no devices, Docker's default seccomp
+  profile, and the resource limits.
+
+A compromised agent that owns the box owns one disposable session. It
+still cannot read your disk, reach a host you did not allow, or start a
+container on your machine. What it can do with root that uid 1000 could
+not is attack the kernel through the syscalls the default seccomp profile
+allows; that is the same surface any `docker run` you type exposes, and on
+macOS it sits inside Docker Desktop's VM.
+
 ## Where the host app runs, and why not in Docker
 
 The host app (board, loop, UI) runs as an ordinary Node process on your
@@ -69,9 +92,8 @@ so that a change here shows up as a test diff):
 | Option | Why |
 | --- | --- |
 | `--network verstas-<id>` | A per-session network created with `--internal`: no default route, no gateway, no `host.docker.internal`. The only other member is the proxy. |
-| `--user 1000:1000` | Non-root. There is no sudo in the image. |
-| `--cap-drop ALL` then `--cap-add` CHOWN, DAC_OVERRIDE, FOWNER, FSETID, KILL, SETGID, SETUID, SETPCAP, SETFCAP, NET_BIND_SERVICE, SYS_CHROOT | Docker's default set minus NET_RAW (raw sockets), MKNOD (device nodes) and AUDIT_WRITE. The agent is uid 1000, so these do nothing for it. They exist for root inside the box: apt drops to its `_apt` user, dpkg chowns installed files, installers write into root-owned trees. With `--cap-drop ALL` alone every apt-get as root failed with `setgroups: Operation not permitted`. None of these crosses a namespace; SYS_ADMIN, NET_ADMIN, SYS_PTRACE and SYS_MODULE are never added. |
-| `--security-opt no-new-privileges` | setuid binaries cannot raise privileges. |
+| `--user 1000:1000` | The agent's user. It has passwordless `sudo` (`/etc/sudoers.d/verstas` in the image), logged to the workspace. |
+| `--cap-drop ALL` then `--cap-add` CHOWN, DAC_OVERRIDE, FOWNER, FSETID, KILL, SETGID, SETUID, SETPCAP, SETFCAP, NET_BIND_SERVICE, SYS_CHROOT, AUDIT_WRITE | Docker's default set minus NET_RAW (raw sockets) and MKNOD (device nodes). They exist for root inside the box (the agent through sudo): apt drops to its `_apt` user, dpkg chowns installed files, installers write into root-owned trees. With `--cap-drop ALL` alone every apt-get as root failed with `setgroups: Operation not permitted`. None of these crosses a namespace; SYS_ADMIN, NET_ADMIN, SYS_PTRACE and SYS_MODULE are never added. |
 | `--pids-limit 2048`, `--memory <n>`, `--cpus <n>` | A runaway build or fork bomb stays inside the budget you set per session. |
 | `--tmpfs /tmp:exec,size=2g`, `TMPDIR=/tmp` | Scratch space that disappears with the container. `exec` because installers and builds run binaries from the temp directory; Docker's default tmpfs is `noexec`. |
 | `-v <session>/workspace:/workspace` | The one read-write bind mount. |
@@ -83,12 +105,15 @@ Not used, and why:
 
 - `--privileged`, any `--device`, the Docker socket: never. These are the
   three ways out of a container.
+- `--security-opt no-new-privileges`: removed on purpose, because it blocks
+  `sudo`. With root inside the box intended, the flag protected nothing
+  that the boundaries above do not.
 - `--read-only` root filesystem: not in the MVP. Installs requested by the
   agent write under `/usr` and `/opt`, and the container is disposable. It
   can be added later with explicit writable mounts.
 - Nested Docker (docker-in-docker, sysbox): never in the MVP. Services the
-  agent needs (Postgres, Redis, a Kapula server) are installed in the image
-  and run as plain processes under the agent's user.
+  agent needs (Postgres, Redis, a Kapula server) are installed with sudo
+  and run as plain processes under `svc`, the image's small supervisor.
 
 ## Boundary 3: the network
 
@@ -187,25 +212,26 @@ Secrets requested by the agent (a third-party API key) are a later feature.
 When added, they are injected the same way and the agent sees only the
 variable name in its context.
 
-## Boundary 7: root scripts approved by you
+## Boundary 7: root inside the box
 
-The agent user cannot install system packages or change anything outside
-`/workspace`. When a worker needs that, it files a request whose
-`root_script` action carries the bash verbatim. The inbox shows every line.
+The agent installs system packages itself with `sudo`; see "Capability
+inside, boundary outside" above. What follows describes the two root
+paths that remain for text the agent did not run itself.
+
+A worker may still file a request whose `root_script` action carries
+bash verbatim (this path is being retired in favour of sudo). The inbox shows every line.
 If you approve, the host app runs it **as root inside the session
 container** (`docker exec -u root … bash -e -s` with the script on stdin),
 with a 15-minute cap, and the output tail goes back to the worker as the
 action's outcome. Approved scripts are recorded on the session and
 replayed if the container is ever recreated.
 
-This is the one place agent-written text reaches a shell, and the rule
-that makes it acceptable is that nothing runs until a person has read it.
 Root here is root in a container with Docker's default capabilities minus
 raw sockets and device nodes, under the default seccomp profile, not on your
 machine (see
-Boundary 2 and the Residual risks), but it does own the container: a
-malicious install script could replace `node`, `git` or `claude` for every
-later worker in that session. Read the script, not just the package names.
+Boundary 2 and the Residual risks), and it owns the container: a
+malicious install could replace `node`, `git` or `claude` for every later
+worker in that session. The session is the unit you throw away.
 
 **Setup scripts** are the other root path: bash you wrote in the library,
 copied into the session at creation, run once as root with `bash -e` when
