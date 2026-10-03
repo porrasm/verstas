@@ -3,20 +3,22 @@ import { api, type Config, type Status } from "../api";
 
 export const SettingsPage = ({ status }: { status: Status | null }) => {
   const [cfg, setCfg] = useState<Config | null>(null);
-  const [msg, setMsg] = useState("");
+  const [msg, setMsg] = useState<{ text: string; error: boolean } | null>(null);
+  const ok = (text: string) => setMsg({ text, error: false });
+  const fail = (e: unknown) => setMsg({ text: (e as Error).message, error: true });
   const [token, setToken] = useState("");
   const [wt, setWt] = useState({ name: "", path: "" });
-  const load = () => api<Config>("GET", "/config").then(setCfg).catch((e: Error) => setMsg(e.message));
+  const load = () => api<Config>("GET", "/config").then(setCfg).catch(fail);
   useEffect(() => {
     load();
   }, []);
-  if (!cfg) return <div className="muted">{msg || "Loading…"}</div>;
+  if (!cfg) return <div className={msg?.error ? "err" : "muted"}>{msg?.text ?? "Loading…"}</div>;
   const save = async (patch: Partial<Config>) => {
     try {
       setCfg(await api<Config>("PUT", "/config", patch));
-      setMsg("Saved. Port and sessions-root changes take effect after a restart.");
+      ok("Saved. Port and sessions-root changes take effect after a restart.");
     } catch (e) {
-      setMsg((e as Error).message);
+      fail(e);
     }
   };
   const addTarget = async () => {
@@ -24,9 +26,9 @@ export const SettingsPage = ({ status }: { status: Status | null }) => {
       await api("POST", "/work-targets", wt);
       setWt({ name: "", path: "" });
       load();
-      setMsg("Work target added.");
+      ok(`Work target ${wt.name} added.`);
     } catch (e) {
-      setMsg((e as Error).message);
+      fail(e);
     }
   };
   const removeTarget = async (name: string) => {
@@ -37,15 +39,15 @@ export const SettingsPage = ({ status }: { status: Status | null }) => {
     try {
       await api("PUT", "/secrets", { claudeToken: token });
       setToken("");
-      setMsg("Token saved to ~/.verstas/secrets.json (mode 0600).");
+      ok("Token saved to ~/.verstas/secrets.json (mode 0600).");
     } catch (e) {
-      setMsg((e as Error).message);
+      fail(e);
     }
   };
   return (
     <div className="grid" style={{ maxWidth: 820 }}>
       <h2>Settings</h2>
-      {msg && <div className="small">{msg}</div>}
+      {msg && <div className={`card ${msg.error ? "err" : "ok"}`} role="status">{msg.error ? "Error: " : ""}{msg.text}</div>}
       <div className="card grid">
         <h3>Sessions root</h3>
         <p className="muted small">Every session is a directory under this path. The app creates and deletes them; nothing else on your disk is touched.</p>
@@ -65,10 +67,11 @@ export const SettingsPage = ({ status }: { status: Status | null }) => {
           </tbody>
         </table>
         <div className="row">
-          <input id="wt-name" placeholder="name (e.g. nuppi)" value={wt.name} onChange={(e) => setWt({ ...wt, name: e.target.value })} style={{ maxWidth: 200 }} />
-          <input id="wt-path" placeholder="/absolute/path/to/repo" value={wt.path} onChange={(e) => setWt({ ...wt, path: e.target.value })} />
+          <input id="wt-name" placeholder="name (letters, digits, . _ -)" value={wt.name} onChange={(e) => setWt({ ...wt, name: e.target.value })} style={{ maxWidth: 220 }} />
+          <input id="wt-path" placeholder="/absolute/path/to/repo or ~/path" value={wt.path} onChange={(e) => setWt({ ...wt, path: e.target.value })} />
           <button onClick={addTarget} disabled={!wt.name || !wt.path}>Add</button>
         </div>
+        {msg?.error && <div className="err small">{msg.text}</div>}
       </div>
       <div className="card grid">
         <h3>Claude token</h3>

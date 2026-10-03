@@ -120,6 +120,7 @@ export const NewSessionPage = () => {
       </div>
       <label className="chk"><input type="checkbox" checked={plan} onChange={(e) => setPlan(e.target.checked)} /> Start the planner right away (needs Docker, the image and a token)</label>
       <div className="foot">
+        {err && <span className="err small" style={{ marginRight: "auto" }}>Error: {err}</span>}
         <span className="muted small">{busy}</span>
         <a href="#/"><button>Cancel</button></a>
         <button className="pri" onClick={create} disabled={!name || Boolean(busy)}>Create session</button>
