@@ -10,6 +10,7 @@ import { createDockerRunManager, proxyDistPath, workerDistPath } from "./harness
 import { createDockerRunner } from "./sandbox/docker.js";
 import type { SandboxConfig } from "./sandbox/lifecycle.js";
 import { SessionHub } from "./sessions/hub.js";
+import { listSessions } from "./sessions/sessions.js";
 import { createUiApi } from "./web/api.js";
 
 /**
@@ -72,6 +73,13 @@ const runConfig = {
 };
 const runs = createDockerRunManager(runConfig);
 
+// A previous host process may have died with workers still running in their
+// containers and tickets still held. Clean that up before anything starts.
+for (const s of await listSessions(config.sessionsRoot)) {
+  const did = await runs.recover(s.id).catch((e: Error) => [`recovery failed: ${e.message}`]);
+  if (did.length) console.log(`[recover ${s.id}] ${did.join("; ")}`);
+}
+
 // Agent API: all interfaces, token-protected, path-restricted by the proxy.
 const agentApp = express();
 agentApp.use(requestLog("agent"));
@@ -125,10 +133,13 @@ server.listen(config.uiPort, "127.0.0.1", () => {
   console.log(`verstas ${version}  http://127.0.0.1:${config.uiPort}  sessions in ${config.sessionsRoot}${process.env.VERSTAS_DEBUG ? "  [debug: docker commands, raw worker streams, full tool output]" : ""}`);
 });
 
+let stopping = false;
 for (const sig of ["SIGINT", "SIGTERM"] as const) {
   process.on(sig, () => {
-    console.log("stopping; active runs are stopped and their tickets requeued");
+    if (stopping) process.exit(1); // a second Ctrl-C does not wait
+    stopping = true;
+    console.log("stopping; active runs are stopped and their tickets requeued (Ctrl-C again to force)");
     server.close();
-    setTimeout(() => process.exit(0), 1500).unref();
+    void runs.stopAll().finally(() => process.exit(0));
   });
 }

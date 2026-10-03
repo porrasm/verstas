@@ -539,3 +539,31 @@ test("without a reviewer, no diff and no report is not done", async () => {
     await fs.rm(s.root, { recursive: true, force: true });
   }
 });
+
+test("recover after a host crash: stops the orphaned worker, requeues held tickets, closes the run", async () => {
+  const s = await makeSession();
+  try {
+    const h = await s.hub.get(s.id);
+    await h.mutate((d) => ({
+      next: {
+        session: { ...d.session, state: "running" as const },
+        board: { ...d.board, tickets: d.board.tickets.map((t) => (t.id === "T-1" ? { ...t, state: "in_progress" as const } : t)) },
+      },
+    }));
+    await fs.mkdir(path.join(s.paths.runs, "1"), { recursive: true });
+    await writeJsonAtomic(path.join(s.paths.runs, "1", "run.json"), { id: 1, sessionId: s.id, startedAt: now(), state: "running", currentTicket: "T-1" });
+    const shell = fakeShell();
+    const mgr = manager(s, shell, fakeWorker(s.hub, s.id, async () => ({})));
+    const did = await mgr.recover(s.id);
+    expect(did.join("; ")).toContain("requeued T-1");
+    expect(shell.calls).toContainEqual(["pkill", "-TERM", "-f", "/opt/verstas/worker.js"]);
+    expect((await s.hub.get(s.id)).board.tickets[0]!.state).toBe("ready");
+    expect((await s.hub.get(s.id)).session.state).toBe("paused");
+    const run = JSON.parse(await fs.readFile(path.join(s.paths.runs, "1", "run.json"), "utf8"));
+    expect(run).toMatchObject({ state: "stopped", pauseReason: "host app restarted" });
+    // Nothing left to do the second time.
+    expect(await mgr.recover(s.id)).toEqual([]);
+  } finally {
+    await fs.rm(s.root, { recursive: true, force: true });
+  }
+});

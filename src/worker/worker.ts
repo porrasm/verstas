@@ -73,6 +73,16 @@ export const runJob = async (job: Job): Promise<number> => {
   });
   child.stdin.end(prompt);
 
+  // The harness stops a worker with SIGTERM. Pass it on, or claude keeps
+  // running (reparented to the container's init) after its driver is gone.
+  const onTerm = () => {
+    if (!stopReason) stopReason = "aborted";
+    child.kill("SIGTERM");
+    setTimeout(() => child.kill("SIGKILL"), 10_000).unref();
+  };
+  process.once("SIGTERM", onTerm);
+  process.once("SIGINT", onTerm);
+
   const timer = setTimeout(() => {
     stopReason = "time_cap";
     emit({ kind: "status", t: new Date().toISOString(), ticket: job.ticket, text: `time cap of ${job.caps.minutes} min reached; stopping` });
@@ -83,7 +93,19 @@ export const runJob = async (job: Job): Promise<number> => {
   let stderr = "";
   child.stderr.setEncoding("utf8").on("data", (d: string) => (stderr += d.slice(0, 4000)));
 
+  // A grandchild (a server the agent started in the background) can inherit
+  // claude's stdout and hold the pipe open after claude itself has exited;
+  // stop reading shortly after the exit instead of waiting for the pipe.
   const rl = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
+  const exited = new Promise<number>((resolve) =>
+    child.on("exit", (c) => {
+      setTimeout(() => {
+        rl.close();
+        child.stdout.destroy();
+      }, 2_000).unref();
+      resolve(c ?? 1);
+    }),
+  );
   for await (const line of rl) {
     if (job.debug) emit({ kind: "raw", t: new Date().toISOString(), line });
     const out = translateLine(line, { ticket: job.ticket, role: job.role, maxLen: job.debug ? 6000 : undefined });
@@ -99,7 +121,7 @@ export const runJob = async (job: Job): Promise<number> => {
       }
     }
   }
-  const code = await new Promise<number>((resolve) => child.on("close", (c) => resolve(c ?? 1)));
+  const code = await exited;
   clearTimeout(timer);
 
   const ok = !stopReason && code === 0 && (result?.ok ?? false);

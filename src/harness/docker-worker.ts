@@ -17,6 +17,8 @@ import type { Job } from "../worker/worker.js";
  */
 
 export const WORKER_COMMAND = ["node", "/opt/verstas/worker.js", "--job", "/workspace/.verstas/job.json"] as const;
+/** What pkill matches to stop a worker; the driver forwards the signal to claude. */
+export const WORKER_PATTERN = "/opt/verstas/worker.js";
 
 export const dockerShell = (cfg: SandboxConfig, sessionId: string): Shell => ({
   exec: (cmd, opts = {}) => runInSandbox(cfg, sessionId, cmd, { workdir: opts.workdir, timeoutMs: opts.timeoutMs, allowFailure: true, input: opts.input }),
@@ -38,7 +40,7 @@ export const dockerWorker = (cfg: SandboxConfig, sessionId: string): WorkerRunne
       // Stop the driver; the harness's `docker exec` child dies, and the
       // driver's own SIGTERM handling stops claude. The container stays up.
       child.kill("SIGTERM");
-      void runInSandbox(cfg, sessionId, ["pkill", "-TERM", "-f", "/opt/verstas/worker.js"], { allowFailure: true, timeoutMs: 10_000 });
+      void runInSandbox(cfg, sessionId, ["pkill", "-TERM", "-f", WORKER_PATTERN], { allowFailure: true, timeoutMs: 10_000 });
     };
     signal.addEventListener("abort", onAbort, { once: true });
     const t0 = Date.now();

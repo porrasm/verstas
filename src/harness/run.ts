@@ -109,6 +109,54 @@ export class RunManager {
     return true;
   }
 
+  /** Stops every active run and waits for each loop to requeue its ticket; used on shutdown. */
+  async stopAll(timeoutMs = 20_000): Promise<void> {
+    const done = [...this.active.values()].map((c) => {
+      c.stopNow();
+      return c.done.catch(() => undefined);
+    });
+    await Promise.race([Promise.all(done), new Promise((r) => setTimeout(r, timeoutMs).unref())]);
+  }
+
+  /**
+   * After the host app died without stopping its runs (a crash, kill -9, a
+   * Mac that slept through a restart): stop any worker still running in the
+   * session's container, requeue tickets a worker held, close the run that
+   * was left "running", and mark the session paused. A worker's run token
+   * lived only in the dead process, so an orphaned worker can no longer
+   * reach the board; stopping it is the only useful thing to do.
+   */
+  async recover(sessionId: string): Promise<string[]> {
+    if (this.active.has(sessionId)) return [];
+    const d = this.deps;
+    const clock = d.now ?? now;
+    const h = await d.hub.get(sessionId);
+    const held = h.board.tickets.filter((t) => t.state === "in_progress" || t.state === "review");
+    const busy = ["running", "checking", "planning"].includes(h.session.state);
+    const last = await lastRunFile(h.paths.runs);
+    const runLeftOpen = last?.run.state === "running";
+    if (!held.length && !busy && !runLeftOpen) return [];
+    const did: string[] = [];
+    const killed = await d.shell(sessionId).exec(["pkill", "-TERM", "-f", "/opt/verstas/worker.js"], { timeoutMs: 15_000 }).catch(() => null);
+    if (killed?.code === 0) did.push("stopped a worker left running in the container");
+    if (held.length) {
+      await h.mutate((docs) => {
+        let board = docs.board;
+        for (const t of held) board = transition(board, t.id, "ready", { by: "harness", text: "The host app stopped while a worker held this ticket; requeued" });
+        return { next: { board } };
+      });
+      did.push(`requeued ${held.map((t) => t.id).join(", ")}`);
+    }
+    if (last && runLeftOpen) {
+      const closed: Run = { ...last.run, state: "stopped", endedAt: clock(), currentTicket: undefined, pauseReason: "host app restarted" };
+      await writeJsonAtomic(last.file, closed);
+      await fs.appendFile(path.join(path.dirname(last.file), "events.jsonl"), JSON.stringify({ kind: "run", t: clock(), state: "stopped", reason: "host app restarted" }) + "\n");
+      did.push(`closed run ${last.run.id}`);
+    }
+    if (busy) await h.mutate((docs) => ({ next: { session: { ...docs.session, state: "paused" } } }));
+    return did;
+  }
+
   private async loop(
     h: SessionHandle,
     run: Run,
@@ -535,6 +583,17 @@ export class RunManager {
 
 const addCost = (run: Run, usd: number) => {
   run.cost = { ...run.cost, usd: (run.cost.usd ?? 0) + usd };
+};
+
+const lastRunFile = async (runsDir: string): Promise<{ file: string; run: Run } | null> => {
+  const id = ((await nextRunId(runsDir)) ?? 1) - 1;
+  if (id < 1) return null;
+  const file = path.join(runsDir, String(id), "run.json");
+  try {
+    return { file, run: runSchema.parse(JSON.parse(await fs.readFile(file, "utf8"))) };
+  } catch {
+    return null;
+  }
 };
 
 const nextRunId = async (runsDir: string): Promise<number | undefined> => {
