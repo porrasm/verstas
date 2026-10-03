@@ -61,6 +61,12 @@ machine, not as a container. Three reasons:
 3. **No path mapping.** Bind-mount sources are host paths; an app in a
    container would have to know both views of every path.
 
+The desktop window (`npm start`, Electron) changes none of this: the host
+app runs inside the window's main process with the same user and the same
+`docker` CLI, and the window is a browser on `http://127.0.0.1:4700` with
+Node integration off and a sandboxed renderer. Links that leave the app
+open in your browser.
+
 Only sessions are containerized. That is the part that holds untrusted code.
 
 ## Boundary 1: what enters a session

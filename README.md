@@ -25,17 +25,25 @@ The design is in the
 
 ## Running it
 
-Requirements: Node 22, Docker Desktop (or a Docker daemon), and Claude Code
-installed on the host for `claude setup-token`.
+Requirements: Node 22.12+, git, Docker Desktop (or a Docker daemon), and
+Claude Code on the host for `claude setup-token`.
 
 ```bash
 npm install
-npm run build          # host app + the proxy and worker code that containers mount
-npm run web:build      # the web UI into web/dist
-npm run image:build    # builds verstas-devbox:local (runs npm run build first)
-claude setup-token     # long-lived subscription token; paste it in Settings
-npm run dev            # host app on http://127.0.0.1:4700
+npm run setup     # checks the tools, builds the app, the UI and the images, asks for the Claude token
+npm start         # Verstas in its own window
 ```
+
+`npm run setup` builds everything `npm start` needs: the host app with the
+proxy and worker code containers mount (`dist/`), the UI (`web/dist`), the
+session image `verstas-devbox:local` and the proxy's `node:22-alpine`. Run it
+again after a pull. It asks for the token from `claude setup-token` when
+none is saved (you can also paste it later in Settings).
+
+`npm start` runs the host app inside the desktop window's process. On
+macOS, closing the window keeps the loop running (the Dock icon brings it
+back); quitting stops active runs and puts their tickets back to ready.
+Without a window: `npm run serve`, then open http://127.0.0.1:4700.
 
 Then, in the web app:
 
@@ -86,8 +94,8 @@ Then, in the web app:
 9. **Delete** the session when done. Its containers, network and directory
    go with it.
 
-Run `npm run dev` in a terminal that stays open; the host app stops its
-runs when it exits and requeues the ticket a worker held.
+Runs continue while Verstas is open (on macOS, also with the window
+closed). Quitting stops them and requeues the ticket a worker held.
 
 ## Watching a run closely
 
@@ -95,10 +103,10 @@ Three views, from least to most detail:
 
 - **Session page**: the live log (translated, trimmed events), the board,
   the inbox. Enough for a normal run.
-- **Terminal**: `npm run dev` prints one line per API request and per run
-  event. `npm run dev:debug` (or `VERSTAS_DEBUG=1`) adds every Docker
-  command with its exit code, worker stderr, full tool output, and the
-  events untrimmed.
+- **Terminal**: `npm start` and `npm run serve` print one line per API
+  request and per run event. `npm run dev` (or `VERSTAS_DEBUG=1`) adds
+  every Docker command with its exit code, worker stderr, full tool
+  output, and the events untrimmed.
 - **Files**, under `<sessions root>/<session>/runs/<n>/`:
   `events.jsonl` (every event), `tickets/<id>.md` (the worker reports per
   ticket), and in debug mode `worker-<ticket>-<role>-<time>.raw.jsonl`,
@@ -118,10 +126,17 @@ docker exec -it verstas-<session-id> bash     # look around the box as the agent
 ## Development
 
 ```bash
+npm run dev       # watch everything, debug logs, a window with DevTools
 npm run typecheck && npm run typecheck:web
 npm run test:unit
-npm run web:dev        # UI with hot reload on 4710, proxied to the host app
 ```
+
+`npm run dev` runs four processes in one terminal: `tsc --watch` (keeps
+`dist/` current for the containers), the host app under `tsx watch` with
+`VERSTAS_DEBUG=1` (docker commands, raw worker streams, full tool output),
+Vite with hot reload on 4710, and a window on it with DevTools open.
+Closing the window or Ctrl-C stops all four. `npm run dev:server` is the
+host app alone in watch mode, without a window.
 
 The unit suite needs no Docker: it covers the board, the proxy (run for
 real against local servers), the Docker argument builder, cloning and zip
@@ -150,7 +165,10 @@ src/
   harness/            the loop, prompts, Docker-backed runner
   web/api.ts          the UI's API (loopback)
   remote/             the remote dashboard client: what is sent, what may be asked
-  main.ts             entrypoint
+  server.ts           startVerstas(): the host app, for the window and the command line
+  main.ts             command-line entrypoint (npm run serve, npm run dev:server)
+electron/main.mjs     the desktop window (npm start, npm run dev)
+scripts/              setup.mjs (npm run setup), dev.mjs (npm run dev)
 images/devbox/        the session image
 web/                  React UI (Vite)
 tests/unit/           Playwright unit project
