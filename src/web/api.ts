@@ -413,7 +413,7 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
     wrap(async (req, res) => {
       const id = param(req, "id");
       d.runs.stopNow(id);
-      await removeSandbox(d.sandbox, id).catch(() => undefined);
+      await removeSandbox(d.sandbox, id, { everything: true }).catch(() => undefined);
       await deleteSessionDir(d.getConfig().sessionsRoot, id);
       d.hub.forget(id);
       res.json({ ok: true });

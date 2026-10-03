@@ -8,6 +8,8 @@ import {
   SANDBOX_VERSION,
   SPEC_LABEL,
   connectProxyToBridgeArgs,
+  createHomeVolumeArgs,
+  rmVolumeArgs,
   containerName,
   createNetworkArgs,
   execArgs,
@@ -112,6 +114,7 @@ export const ensureSandboxUp = async (cfg: SandboxConfig, spec: SandboxSpec, opt
   const { docker } = cfg;
   const st = await sandboxStatus(cfg, spec.sessionId);
   if (!st.network) await docker.run(createNetworkArgs(spec.sessionId));
+  await docker.run(createHomeVolumeArgs(spec.sessionId));
 
   const proxyHave = st.proxy === "absent" ? null : await currentFingerprint(docker, proxyName(spec.sessionId), PROXY_SPEC_LABEL);
   if (st.proxy === "absent" || opts.recreate || proxyHave !== proxyFingerprint(spec)) {
@@ -155,11 +158,16 @@ export const stopSandbox = async (cfg: SandboxConfig, sessionId: string): Promis
   await cfg.docker.run(stopArgs(proxyName(sessionId)), { allowFailure: true, timeoutMs: 30_000 });
 };
 
-/** Removes container, proxy and network. Safe to call when nothing exists. */
-export const removeSandbox = async (cfg: SandboxConfig, sessionId: string): Promise<void> => {
+/**
+ * Removes container, proxy and network. Safe to call when nothing exists.
+ * The home volume goes only with `everything` (deleting the session): a
+ * "remove sandbox" from the UI recreates the box and should keep the caches.
+ */
+export const removeSandbox = async (cfg: SandboxConfig, sessionId: string, opts: { everything?: boolean } = {}): Promise<void> => {
   await cfg.docker.run(rmArgs(containerName(sessionId)), { allowFailure: true });
   await cfg.docker.run(rmArgs(proxyName(sessionId)), { allowFailure: true });
   await cfg.docker.run(rmNetworkArgs(sessionId), { allowFailure: true });
+  if (opts.everything) await cfg.docker.run(rmVolumeArgs(sessionId), { allowFailure: true });
 };
 
 /** Starts a process in the session container as the agent user; the caller owns the child. */

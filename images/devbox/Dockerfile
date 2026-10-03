@@ -49,6 +49,10 @@ RUN printf '%s\n' \
  && chmod 0440 /etc/sudoers.d/verstas \
  && visudo -cf /etc/sudoers.d/verstas
 
+# The agent's home. The session mounts a named volume here; a new volume is
+# initialised from this directory, so it starts owned by the agent.
+RUN mkdir -p /home/agent && chown 1000:1000 /home/agent
+
 # svc: start, stop and remember services (Postgres, Redis, dev servers).
 COPY images/devbox/svc /usr/local/bin/svc
 RUN chmod 0755 /usr/local/bin/svc

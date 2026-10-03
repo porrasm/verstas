@@ -12,8 +12,10 @@ export const verstasMd = (session: Session, agentApi: string): string => `# You 
 Verstas is a sandboxed workshop. Nobody is watching live; the user reads the
 board and the log later. Facts about this box:
 
-- Working directory: \`/workspace\`. It is the only directory you can write
-  that survives. Your HOME is \`/workspace/.home\`.
+- Working directory: \`/workspace\`. It is the directory you and the user
+  share. Your HOME is \`/home/agent\`, a volume of
+  this session: caches and toolchains there survive a container recreate
+  but are not in the workspace.
 - Repositories, fresh clones on branch \`verstas/${session.id}\`:
 ${session.repos.map((r) => `  - \`/workspace/${r.name}\` (from \`${r.branch}\`)`).join("\n") || "  - (none)"}
 - Attachments the user added: ${session.attachments.length ? session.attachments.map((a) => `\`/workspace/attachments/${a.dir}\``).join(", ") : "none"}.

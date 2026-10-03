@@ -20,7 +20,7 @@ export const AGENT_API_HOST = "host.docker.internal";
  * created under older rules is recreated on the next start instead of
  * silently keeping them (it joins the spec fingerprint).
  */
-export const SANDBOX_VERSION = 3;
+export const SANDBOX_VERSION = 4;
 
 /**
  * Capabilities the session container keeps: Docker's default set minus
@@ -49,6 +49,9 @@ export const SESSION_CAPS = [
 export const networkName = (sessionId: string): string => `verstas-${sessionId}`;
 export const containerName = (sessionId: string): string => `verstas-${sessionId}`;
 export const proxyName = (sessionId: string): string => `verstas-${sessionId}-proxy`;
+/** The agent's home: a named volume, so caches and toolchains survive a recreate and stay off the bind mount. */
+export const homeVolumeName = (sessionId: string): string => `verstas-${sessionId}-home`;
+export const AGENT_HOME = "/home/agent";
 
 export type SandboxSpec = {
   sessionId: string;
@@ -74,6 +77,10 @@ export type SandboxSpec = {
 };
 
 const label = (sessionId: string): string[] => ["--label", `${LABEL_KEY}=${sessionId}`];
+
+/** Idempotent: creating an existing volume is a no-op. */
+export const createHomeVolumeArgs = (sessionId: string): string[] => ["volume", "create", ...label(sessionId), homeVolumeName(sessionId)];
+export const rmVolumeArgs = (sessionId: string): string[] => ["volume", "rm", "-f", homeVolumeName(sessionId)];
 
 /** `--internal`: no gateway, no route out, no host.docker.internal. */
 export const createNetworkArgs = (sessionId: string): string[] => [
@@ -176,6 +183,8 @@ export const runSessionArgs = (spec: SandboxSpec): string[] => [
   `${spec.workspaceHostPath}:/workspace`,
   "-v",
   `${spec.workerDistHostPath}:/opt/verstas:ro`,
+  "-v",
+  `${homeVolumeName(spec.sessionId)}:${AGENT_HOME}`,
   "-w",
   "/workspace",
   "--env-file",
@@ -193,7 +202,7 @@ export const runSessionArgs = (spec: SandboxSpec): string[] => [
   "-e",
   `VERSTAS_AGENT_API=http://${AGENT_API_HOST}:${spec.agentApiPort}/agent`,
   "-e",
-  "HOME=/workspace/.home",
+  `HOME=${AGENT_HOME}`,
   "-e",
   "TMPDIR=/tmp",
   spec.image,
@@ -236,6 +245,7 @@ export const listLabelledArgs = (): string[] => [
   "--format",
   "{{.Names}}\t{{.Label \"verstas.session\"}}\t{{.State}}",
 ];
+export const listLabelledVolumesArgs = (): string[] => ["volume", "ls", "--filter", `label=${LABEL_KEY}`, "--format", "{{.Name}}"];
 export const listLabelledNetworksArgs = (): string[] => [
   "network",
   "ls",

@@ -123,8 +123,6 @@ export const createSession = async (root: string, input: CreateSessionInput): Pr
   await fs.mkdir(paths.runs, { recursive: true });
   await fs.mkdir(paths.exportDir, { recursive: true });
   await fs.mkdir(paths.setup, { recursive: true });
-  // The agent's HOME lives in the workspace so dotfiles it writes stay in the box.
-  await fs.mkdir(path.join(paths.workspace, ".home"), { recursive: true });
 
   const clones: CloneResult[] = [];
   const extracts: ExtractResult[] = [];

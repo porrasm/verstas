@@ -23,6 +23,8 @@ const spec: SandboxSpec = {
   linuxHost: false,
 };
 
+const envs_ = (args: string[]) => args.flatMap((a, i) => (a === "-e" ? [args[i + 1]] : []));
+
 /**
  * These tests pin the sandbox boundaries from docs/SANDBOX.md. If one fails
  * because you changed an option on purpose, update the document in the same
@@ -52,8 +54,9 @@ test("the session container has exactly the documented boundaries", () => {
   expect(pairs("--tmpfs")).toEqual(["/tmp:exec,size=2g"]);
   expect(pairs("--restart")).toEqual(["no"]);
   expect(args).toContain("--init");
-  // Two bind mounts: the workspace read-write, and our worker code read-only.
-  expect(pairs("-v")).toEqual([`${spec.workspaceHostPath}:/workspace`, `${spec.workerDistHostPath}:/opt/verstas:ro`]);
+  // Two bind mounts (the workspace read-write, our worker code read-only) and the session's home volume.
+  expect(pairs("-v")).toEqual([`${spec.workspaceHostPath}:/workspace`, `${spec.workerDistHostPath}:/opt/verstas:ro`, "verstas-nuppi-mvp-home:/home/agent"]);
+  expect(envs_(args)).toContain("HOME=/home/agent");
   // Secrets come from a file, never from -e.
   expect(pairs("--env-file")).toEqual([spec.envFileHostPath]);
   const envs = pairs("-e");

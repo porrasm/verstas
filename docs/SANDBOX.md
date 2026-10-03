@@ -97,6 +97,7 @@ so that a change here shows up as a test diff):
 | `--pids-limit 2048`, `--memory <n>`, `--cpus <n>` | A runaway build or fork bomb stays inside the budget you set per session. |
 | `--tmpfs /tmp:exec,size=2g`, `TMPDIR=/tmp` | Scratch space that disappears with the container. `exec` because installers and builds run binaries from the temp directory; Docker's default tmpfs is `noexec`. |
 | `-v <session>/workspace:/workspace` | The one read-write bind mount. |
+| `-v verstas-<id>-home:/home/agent`, `HOME=/home/agent` | A named Docker volume, not a host path: package caches, browsers and toolchains the agent installs survive a container recreate without counting against the workspace limit or crossing the macOS file-sharing layer. Labelled with the session and removed when the session is deleted. |
 | `-v <repo>/dist/src/worker:/opt/verstas:ro` | Our worker and board MCP code, read-only, over the image's own copy, so a fix ships with `npm run build` instead of an image rebuild. The agent can read it (it is not secret) and cannot change it. |
 | `--env` only for `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY`, the Claude token and the run's board token | Nothing from your environment leaks in. |
 | `--init`, `--restart no`, `--label verstas.session=<id>` | Clean signal handling, no resurrection, and cleanup can find everything by label. |
@@ -252,8 +253,8 @@ image, limits, mounts or sandbox flags change (the flags are versioned in
 ## Cleanup
 
 Everything a session creates is labelled `verstas.session=<id>`: the
-network, the proxy, the session container. Deleting a session stops and
-removes all three, then removes the directory. `verstas doctor` lists
+network, the proxy, the session container and the home volume. Deleting a
+session stops and removes all four, then removes the directory. `verstas doctor` lists
 labelled resources without a matching directory and offers to remove them.
 
 ## Residual risks, stated plainly
@@ -265,7 +266,9 @@ labelled resources without a matching directory and offers to remove them.
 - **The model provider sees your code.** By your decision; it is the point.
 - **Disk.** Container writes land in `workspace/` on your disk. The host
   app checks the directory size between tickets and pauses the run over a
-  configurable limit; it cannot stop a single write mid-ticket.
+  configurable limit; it cannot stop a single write mid-ticket. The home
+  volume and anything installed into the container's own filesystem have
+  no per-session limit; they share Docker's disk (`docker system df`).
 - **Proxy correctness.** The allowlist proxy is about two hundred lines of
   TypeScript with unit tests for the matcher and the request filter. It is
   small enough to read in one sitting; please do.
