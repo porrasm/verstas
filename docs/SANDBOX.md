@@ -74,7 +74,8 @@ so that a change here shows up as a test diff):
 | `--security-opt no-new-privileges` | setuid binaries cannot raise privileges. |
 | `--pids-limit 2048`, `--memory <n>`, `--cpus <n>` | A runaway build or fork bomb stays inside the budget you set per session. |
 | `--tmpfs /tmp:size=1g` | Scratch space that disappears with the container. |
-| `-v <session>/workspace:/workspace` | The single bind mount, read-write. |
+| `-v <session>/workspace:/workspace` | The one read-write bind mount. |
+| `-v <repo>/dist/src/worker:/opt/verstas:ro` | Our worker and board MCP code, read-only, over the image's own copy, so a fix ships with `npm run build` instead of an image rebuild. The agent can read it (it is not secret) and cannot change it. |
 | `--env` only for `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY`, the Claude token and the run's board token | Nothing from your environment leaks in. |
 | `--init`, `--restart no`, `--label verstas.session=<id>` | Clean signal handling, no resurrection, and cleanup can find everything by label. |
 

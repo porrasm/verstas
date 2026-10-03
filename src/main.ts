@@ -6,7 +6,7 @@ import express from "express";
 import { WebSocketServer, WebSocket } from "ws";
 import { createAgentApi, RunTokens } from "./agent-api/agent-api.js";
 import { loadConfig, loadSecrets, saveConfig, type Config } from "./config.js";
-import { createDockerRunManager, proxyDistPath } from "./harness/docker-worker.js";
+import { createDockerRunManager, proxyDistPath, workerDistPath } from "./harness/docker-worker.js";
 import { createDockerRunner } from "./sandbox/docker.js";
 import type { SandboxConfig } from "./sandbox/lifecycle.js";
 import { SessionHub } from "./sessions/hub.js";
@@ -56,6 +56,7 @@ const docker = createDockerRunner();
 const sandbox: SandboxConfig = {
   docker,
   proxyDistHostPath: proxyDistPath(distRoot),
+  workerDistHostPath: workerDistPath(distRoot),
   agentApiPort: config.agentApiPort,
   linuxHost: config.linuxHost,
 };

@@ -125,3 +125,4 @@ export const createDockerRunManager = (c: RunManagerConfig): RunManager =>
   });
 
 export const proxyDistPath = (distRoot: string): string => path.join(distRoot, "src", "proxy");
+export const workerDistPath = (distRoot: string): string => path.join(distRoot, "src", "worker");

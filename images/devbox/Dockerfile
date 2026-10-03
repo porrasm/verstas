@@ -31,7 +31,10 @@ ARG CLAUDE_CODE_VERSION=2.1.287
 RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} \
  && npm cache clean --force
 
-# The worker and the board MCP server, dependency-free ESM compiled from src/worker.
+# The worker and the board MCP server, dependency-free ESM compiled from
+# src/worker. At run time the host mounts its current dist/src/worker over
+# this directory read-only, so this copy is a fallback for running the image
+# by hand.
 COPY dist/src/worker /opt/verstas/
 RUN chmod -R a+rX /opt/verstas
 

@@ -72,6 +72,11 @@ test("result line detects rate limits and errors", () => {
   expect(out.result?.ok).toBe(false);
   expect(out.result?.rateLimited).toBe(true);
   expect(translateLine(JSON.stringify({ type: "result", subtype: "error_max_budget_usd", is_error: true }), ctx).result?.rateLimited).toBe(false);
+  // A successful result is never a rate limit, whatever its text says.
+  const success = translateLine(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "VERDICT: ok. memory.max is 4294967296, rate limit docs were read." }), ctx);
+  expect(success.result?.rateLimited).toBe(false);
+  // 429 inside a bigger number is not a status code.
+  expect(translateLine(JSON.stringify({ type: "result", subtype: "error_during_execution", is_error: true, errors: ["value 4294967296 rejected"] }), ctx).result?.rateLimited).toBe(false);
 });
 
 test("garbage and unknown types are dropped", () => {

@@ -113,7 +113,9 @@ export const translateLine = (line: string, ctx: StreamContext = {}): Translated
     const ok = subtype === "success" && msg.is_error !== true;
     const text = typeof msg.result === "string" ? msg.result : "";
     const errors = Array.isArray(msg.errors) ? (msg.errors as unknown[]).map(String).join("; ") : "";
-    const rateLimited = /rate.?limit|429|usage limit|overloaded/i.test(`${subtype} ${text} ${errors}`);
+    // Only a failed result can be a rate limit, and "429" must stand alone: a
+    // successful reviewer once quoted a memory limit of 4294967296 bytes.
+    const rateLimited = !ok && /rate.?limit|\b429\b|usage limit|overloaded/i.test(`${subtype} ${errors} ${text}`);
     const costUsd = typeof msg.total_cost_usd === "number" ? msg.total_cost_usd : 0;
     const turns = typeof msg.num_turns === "number" ? msg.num_turns : 0;
     return {

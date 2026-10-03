@@ -30,7 +30,7 @@ installed on the host for `claude setup-token`.
 
 ```bash
 npm install
-npm run build          # host app + the proxy and worker the image needs
+npm run build          # host app + the proxy and worker code that containers mount
 npm run web:build      # the web UI into web/dist
 npm run image:build    # builds verstas-devbox:local (runs npm run build first)
 claude setup-token     # long-lived subscription token; paste it in Settings

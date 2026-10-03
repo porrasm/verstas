@@ -34,6 +34,7 @@ import type { DockerRunner } from "./docker.js";
 export type SandboxConfig = {
   docker: DockerRunner;
   proxyDistHostPath: string;
+  workerDistHostPath: string;
   agentApiPort: number;
   linuxHost: boolean;
 };
@@ -74,6 +75,7 @@ export const buildSpec = (cfg: SandboxConfig, session: Session, paths: SessionPa
   workspaceHostPath: paths.workspace,
   allowlistHostPath: paths.allowlist,
   proxyDistHostPath: cfg.proxyDistHostPath,
+  workerDistHostPath: cfg.workerDistHostPath,
   envFileHostPath,
   limits: session.limits,
   agentApiPort: cfg.agentApiPort,

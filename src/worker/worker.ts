@@ -110,7 +110,7 @@ export const runJob = async (job: Job): Promise<number> => {
     role: job.role,
     ok,
     stopReason: stopReason || result?.stopReason || `exit_${code}`,
-    rateLimited: result?.rateLimited ?? /rate.?limit|429/i.test(stderr),
+    rateLimited: result?.rateLimited ?? (!ok && /rate.?limit|\b429\b/i.test(stderr)),
     costUsd: result?.costUsd ?? 0,
     turns,
     seconds: Math.round((Date.now() - t0) / 1000),

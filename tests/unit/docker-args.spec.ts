@@ -17,6 +17,7 @@ const spec: SandboxSpec = {
   workspaceHostPath: "/Users/me/verstas/sessions/nuppi-mvp/workspace",
   allowlistHostPath: "/Users/me/verstas/sessions/nuppi-mvp/allowlist.json",
   proxyDistHostPath: "/Users/me/verstas/dist/src/proxy",
+  workerDistHostPath: "/Users/me/verstas/dist/src/worker",
   envFileHostPath: "/Users/me/verstas/sessions/nuppi-mvp/runs/1/env",
   limits: limitsSchema.parse({}),
   agentApiPort: 4701,
@@ -48,8 +49,8 @@ test("the session container has exactly the documented boundaries", () => {
   expect(pairs("--tmpfs")).toEqual(["/tmp:size=1g"]);
   expect(pairs("--restart")).toEqual(["no"]);
   expect(args).toContain("--init");
-  // Exactly one bind mount: the workspace, read-write.
-  expect(pairs("-v")).toEqual([`${spec.workspaceHostPath}:/workspace`]);
+  // Two bind mounts: the workspace read-write, and our worker code read-only.
+  expect(pairs("-v")).toEqual([`${spec.workspaceHostPath}:/workspace`, `${spec.workerDistHostPath}:/opt/verstas:ro`]);
   // Secrets come from a file, never from -e.
   expect(pairs("--env-file")).toEqual([spec.envFileHostPath]);
   const envs = pairs("-e");

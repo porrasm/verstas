@@ -25,6 +25,8 @@ export type SandboxSpec = {
   allowlistHostPath: string;
   /** Host path of the compiled proxy directory (dist/src/proxy), mounted read-only. */
   proxyDistHostPath: string;
+  /** Host path of the compiled worker directory (dist/src/worker), mounted read-only over the image's copy. */
+  workerDistHostPath: string;
   /** Host path of a 0600 env file holding the secrets for this run. */
   envFileHostPath: string;
   limits: Limits;
@@ -128,6 +130,8 @@ export const runSessionArgs = (spec: SandboxSpec): string[] => [
   "no",
   "-v",
   `${spec.workspaceHostPath}:/workspace`,
+  "-v",
+  `${spec.workerDistHostPath}:/opt/verstas:ro`,
   "-w",
   "/workspace",
   "--env-file",
