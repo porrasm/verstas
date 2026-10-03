@@ -7,7 +7,7 @@ import { writeJsonAtomic } from "../board/store.js";
 import type { SessionHandle, SessionHub } from "../sessions/hub.js";
 import type { RunTokens } from "../agent-api/agent-api.js";
 import { workspaceSizeMb } from "../sessions/sessions.js";
-import { implementerPrompt, mcpConfig, notesIndexMd, plannerPrompt, preflightPrompt, reviewerPrompt, systemMd, verstasMd } from "./prompts.js";
+import { implementerPrompt, mcpConfig, notesIndexMd, plannerPrompt, preflightPrompt, reviewerPrompt, systemMd, verstasMd, withBrief, workspaceClaudeMd } from "./prompts.js";
 import type { Job } from "../worker/worker.js";
 
 /**
@@ -69,7 +69,7 @@ export class RunManager {
     return this.active.get(sessionId)?.run;
   }
 
-  async start(sessionId: string, opts: { plan?: boolean } = {}): Promise<RunControl> {
+  async start(sessionId: string, opts: { plan?: boolean; brief?: boolean } = {}): Promise<RunControl> {
     if (this.active.has(sessionId)) throw new Error("A run is already active for this session");
     const h = await this.deps.hub.get(sessionId);
     // Refuse up front rather than discover it ticket by ticket.
@@ -112,7 +112,7 @@ export class RunManager {
   private async loop(
     h: SessionHandle,
     run: Run,
-    opts: { plan?: boolean },
+    opts: { plan?: boolean; brief?: boolean },
     ctl: { isPause: () => boolean; isStop: () => boolean; signal: AbortSignal },
   ): Promise<Run> {
     const d = this.deps;
@@ -146,7 +146,7 @@ export class RunManager {
         await setSessionState("checking");
         await status("init check: evaluating the sandbox against the goal and the board");
         const answers = h.inbox.requests.filter((r) => r.state !== "open" && !r.ticketId).map((r) => `${r.id} (${r.detail.kind}) ${r.state}${r.answer ? `: ${r.answer}` : ""}`);
-        const done = await this.runJob(h, run, { role: "preflight", promptText: preflightPrompt(h.session, h.board, answers) }, log, ctl.signal, token);
+        const done = await this.runJob(h, run, { role: "preflight", promptText: preflightPrompt(h.session, h.board, answers, "check") }, log, ctl.signal, token);
         addCost(run, done.costUsd);
         await saveRun();
         const verdict = parsePreflight(done.text);
@@ -165,12 +165,23 @@ export class RunManager {
         }
       }
 
+      // Brief only: refresh notes/brief.md with an orientation worker, then stop.
+      if (proceed && opts.brief) {
+        await setSessionState("checking");
+        await status("orientation: writing the project brief");
+        const done = await this.runJob(h, run, { role: "preflight", promptText: preflightPrompt(h.session, h.board, [], "brief") }, log, ctl.signal, token);
+        addCost(run, done.costUsd);
+        await status(`brief ${(await this.readBrief(h)) ? "written" : "missing"} (${done.stopReason})`);
+        run.state = "finished";
+        proceed = false;
+      }
+
       // Plan when asked, or when the board is empty.
       if (proceed && (opts.plan || h.board.tickets.length === 0)) {
         await setSessionState("planning");
         d.tokens.update(token, { role: "planner", currentTicket: undefined });
         await status("planner: turning the goal into tickets");
-        const done = await this.runJob(h, run, { role: "planner", promptText: plannerPrompt(h.session, h.board) }, log, ctl.signal, token);
+        const done = await this.runJob(h, run, { role: "planner", promptText: withBrief(await this.readBrief(h), plannerPrompt(h.session, h.board)) }, log, ctl.signal, token);
         addCost(run, done.costUsd);
         await saveRun();
         d.tokens.update(token, { role: "worker" });
@@ -310,7 +321,7 @@ export class RunManager {
     run.currentTicket = ticket.id;
     d.tokens.update(token, { currentTicket: ticket.id, role: "worker" });
 
-    const impl = await this.runJob(h, run, { role: "implementer", ticket: ticket.id, promptText: implementerPrompt(h.board, getTicket(h.board, ticket.id), answer) }, log, signal, token);
+    const impl = await this.runJob(h, run, { role: "implementer", ticket: ticket.id, promptText: withBrief(await this.readBrief(h), implementerPrompt(h.board, getTicket(h.board, ticket.id), answer)) }, log, signal, token);
     addCost(run, impl.costUsd);
     await this.writeTicketReport(h, run, ticket.id, "implementer", impl);
 
@@ -348,7 +359,7 @@ export class RunManager {
     if (!changed) verdictNote = "no files changed";
     if (caps.reviewer && changed) {
       d.tokens.update(token, { role: "worker", currentTicket: ticket.id });
-      const rev = await this.runJob(h, run, { role: "reviewer", ticket: ticket.id, promptText: reviewerPrompt(getTicket(h.board, ticket.id), stat, diff, gates) }, log, signal, token);
+      const rev = await this.runJob(h, run, { role: "reviewer", ticket: ticket.id, promptText: withBrief(await this.readBrief(h), reviewerPrompt(getTicket(h.board, ticket.id), stat, diff, gates)) }, log, signal, token);
       addCost(run, rev.costUsd);
       await this.writeTicketReport(h, run, ticket.id, "reviewer", rev);
       if (rev.rateLimited) {
@@ -420,9 +431,17 @@ export class RunManager {
     return done;
   }
 
+  /** notes/brief.md, capped so a runaway brief cannot crowd out the ticket. */
+  private async readBrief(h: SessionHandle): Promise<string | null> {
+    const text = await fs.readFile(path.join(h.paths.notes, "brief.md"), "utf8").catch(() => "");
+    if (!text.trim()) return null;
+    return text.length > 16_000 ? text.slice(0, 16_000) + "\n\n(brief truncated at 16000 characters; shorten it)" : text;
+  }
+
   private async writeWorkspaceFiles(h: SessionHandle, _token: string): Promise<void> {
     const ws = h.paths.workspace;
     await fs.writeFile(path.join(ws, "VERSTAS.md"), verstasMd(h.session, this.deps.agentApiUrl));
+    await fs.writeFile(path.join(ws, "CLAUDE.md"), workspaceClaudeMd());
     await fs.mkdir(path.join(ws, WORKSPACE_FILES), { recursive: true });
     await fs.writeFile(path.join(ws, WORKSPACE_FILES, "mcp.json"), JSON.stringify(mcpConfig(), null, 2));
     await fs.mkdir(h.paths.notes, { recursive: true });

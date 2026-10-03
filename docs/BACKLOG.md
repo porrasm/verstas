@@ -71,7 +71,13 @@ back"; SANDBOX.md Boundary 5 (host git touches only a bundle and your repo).
 
 ## V-03 · Setup scripts  (S)
 
-**Status: done 2026-10-03.** Library under `~/.verstas/scripts/`, "Setup
+**Status: done 2026-10-03.** Also: the **project brief**. The orientation
+(preflight) worker writes `notes/brief.md` (purpose, layout, verified
+commands, conventions, traps, where to look for the tickets, under 1500
+words); the harness puts it first in every worker prompt and writes a
+`/workspace/CLAUDE.md` pointer so Claude Code loads it on its own. "Write
+brief" / "Refresh brief" on the session page runs an orientation worker
+without ticket work. Library under `~/.verstas/scripts/`, "Setup
 scripts" tab, tick at creation, copied into `<session>/setup/`, run as root
 on container creation, logs and results on the session page, re-run
 button, hosts merged into the allowlist, note in VERSTAS.md. Also shipped:

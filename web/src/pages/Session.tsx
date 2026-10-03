@@ -418,7 +418,24 @@ const SetupPanel = ({ session, base, active, onDone }: { session: Session; base:
   const [msg, setMsg] = useState("");
   const [openLog, setOpenLog] = useState<string | null>(null);
   const [logs, setLogs] = useState<Record<string, string>>({});
-  if (!session.setupScripts.length && !session.caps.preflight && !session.preflight) return null;
+  const [brief, setBrief] = useState<{ text: string; updatedAt: string | null; words: number } | null>(null);
+  const [showBrief, setShowBrief] = useState(false);
+  useEffect(() => {
+    api<{ text: string; updatedAt: string | null; words: number }>("GET", `${base}/brief`).then(setBrief).catch(() => setBrief(null));
+  }, [base, session.preflight?.at, active]);
+  const refreshBrief = async () => {
+    setBusy(true);
+    setMsg("");
+    try {
+      await api("POST", `${base}/run`, { action: "brief" });
+      setMsg("Orientation worker started; the brief appears when it finishes.");
+    } catch (e) {
+      setMsg((e as Error).message);
+    } finally {
+      setBusy(false);
+      await onDone();
+    }
+  };
   const rerun = async () => {
     setBusy(true);
     setMsg("");
@@ -470,6 +487,13 @@ const SetupPanel = ({ session, base, active, onDone }: { session: Session; base:
           <span className="muted small">{msg}</span>
         </div>
       )}
+      <div className="small" style={{ borderTop: "1px solid var(--line)", paddingTop: 8 }}>
+        <span className={`dot ${brief?.text ? "good" : ""}`} /> <strong>Project brief</strong>{" "}
+        <span className="muted">{brief?.text ? `${brief.words} words · ${brief.updatedAt ? fmtAgo(brief.updatedAt) : ""} · every worker reads it first` : "none yet; the orientation worker writes notes/brief.md"}</span>{" "}
+        {brief?.text && <button className="quiet sm" onClick={() => setShowBrief(!showBrief)}>{showBrief ? "hide" : "view"}</button>}{" "}
+        <button className="quiet sm" onClick={refreshBrief} disabled={busy || active} title={active ? "Pause or stop the run first" : "Run an orientation worker that writes or refreshes the brief"}>{brief?.text ? "Refresh brief" : "Write brief"}</button>
+        {showBrief && brief?.text && <pre className="mono" style={{ whiteSpace: "pre-wrap", maxHeight: 360, overflow: "auto", marginTop: 6 }}>{brief.text}</pre>}
+      </div>
       {(session.caps.preflight || session.preflight) && (
         <div className="small" style={{ borderTop: "1px solid var(--line)", paddingTop: 8 }}>
           <span className={`dot ${!session.preflight ? "" : session.preflight.ok ? "good" : "bad"}`} /> <strong>Init check</strong>{" "}

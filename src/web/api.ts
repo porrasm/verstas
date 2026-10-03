@@ -384,10 +384,10 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
   api.post(
     "/sessions/:id/run",
     wrap(async (req, res) => {
-      const { action } = z.object({ action: z.enum(["start", "plan", "pause", "stop"]) }).parse(req.body);
+      const { action } = z.object({ action: z.enum(["start", "plan", "brief", "pause", "stop"]) }).parse(req.body);
       const id = param(req, "id");
-      if (action === "start" || action === "plan") {
-        const ctl = await d.runs.start(id, { plan: action === "plan" });
+      if (action === "start" || action === "plan" || action === "brief") {
+        const ctl = await d.runs.start(id, { plan: action === "plan", brief: action === "brief" });
         res.json({ ok: true, run: ctl.run });
         return;
       }
@@ -438,6 +438,18 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
       } catch (e) {
         res.status(500).json({ error: (e as Error).message, results: (await d.hub.get(h.id)).session.setup });
       }
+    }),
+  );
+
+  /** The project brief the orientation worker wrote, with its age. */
+  api.get(
+    "/sessions/:id/brief",
+    wrap(async (req, res) => {
+      const h = await d.hub.get(param(req, "id"));
+      const file = path.join(h.paths.notes, "brief.md");
+      const text = await fs.readFile(file, "utf8").catch(() => "");
+      const st = text ? await fs.stat(file) : null;
+      res.json({ text, updatedAt: st?.mtime.toISOString() ?? null, words: text ? text.split(/\s+/).filter(Boolean).length : 0 });
     }),
   );
 

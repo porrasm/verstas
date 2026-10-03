@@ -50,7 +50,7 @@ Rules that apply to every role:
 - If something is unclear, missing, or needs the user, call the \`request\` tool and stop; do not guess and do not work around the sandbox. The user is a person: for a system package ask for a \`root_command\` with the exact command; for anything else a person must do or decide, use \`ask\` with what you need, what they should do and how you will verify it. Never ask for a secret value in the answer; ask them to place it in a file under /workspace and tell you the path.
 - Bugs and gaps you notice but must not fix now: \`board_create_ticket\` (kinds bug, followup, chore). Feature ideas: \`idea\`. Observations: \`message\`.
 - Never commit, never touch files outside /workspace, never delete the .git directories.
-- Keep /workspace/notes/learnings.md useful: short facts a future worker needs (how to run tests here, what is flaky, decisions made).
+- Read /workspace/notes/brief.md first when it exists: it is the verified map of the repositories. Keep it true: if you find a trap or a wrong command, fix the brief's line, and keep /workspace/notes/learnings.md for short facts that do not fit the brief.
 - Use the \`halt\` request only for a security problem, a contradiction that invalidates several tickets, or a dependency that cannot be met.`;
   const byRole: Record<typeof role, string> = {
     implementer: `
@@ -67,7 +67,19 @@ VERDICT: fixable
 VERDICT: blocked
 followed by your reasons in a few lines. "fixable" means another implementer attempt with your notes would likely finish it; "blocked" means the ticket as written cannot be done or the change is harmful. Add specific notes with \`board_add_note\`. Do not fix the code yourself.`,
     preflight: `
-Role: preflight (initialization check). No ticket work. Your job is to find out, before anyone starts, whether this box can do what the goal and the board ask: read /workspace/VERSTAS.md, the goal, the tickets, and enough of each repository to know how it is built, tested and run. Check concretely, by running commands: required tools and versions, services the project needs (databases, browsers, SDKs) and whether they can be started here as processes, network hosts the build or tests will reach, disk and memory headroom, and anything the tickets assume that the sandbox forbids (Docker, root, GUI). For every gap, file ONE request of the right kind (root_command for a package, network for a host, ask for something only the user can do), and write your findings to /workspace/notes/preflight.md. Do not install anything yourself beyond what the agent user may. Your reply must start with exactly one of:
+Role: orientation (initialization check and project brief). No ticket work.
+
+Second output, always, even when nothing is missing: write /workspace/notes/brief.md, the project brief every later worker reads first. At most 1500 words, this structure, facts only (verify commands by running them):
+# Project brief
+## <repo name>  (one section per repository)
+- Purpose: one sentence.
+- Layout: the directories that matter and what is in them.
+- Build / test / run: the exact commands that work in this box, and how long tests take.
+- Conventions: language, formatting, test style, commit scope, anything a reviewer would reject.
+- Traps: what bit you or will bite the next worker (flaky tests, env vars needed, ports in use, missing dependencies).
+## Where to look for the board's tickets
+- For each ticket or group of tickets: the files or modules to start from.
+If a brief exists already, update it rather than starting over. Your job is to find out, before anyone starts, whether this box can do what the goal and the board ask: read /workspace/VERSTAS.md, the goal, the tickets, and enough of each repository to know how it is built, tested and run. Check concretely, by running commands: required tools and versions, services the project needs (databases, browsers, SDKs) and whether they can be started here as processes, network hosts the build or tests will reach, disk and memory headroom, and anything the tickets assume that the sandbox forbids (Docker, root, GUI). For every gap, file ONE request of the right kind (root_command for a package, network for a host, ask for something only the user can do), and write your findings to /workspace/notes/preflight.md. Do not install anything yourself beyond what the agent user may. Your reply must start with exactly one of:
 PREFLIGHT: ok
 PREFLIGHT: blocked
 followed by a short summary: what was checked, what is missing, which requests you filed. "ok" means work can start now with nothing missing; "blocked" means wait for the requests or for the user to change the plan.`,
@@ -99,6 +111,10 @@ const recentReports = (board: Board, excluding: string, n = 5): string => {
   return done.map((t) => `### ${t.id}: ${t.title} (${t.state})\n${t.report}`).join("\n\n");
 };
 
+/** The brief goes first in every prompt so the cached prefix is shared by all workers of a run. */
+export const withBrief = (brief: string | null, prompt: string): string =>
+  brief ? `# Project brief (notes/brief.md, written by the orientation worker; keep it true)\n${brief.trim()}\n\n---\n\n${prompt}` : prompt;
+
 export const implementerPrompt = (board: Board, ticket: Ticket, answer?: string): string => `${ticketBlock(ticket)}
 ${answer ? `## The user answered your request\n${answer}\n` : ""}
 ## Recent reports from other workers
@@ -123,7 +139,7 @@ ${diff.length > 60_000 ? diff.slice(0, 60_000) + "\n… (truncated; read the fil
 
 Run the tests yourself if the gates did not. Reply starting with VERDICT: ok | fixable | blocked.`;
 
-export const preflightPrompt = (session: Session, board: Board, answers: string[]): string => `# Session goal
+export const preflightPrompt = (session: Session, board: Board, answers: string[], mode: "check" | "brief"): string => `${mode === "brief" ? "# Brief only\nThe initialization check already passed, or was not asked for. Skip the PREFLIGHT verdict's consequences: still reply with a PREFLIGHT line, but your job now is the project brief in /workspace/notes/brief.md, refreshed against the repositories and the board as they are today.\n\n" : ""}# Session goal
 ${session.goal || "(no goal given)"}
 
 # Repositories
@@ -154,5 +170,18 @@ export const notesIndexMd = (): string => `# Notes index
 Session-level memory, outside git. Keep this file short: one line per topic
 file in this directory.
 
-- learnings.md: facts for future workers (how to run tests here, what is flaky, decisions).
+- brief.md: the project brief (purpose, layout, verified commands, conventions, traps, where to look). Read it first.
+- learnings.md: short facts for future workers that do not fit the brief.
+`;
+
+/** Claude Code auto-reads this from the working directory, so every worker gets the pointers without prompt plumbing. */
+export const workspaceClaudeMd = (): string => `# Workspace
+
+You are inside a Verstas sandbox. Read, in this order:
+
+1. /workspace/VERSTAS.md: what this box is and how to ask the user for things.
+2. /workspace/notes/brief.md: the verified project brief, when it exists.
+3. /workspace/notes/learnings.md: short facts from earlier workers.
+
+Repositories live under /workspace/<name> and may carry their own CLAUDE.md.
 `;

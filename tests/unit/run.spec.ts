@@ -391,3 +391,38 @@ test("parsePreflight reads the verdict line", () => {
   expect(parsePreflight("Some text\nPREFLIGHT: blocked because x")).toEqual({ ok: false, summary: "because x" });
   expect(parsePreflight("nothing")).toBeNull();
 });
+
+test("the project brief is put first in every worker prompt, and a brief-only run calls one orientation worker", async () => {
+  const s = await makeSession({ reviewer: true });
+  try {
+    await fs.mkdir(s.paths.notes, { recursive: true });
+    await fs.writeFile(path.join(s.paths.notes, "brief.md"), "# Project brief\n## app\n- Build / test / run: npm test (12 s)\n");
+    const shell = fakeShell();
+    const prompts: string[] = [];
+    const worker = fakeWorker(s.hub, s.id, async (job, hub, id) => {
+      prompts.push(`${job.role}:` + (await fs.readFile(job.promptFile.replace("/workspace", s.paths.workspace), "utf8")));
+      if (job.role === "implementer") await fileReport(hub, id, job.ticket!, "done");
+      if (job.role === "reviewer") return { text: "VERDICT: ok" };
+      if (job.role === "preflight") {
+        await fs.writeFile(path.join(s.paths.notes, "brief.md"), "# Project brief\nrefreshed\n");
+        return { text: "PREFLIGHT: ok\nbrief refreshed" };
+      }
+      return {};
+    });
+    const mgr = manager(s, shell, worker);
+    await (await mgr.start(s.id)).done;
+    expect(prompts.length).toBe(4);
+    for (const p of prompts) expect(p.split(":").slice(1).join(":").startsWith("# Project brief (notes/brief.md")).toBe(true);
+    expect(prompts[0]).toContain("npm test (12 s)");
+    expect(await fs.readFile(path.join(s.paths.workspace, "CLAUDE.md"), "utf8")).toContain("notes/brief.md");
+
+    const run = await (await mgr.start(s.id, { brief: true })).done;
+    expect(run.state).toBe("finished");
+    expect(worker.jobs.at(-1)?.role).toBe("preflight");
+    expect(prompts.at(-1)).toContain("# Brief only");
+    expect(await fs.readFile(path.join(s.paths.notes, "brief.md"), "utf8")).toContain("refreshed");
+    expect((await s.hub.get(s.id)).board.tickets.every((t) => t.state === "done")).toBe(true); // untouched by the brief run
+  } finally {
+    await fs.rm(s.root, { recursive: true, force: true });
+  }
+});

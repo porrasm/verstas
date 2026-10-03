@@ -55,7 +55,11 @@ Then, in the web app:
    a board.
 5. **Agentic initialization** (a tick on the New session form): before any
    ticket, a worker checks the box against the goal and the board, asks for
-   what is missing, and work starts only after it reports ok.
+   what is missing, and work starts only after it reports ok. The same
+   worker writes the **project brief** (`notes/brief.md`: verified build
+   and test commands, layout, conventions, traps, where to look), which
+   every later worker gets first; "Refresh brief" on the session page
+   rewrites it without ticket work.
 6. **Apply to repo** when you want the work: the session page's Work panel
    puts a repository's commits on the branch `verstas/<session>` in your
    real checkout, one commit per ticket, without touching the branch you
