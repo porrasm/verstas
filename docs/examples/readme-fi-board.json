@@ -1,0 +1,57 @@
+{
+  "verstas": 1,
+  "goal": "Demo for taking work back: translate the apps monorepo's two top-level docs into Finnish as separate files, without touching any code. Keep every command, path, URL and code block exactly as it is; translate prose only. Use plain, natural Finnish (not word-for-word), and keep technical terms that Finnish developers use in English (Dokku, VPS, TLS, wildcard, proxy, vhost) with Finnish inflection where needed. Each ticket must leave the repository in a state the user can merge as is.",
+  "tickets": [
+    {
+      "id": "T-1",
+      "title": "README.fi.md: translate README.md",
+      "kind": "chore",
+      "repo": "apps-monorepo",
+      "size": "S",
+      "priority": 10,
+      "state": "ready",
+      "spec": "Create README.fi.md next to README.md with a faithful Finnish translation of the whole file (it is short: the Certs section about the wildcard TLS certificate, acme.sh and the three npm scripts). Keep the heading structure; keep the code block and every command verbatim; keep the link to scripts/TLS.md pointing at the same file. Then add one line to README.md directly under the top heading: 'Suomeksi: [README.fi.md](README.fi.md)'. Do not change anything else in README.md.",
+      "acceptance": [
+        "README.fi.md exists and covers every paragraph of README.md",
+        "Code blocks, commands, paths and URLs are byte-identical to the English",
+        "README.md gained exactly one new line, the link to README.fi.md",
+        "Report filed with board_report"
+      ]
+    },
+    {
+      "id": "T-2",
+      "title": "DOCKER_SETUP.fi.md: translate DOCKER_SETUP.md",
+      "kind": "chore",
+      "repo": "apps-monorepo",
+      "size": "S",
+      "priority": 20,
+      "deps": ["T-1"],
+      "state": "ready",
+      "spec": "Read README.fi.md first and reuse its terminology. Create DOCKER_SETUP.fi.md with a Finnish translation of DOCKER_SETUP.md: same headings and numbered steps, every command, environment variable name and code block verbatim. Add one line under the top heading of DOCKER_SETUP.md: 'Suomeksi: [DOCKER_SETUP.fi.md](DOCKER_SETUP.fi.md)'. Nothing else in DOCKER_SETUP.md changes.",
+      "acceptance": [
+        "DOCKER_SETUP.fi.md exists and covers every section and step of the English file",
+        "Commands and variable names are unchanged",
+        "DOCKER_SETUP.md gained exactly one new line",
+        "Terminology matches README.fi.md (same Finnish word for the same English term)",
+        "Report filed"
+      ]
+    },
+    {
+      "id": "T-3",
+      "title": "Sanasto: glossary and consistency pass over both Finnish files",
+      "kind": "chore",
+      "repo": "apps-monorepo",
+      "size": "S",
+      "priority": 30,
+      "deps": ["T-2"],
+      "state": "ready",
+      "spec": "Read README.fi.md and DOCKER_SETUP.fi.md side by side with their English originals. Fix any inconsistency in how the same English term was translated, and any sentence that reads as a word-for-word calque. Then append a section '## Sanasto' to the end of README.fi.md: a two-column Markdown table (Englanniksi | Suomeksi) with the 8 to 12 technical terms that appear in the two files and the Finnish form used, so the next translator follows the same choices. Do not touch the English files.",
+      "acceptance": [
+        "README.fi.md ends with a '## Sanasto' table of 8 to 12 rows",
+        "Every term in the table is used consistently in both Finnish files",
+        "No English file changed",
+        "Report filed"
+      ]
+    }
+  ]
+}
