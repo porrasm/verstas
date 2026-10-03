@@ -79,14 +79,13 @@ test("nextReady honours deps, priority and creation order", () => {
   expect(nextReady(done)?.id).toBe("T-2");
 });
 
-test("transition enforces the state machine and counts attempts", () => {
+test("transition enforces the state machine and leaves attempts to the loop's verdicts", () => {
   let b = seeded();
   expect(() => transition(b, "T-1", "done")).toThrow(/Cannot move/);
   b = transition(b, "T-1", "in_progress");
-  expect(b.tickets[0]!.attempts).toBe(1);
   b = transition(b, "T-1", "ready", { by: "harness", text: "reviewer: fixable" });
   b = transition(b, "T-1", "in_progress");
-  expect(b.tickets[0]!.attempts).toBe(2);
+  expect(b.tickets[0]!.attempts).toBe(0);
   expect(b.tickets[0]!.notes.map((n) => n.text)).toEqual(["reviewer: fixable"]);
   expect(() => transition(b, "T-99", "ready")).toThrow(/No ticket/);
 });

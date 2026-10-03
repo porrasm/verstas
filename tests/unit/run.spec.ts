@@ -427,3 +427,115 @@ test("the project brief is put first in every worker prompt, and a brief-only ru
     await fs.rm(s.root, { recursive: true, force: true });
   }
 });
+
+const addRequest = async (hub: SessionHub, sessionId: string, ticketId: string) => {
+  const h = await hub.get(sessionId);
+  await h.mutate((d) => ({
+    next: { inbox: { ...d.inbox, requests: [...d.inbox.requests, requestSchema.parse({ id: `R-${d.inbox.requests.length + 1}`, ticketId, summary: "need a host", actions: [{ id: "a1", detail: { kind: "network", host: "cdn.example.com" } }], createdAt: now() })] } },
+  }));
+};
+
+const resolveAll = async (hub: SessionHub, sessionId: string) => {
+  const h = await hub.get(sessionId);
+  await h.mutate((d) => ({
+    next: {
+      inbox: { ...d.inbox, requests: d.inbox.requests.map((r) => ({ ...r, state: "resolved" as const, decidedAt: now(), actions: r.actions.map((a) => ({ ...a, state: "approved" as const })) })) },
+      board: { ...d.board, tickets: d.board.tickets.map((t) => (t.state === "waiting" ? { ...t, state: "ready" as const } : t)) },
+    },
+  }));
+};
+
+test("parking on a request costs no attempt; only verdicts count", async () => {
+  const s = await makeSession({ attempts: 2 });
+  try {
+    const shell = fakeShell();
+    let impl = 0;
+    const worker = fakeWorker(s.hub, s.id, async (job, hub, id) => {
+      if (job.role === "implementer" && job.ticket === "T-1" && ++impl === 1) {
+        await addRequest(hub, id, "T-1");
+        return {};
+      }
+      if (job.role === "implementer") await fileReport(hub, id, job.ticket!, "tried");
+      if (job.role === "reviewer") return { text: "VERDICT: fixable\nOne more pass." };
+      return {};
+    });
+    const mgr = manager(s, shell, worker);
+    await (await mgr.start(s.id)).done;
+    let h = await s.hub.get(s.id);
+    expect(h.board.tickets[0]!.state).toBe("waiting");
+    expect(h.board.tickets[0]!.attempts).toBe(0);
+    await resolveAll(s.hub, s.id);
+    await (await mgr.start(s.id)).done;
+    h = await s.hub.get(s.id);
+    const t1 = h.board.tickets[0]!;
+    // Two judged attempts after the park: requeued once, then blocked.
+    expect(t1.attempts).toBe(2);
+    expect(t1.state).toBe("blocked");
+    expect(t1.notes.map((n) => n.text).join("\n")).toContain("attempt 1 of 2");
+  } finally {
+    await fs.rm(s.root, { recursive: true, force: true });
+  }
+});
+
+test("a failing harness gate is evidence for the reviewer, not a verdict", async () => {
+  const s = await makeSession();
+  try {
+    const shell = fakeShell();
+    const base = shell.exec.bind(shell);
+    shell.exec = async (cmd, opts) => (cmd.join(" ").startsWith("npm run --silent test") ? { code: 1, stdout: "", stderr: "browserType.launch: Executable doesn't exist" } : base(cmd, opts));
+    const reviewerPrompts: string[] = [];
+    const worker = fakeWorker(s.hub, s.id, async (job, hub, id) => {
+      if (job.role === "implementer") await fileReport(hub, id, job.ticket!, "done; e2e needs the browser from T-2");
+      if (job.role === "reviewer") {
+        reviewerPrompts.push(await fs.readFile(job.promptFile.replace("/workspace", s.paths.workspace), "utf8"));
+        return { text: "VERDICT: ok\nThe e2e failure is the missing browser, which a later ticket installs." };
+      }
+      return {};
+    });
+    const run = await (await manager(s, shell, worker).start(s.id)).done;
+    expect(run.state).toBe("finished");
+    expect((await s.hub.get(s.id)).board.tickets.map((t) => t.state)).toEqual(["done", "done"]);
+    expect(reviewerPrompts[0]).toContain("evidence, not a verdict");
+    expect(reviewerPrompts[0]).toContain("FAILED npm run test");
+  } finally {
+    await fs.rm(s.root, { recursive: true, force: true });
+  }
+});
+
+test("a ticket with no diff is done when the reviewer accepts the report", async () => {
+  const s = await makeSession();
+  try {
+    const shell = fakeShell();
+    const base = shell.exec.bind(shell);
+    shell.exec = async (cmd, opts) => (cmd.join(" ") === "git diff --cached --numstat" ? { code: 0, stdout: "", stderr: "" } : base(cmd, opts));
+    const worker = fakeWorker(s.hub, s.id, async (job, hub, id) => {
+      if (job.role === "implementer") await fileReport(hub, id, job.ticket!, "Investigated; findings in the report.");
+      if (job.role === "reviewer") return { text: "VERDICT: ok\nThe report answers the question." };
+      return {};
+    });
+    const run = await (await manager(s, shell, worker).start(s.id)).done;
+    expect(run.state).toBe("finished");
+    const h = await s.hub.get(s.id);
+    expect(h.board.tickets.map((t) => t.state)).toEqual(["done", "done"]);
+    expect(worker.jobs.filter((j) => j.role === "reviewer")).toHaveLength(2);
+    expect(h.board.tickets[0]!.notes.at(-1)?.text).toContain("no files changed");
+  } finally {
+    await fs.rm(s.root, { recursive: true, force: true });
+  }
+});
+
+test("without a reviewer, no diff and no report is not done", async () => {
+  const s = await makeSession({ reviewer: false, attempts: 1 });
+  try {
+    const shell = fakeShell();
+    const base = shell.exec.bind(shell);
+    shell.exec = async (cmd, opts) => (cmd.join(" ") === "git diff --cached --numstat" ? { code: 0, stdout: "", stderr: "" } : base(cmd, opts));
+    const worker = fakeWorker(s.hub, s.id, async () => ({}));
+    await (await manager(s, shell, worker).start(s.id)).done;
+    const t1 = (await s.hub.get(s.id)).board.tickets[0]!;
+    expect(t1.state).toBe("blocked");
+    expect(t1.notes.at(-1)?.text).toContain("no files changed and no report");
+  } finally {
+    await fs.rm(s.root, { recursive: true, force: true });
+  }
+});

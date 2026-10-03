@@ -316,7 +316,7 @@ export class RunManager {
     };
 
     const answer = latestAnswer(h, ticket.id);
-    await h.mutate((docs) => ({ next: { board: transition(docs.board, ticket.id, "in_progress", { by: "harness", text: `Implementer attempt ${ticket.attempts + 1} started` }) } }));
+    await h.mutate((docs) => ({ next: { board: transition(docs.board, ticket.id, "in_progress", { by: "harness", text: `Implementer started (judged attempts so far: ${ticket.attempts})` }) } }));
     await log({ kind: "ticket", t: clock(), ticket: ticket.id, from: "ready", to: "in_progress" });
     run.currentTicket = ticket.id;
     d.tokens.update(token, { currentTicket: ticket.id, role: "worker" });
@@ -327,11 +327,8 @@ export class RunManager {
 
     if (signal.aborted) return "requeued";
     if (impl.rateLimited) {
-      await h.mutate((docs) => {
-        const t = getTicket(docs.board, ticket.id);
-        // A rate limit is not the ticket's fault: give the attempt back.
-        return { next: { board: transition(replaceTicket(docs.board, { ...t, attempts: Math.max(0, t.attempts - 1) }), ticket.id, "ready", { by: "harness", text: "Rate limited; requeued" }) } };
-      });
+      // A rate limit is not the ticket's fault and gives no verdict, so it costs no attempt.
+      await h.mutate((docs) => ({ next: { board: transition(docs.board, ticket.id, "ready", { by: "harness", text: "Rate limited; requeued" }) } }));
       run.currentTicket = undefined;
       return "rate_limited";
     }
@@ -353,13 +350,18 @@ export class RunManager {
     const changed = numstat.files > 0;
     await move("review", `Implementer ${impl.ok ? "finished" : `stopped (${impl.stopReason})`}; ${numstat.files} files, +${numstat.added} −${numstat.removed}`);
 
-    let verdict: "ok" | "fixable" | "blocked" = impl.ok && gates.every((g) => g.ok) && changed ? "ok" : "fixable";
+    // Who decides. With a reviewer: the reviewer, always, including when no
+    // files changed (a report or an investigation can be the deliverable).
+    // The harness's own gates are guesses (npm test may need a browser the
+    // next ticket installs), so they are evidence for the reviewer, never a
+    // verdict on their own. Without a reviewer the harness decides from what
+    // it can see: the implementer finished, the gates pass, and there is a
+    // change or at least a report.
+    let verdict: "ok" | "fixable" | "blocked";
     let verdictNote = "";
-    if (!current.report) verdictNote = "no report was filed";
-    if (!changed) verdictNote = "no files changed";
-    if (caps.reviewer && changed) {
+    if (caps.reviewer) {
       d.tokens.update(token, { role: "worker", currentTicket: ticket.id });
-      const rev = await this.runJob(h, run, { role: "reviewer", ticket: ticket.id, promptText: withBrief(await this.readBrief(h), reviewerPrompt(getTicket(h.board, ticket.id), stat, diff, gates)) }, log, signal, token);
+      const rev = await this.runJob(h, run, { role: "reviewer", ticket: ticket.id, promptText: withBrief(await this.readBrief(h), reviewerPrompt(getTicket(h.board, ticket.id), stat, diff, gates, { ok: impl.ok, stopReason: impl.stopReason })) }, log, signal, token);
       addCost(run, rev.costUsd);
       await this.writeTicketReport(h, run, ticket.id, "reviewer", rev);
       if (rev.rateLimited) {
@@ -368,15 +370,22 @@ export class RunManager {
         await move("ready", "Reviewer was rate limited; requeued with the work kept");
         return "rate_limited";
       }
+      if (signal.aborted) return "requeued";
       const parsed = parseVerdict(rev.text);
-      if (parsed) {
-        verdict = verdict === "ok" ? parsed.verdict : parsed.verdict === "ok" ? "fixable" : parsed.verdict;
-        verdictNote = parsed.reason;
-      } else {
-        verdict = "fixable";
-        verdictNote = `reviewer gave no verdict (${rev.stopReason})`;
-      }
+      verdict = parsed?.verdict ?? "fixable";
+      verdictNote = parsed?.reason ?? `reviewer gave no verdict (${rev.stopReason})`;
+    } else {
+      const failed = gates.filter((g) => !g.ok).map((g) => g.name);
+      const report = getTicket(h.board, ticket.id).report;
+      if (!impl.ok) verdictNote = `implementer stopped (${impl.stopReason})`;
+      else if (failed.length) verdictNote = `failed: ${failed.join(", ")}`;
+      else if (!changed && !report) verdictNote = "no files changed and no report was filed";
+      verdict = verdictNote ? "fixable" : "ok";
     }
+
+    // One judged attempt, whatever the verdict.
+    const attempts = getTicket(h.board, ticket.id).attempts + 1;
+    await h.mutate((docs) => ({ next: { board: replaceTicket(docs.board, { ...getTicket(docs.board, ticket.id), attempts }) } }));
 
     if (verdict === "ok") {
       await this.commitInContainer(h, ticket, `${ticket.id}: ${ticket.title}`);
@@ -384,12 +393,11 @@ export class RunManager {
         const t = getTicket(docs.board, ticket.id);
         return { next: { board: replaceTicket(docs.board, { ...t, diff: numstat, cost: { ...(t.cost ?? { inputTokens: 0, outputTokens: 0 }), usd: (t.cost?.usd ?? 0) + impl.costUsd } }) } };
       });
-      await move("done", `Reviewed ok${verdictNote ? `: ${verdictNote}` : ""}`);
+      await move("done", `${caps.reviewer ? "Reviewed ok" : "Accepted"}${changed ? "" : " (no files changed)"}${verdictNote ? `: ${verdictNote}` : ""}`);
       run.ticketsDone++;
       run.currentTicket = undefined;
       return "done";
     }
-    const attempts = getTicket(h.board, ticket.id).attempts;
     if (verdict === "fixable" && attempts < caps.ticketAttempts) {
       await this.commitInContainer(h, ticket, `${ticket.id} (wip attempt ${attempts}): ${ticket.title}`);
       await move("ready", `Not done yet (${verdictNote || "see reviewer notes"}); attempt ${attempts} of ${caps.ticketAttempts}`);

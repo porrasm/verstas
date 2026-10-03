@@ -68,6 +68,7 @@ export const ticketSchema = z.object({
   spec: z.string().max(50_000).default(""),
   acceptance: z.array(z.string().min(1).max(2000)).default([]),
   notes: z.array(noteSchema).default([]),
+  /** Judged implementer attempts: counted when a verdict is given, never when a ticket parks, is stopped or is rate limited. */
   attempts: z.number().int().nonnegative().default(0),
   /** The agent may not reprioritize or re-dep a pinned ticket. */
   pinned: z.boolean().default(false),

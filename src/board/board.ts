@@ -70,7 +70,6 @@ export const transition = (
     ...t,
     state: to,
     updatedAt: at,
-    attempts: to === "in_progress" ? t.attempts + 1 : t.attempts,
     notes: note ? [...t.notes, { at, by: note.by, text: note.text }] : t.notes,
   };
   return replaceTicket(board, updated);

@@ -123,15 +123,22 @@ ${recentReports(board, ticket.id)}
 
 Start by reading /workspace/VERSTAS.md and /workspace/notes/INDEX.md. Then do the ticket. Finish with \`board_report\` and one line.`;
 
-export const reviewerPrompt = (ticket: Ticket, diffStat: string, diff: string, gates: { name: string; ok: boolean; summary: string }[]): string => `${ticketBlock(ticket)}
+export const reviewerPrompt = (
+  ticket: Ticket,
+  diffStat: string,
+  diff: string,
+  gates: { name: string; ok: boolean; summary: string }[],
+  implementer: { ok: boolean; stopReason: string } = { ok: true, stopReason: "success" },
+): string => `${ticketBlock(ticket)}
 ## Implementer's report
 ${ticket.report ?? "(no report was filed)"}
-
-## Gates run by the harness
-${gates.map((g) => `- ${g.ok ? "ok" : "FAILED"} ${g.name}: ${g.summary}`).join("\n") || "- none configured"}
+${implementer.ok ? "" : `\nThe implementer did not finish cleanly (${implementer.stopReason}); judge what is there.\n`}
+## Checks the harness ran (evidence, not a verdict)
+The harness guessed these from the repository (npm scripts, pytest). A failure may come from this change, or from something the box or a later ticket provides (a browser, a service). Decide which; only a failure this ticket should have prevented makes it fixable.
+${gates.map((g) => `- ${g.ok ? "ok" : "FAILED"} ${g.name}: ${g.summary}`).join("\n") || "- none found"}
 
 ## Diff (stat)
-${diffStat || "(empty)"}
+${diffStat || "(empty: no files changed. That is fine when the ticket's deliverable is a report, an investigation or a note; judge the report against the acceptance criteria.)"}
 
 ## Diff
 \`\`\`diff
