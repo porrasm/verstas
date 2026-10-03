@@ -124,7 +124,10 @@ export const HOSTNAME_PATTERN = /^(\*\.)?([a-z0-9-]+\.)+[a-z0-9-]+$/i;
 export const requestDetailSchema = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("network"),
-    host: z.string().regex(HOSTNAME_PATTERN, "A hostname or *.suffix"),
+    host: z
+      .string()
+      .regex(HOSTNAME_PATTERN, "A hostname or *.suffix")
+      .refine((h) => !/^\d{1,3}(\.\d{1,3}){3}$/.test(h), "IP literals are not allowed"),
     port: z.number().int().min(1).max(65535).optional(),
   }),
   z.object({
