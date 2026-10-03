@@ -143,7 +143,7 @@ export const createSession = async (root: string, input: CreateSessionInput): Pr
       used.add(name);
       const clone = await cloneWorkTarget(r.target.path, path.join(paths.workspace, name), r.branch, id);
       clones.push(clone);
-      session.repos.push({ name, sourcePath: r.target.path, branch: clone.branch, runBranch: clone.runBranch });
+      session.repos.push({ name, sourcePath: r.target.path, branch: clone.branch, runBranch: clone.runBranch, baseCommit: clone.commit });
     }
     for (const z of input.zips) {
       const dirName = z.name.replace(/\.zip$/i, "").replace(/[^A-Za-z0-9._-]+/g, "-").slice(0, 100) || "attachment";

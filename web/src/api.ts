@@ -36,7 +36,7 @@ export type Session = {
   createdAt: string;
   image: string;
   model?: string;
-  repos: { name: string; sourcePath: string; branch: string; runBranch: string }[];
+  repos: { name: string; sourcePath: string; branch: string; runBranch: string; baseCommit?: string }[];
   attachments: { name: string; dir: string; bytes: number; skipped: string[] }[];
   allowlist: string[];
   caps: { preflight: boolean; workerMinutes: number; workerTurns: number; runTickets: number; budgetUsd: number; ticketAttempts: number; reviewer: boolean };
@@ -193,3 +193,4 @@ export const copyText = async (text: string): Promise<void> => {
     ta.remove();
   }
 };
+export type ApplyResult = { targetPath: string; branch: string; base: string | null; commits: { sha: string; subject: string }[]; howTo: string[] };

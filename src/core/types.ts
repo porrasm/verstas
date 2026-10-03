@@ -218,6 +218,8 @@ export const repoSpecSchema = z.object({
   branch: z.string().min(1).max(200),
   /** Branch the harness commits to inside the clone. */
   runBranch: z.string().min(1).max(200),
+  /** The commit the clone started from; the feature branch's base when applying. */
+  baseCommit: z.string().optional(),
 });
 export type RepoSpec = z.infer<typeof repoSpecSchema>;
 

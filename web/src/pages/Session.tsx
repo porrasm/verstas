@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   api,
   copyText,
+  type ApplyResult,
   fmtAgo,
   fmtDateTime,
   fmtDuration,
@@ -323,8 +324,9 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
           />
         </div>
         <aside className="side">
-          <SetupPanel session={session} base={base} active={active} onDone={refreshRun} />
           <InboxPanel inbox={inbox} onRead={(mid) => tryAct("read", () => api("POST", `${base}/messages/${mid}/read`))} onPromote={(iid) => tryAct("promote", () => api("POST", `${base}/ideas/${iid}/promote`))} onOpenTicket={openTicket} />
+          <WorkPanel session={session} base={base} active={active} done={done} onExport={doExport} />
+          <SetupPanel session={session} base={base} active={active} onDone={refreshRun} />
           <SessionSettings
             session={session}
             onSave={async (patch) => {
@@ -353,6 +355,59 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
         />
       )}
     </div>
+  );
+};
+
+// --- taking the work back --------------------------------------------------------
+
+const WorkPanel = ({ session, base, active, done, onExport }: { session: Session; base: string; active: boolean; done: number; onExport: () => void }) => {
+  const [busy, setBusy] = useState("");
+  const [result, setResult] = useState<ApplyResult | null>(null);
+  const [err, setErr] = useState("");
+  if (!session.repos.length) return null;
+  const apply = async (repo: string) => {
+    setBusy(repo);
+    setErr("");
+    setResult(null);
+    try {
+      setResult(await api<ApplyResult>("POST", `${base}/apply`, { repo }));
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy("");
+    }
+  };
+  return (
+    <section className="card stack" style={{ gap: 8 }}>
+      <div className="row" style={{ justifyContent: "space-between" }}>
+        <h3>Work</h3>
+        <span className="muted small">{done} ticket{done === 1 ? "" : "s"} committed</span>
+      </div>
+      <p className="lead">Apply puts a repository's commits on the branch <span className="mono">{session.repos[0]?.runBranch}</span> in your real checkout. Your current branch is not touched; merge or cherry-pick when you are ready.</p>
+      {session.repos.map((r) => (
+        <div className="row" key={r.name} style={{ justifyContent: "space-between" }}>
+          <span><strong>{r.name}</strong> <span className="muted small mono" title={r.sourcePath}>{r.sourcePath.replace(/^\/Users\/[^/]+/, "~")}</span></span>
+          <button className="sm" onClick={() => apply(r.name)} disabled={Boolean(busy) || active} title={active ? "Pause or stop the run first" : `Create or update ${r.runBranch} in ${r.sourcePath}`}>{busy === r.name ? "Applying…" : "Apply to repo"}</button>
+        </div>
+      ))}
+      <div className="row"><button className="quiet sm" onClick={onExport} disabled={active}>Export bundles instead…</button></div>
+      {err && <div className="banner warn"><span>{err}</span><button className="quiet sm end" onClick={() => setErr("")}>Dismiss</button></div>}
+      {result && (
+        <div className="stack" style={{ gap: 6 }}>
+          <div className="small ok">Branch <span className="mono">{result.branch}</span> is up to date in <span className="mono">{result.targetPath}</span>: {result.commits.length} commit{result.commits.length === 1 ? "" : "s"} since the session started.</div>
+          {result.commits.length > 0 && (
+            <ul className="small mono" style={{ margin: 0, paddingLeft: 18 }}>
+              {result.commits.map((c) => <li key={c.sha}><span className="muted">{c.sha}</span> {c.subject}</li>)}
+            </ul>
+          )}
+          <details>
+            <summary className="muted small">Next steps in a terminal</summary>
+            <pre className="mono" style={{ whiteSpace: "pre-wrap" }}>{result.howTo.join("\n")}</pre>
+          </details>
+          <button className="quiet sm" onClick={() => setResult(null)}>Close</button>
+        </div>
+      )}
+    </section>
   );
 };
 

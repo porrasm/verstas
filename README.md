@@ -56,7 +56,11 @@ Then, in the web app:
 5. **Agentic initialization** (a tick on the New session form): before any
    ticket, a worker checks the box against the goal and the board, asks for
    what is missing, and work starts only after it reports ok.
-6. **Export bundles** when you want the work: one `git fetch` line per
+6. **Apply to repo** when you want the work: the session page's Work panel
+   puts a repository's commits on the branch `verstas/<session>` in your
+   real checkout, one commit per ticket, without touching the branch you
+   have checked out. Merge, rebase or cherry-pick from there. Export
+   bundles remain for moving work to another machine: one `git fetch` line per
    repository is shown. Bundles are pure data; nothing from the repository
    runs on your machine.
 7. **Delete** the session when done. Its containers, network and directory

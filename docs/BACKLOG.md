@@ -50,6 +50,11 @@ approve, apply it.
 
 ## V-02 · Apply exported work to the real repository  (S)
 
+**Status: done 2026-10-03.** "Apply to repo" per repository on the session
+page: bundle inside the container, `git fetch` on the host into the work
+target as `verstas/<session>` (force-updated, never the checked-out
+branch), commit list since the base, and the next terminal lines.
+
 **Why.** Export writes bundles and prints a `git fetch` line; one click is
 better and the host git reading a bundle from your own repo is safe.
 

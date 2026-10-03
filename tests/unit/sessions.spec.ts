@@ -16,6 +16,7 @@ import {
 } from "../../src/sessions/sessions.js";
 import { entryProblem, extractZip } from "../../src/sessions/workspace.js";
 import { migrateInbox } from "../../src/sessions/sessions.js";
+import { applyBundle, ApplyError } from "../../src/sessions/apply.js";
 import { inboxSchema } from "../../src/core/types.js";
 import { DEFAULT_ALLOWLIST } from "../../src/core/types.js";
 
@@ -219,6 +220,49 @@ test("setup scripts are copied into the session and their hosts join the allowli
     expect(session.setupScripts[0]!.name).toBe("postgres");
     expect(await fs.readFile(path.join(paths.setup, "postgres.sh"), "utf8")).toBe("apt-get install -y postgresql\n");
     expect(session.setup).toEqual([]);
+  } finally {
+    await fs.rm(tmp, { recursive: true, force: true });
+  }
+});
+
+test("applyBundle creates and updates the feature branch in the real repo without moving the current branch", async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "verstas-apply-"));
+  const src = path.join(tmp, "src-repo");
+  await makeSourceRepo(src);
+  const root = path.join(tmp, "sessions");
+  try {
+    const { session, paths } = await createSession(root, { name: "apply", goal: "", repos: [{ target: { name: "app", path: src } }], zips: [], image: "i" });
+    const clone = path.join(paths.workspace, "app");
+    const branch = session.repos[0]!.runBranch;
+    // The harness's work, simulated: two ticket commits in the clone, then a bundle (in production both happen inside the container).
+    await fs.writeFile(path.join(clone, "a.txt"), "a\n");
+    await git(clone, "add", "-A");
+    await git(clone, "commit", "-q", "-m", "T-1: first");
+    const bundle = path.join(paths.exportDir, "app.bundle");
+    await git(clone, "bundle", "create", bundle, "--all");
+
+    const before = await git(src, "rev-parse", "HEAD");
+    const r1 = await applyBundle({ targetPath: src, bundleFile: bundle, branch, baseCommit: session.repos[0]!.baseCommit, sourceBranch: "main" });
+    expect(r1.commits.map((c) => c.subject)).toEqual(["T-1: first"]);
+    expect(await git(src, "rev-parse", "HEAD")).toBe(before); // main untouched
+    expect(await git(src, "branch", "--show-current")).toBe("main");
+    expect(await git(src, "rev-parse", branch)).toBe(await git(clone, "rev-parse", branch));
+    expect(r1.howTo[0]).toContain(src);
+
+    // A second ticket, applied again: the branch moves forward.
+    await fs.writeFile(path.join(clone, "b.txt"), "b\n");
+    await git(clone, "add", "-A");
+    await git(clone, "commit", "-q", "-m", "T-2: second");
+    await git(clone, "bundle", "create", bundle, "--all");
+    const r2 = await applyBundle({ targetPath: src, bundleFile: bundle, branch, baseCommit: session.repos[0]!.baseCommit });
+    expect(r2.commits.map((c) => c.subject)).toEqual(["T-2: second", "T-1: first"]);
+
+    // Checked out: refuse rather than move the user's working tree.
+    await git(src, "switch", "-q", branch);
+    await expect(applyBundle({ targetPath: src, bundleFile: bundle, branch })).rejects.toThrow(ApplyError);
+    await git(src, "switch", "-q", "main");
+    // Not a repo any more: a clear error.
+    await expect(applyBundle({ targetPath: tmp, bundleFile: bundle, branch })).rejects.toThrow(/not a git work tree/);
   } finally {
     await fs.rm(tmp, { recursive: true, force: true });
   }

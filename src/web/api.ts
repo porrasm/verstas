@@ -25,6 +25,8 @@ import { emptyBoard, addNote, BoardError, exportBoard, getTicket, importBoard, p
 import { configSchema, loadConfig, loadSecrets, saveConfig, saveSecrets, verstasHome, workTargetSchema, type Config } from "../config.js";
 import type { SessionHub } from "../sessions/hub.js";
 import { createSession, deleteSessionDir, listSessions, sessionPaths } from "../sessions/sessions.js";
+import { applyBundle, ApplyError } from "../sessions/apply.js";
+import type { SessionHandle } from "../sessions/hub.js";
 import { removeSandbox, runRootCommand, sandboxStatus, stopSandbox, type SandboxConfig } from "../sandbox/lifecycle.js";
 import { dockerAvailable } from "../sandbox/docker.js";
 import type { RunManager } from "../harness/run.js";
@@ -449,36 +451,68 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
     }),
   );
 
-  // --- export ------------------------------------------------------------------
+  // --- export and apply ----------------------------------------------------------
+
+  /** Bundles the named repos (all when omitted) inside the container; files land in <session>/export/. */
+  const bundleRepos = async (h: SessionHandle, names?: string[]) => {
+    if (d.runs.status(h.id)) throw Object.assign(new Error("Pause or stop the run first"), { status: 409 });
+    await ensureSessionSandbox(d.runConfig, h.session, path.join(h.paths.dir, "sandbox.env"), undefined);
+    const sh = dockerShell(d.sandbox, h.id);
+    await sh.exec(["mkdir", "-p", "/workspace/.verstas/export"]);
+    const files: { repo: string; file: string; branch: string; bytes: number }[] = [];
+    for (const repo of h.session.repos.filter((r) => !names || names.includes(r.name))) {
+      const bundle = `/workspace/.verstas/export/${repo.name}.bundle`;
+      const r = await sh.exec(["git", "bundle", "create", bundle, "--all"], { workdir: `/workspace/${repo.name}`, timeoutMs: 600_000 });
+      if (r.code !== 0) throw new Error(`bundle ${repo.name}: ${r.stderr.slice(-500)}`);
+      const src = path.join(h.paths.workspace, ".verstas", "export", `${repo.name}.bundle`);
+      const dst = path.join(h.paths.exportDir, `${repo.name}.bundle`);
+      await fs.mkdir(h.paths.exportDir, { recursive: true });
+      await fs.copyFile(src, dst);
+      await fs.rm(src, { force: true });
+      files.push({ repo: repo.name, file: dst, branch: repo.runBranch, bytes: (await fs.stat(dst)).size });
+    }
+    return files;
+  };
 
   api.post(
     "/sessions/:id/export",
     wrap(async (req, res) => {
       const h = await d.hub.get(param(req, "id"));
-      if (d.runs.status(h.id)) {
-        res.status(409).json({ error: "Pause or stop the run first" });
+      try {
+        const files = await bundleRepos(h);
+        res.json({
+          files,
+          howTo: files.map((f) => `cd <your ${f.repo} checkout> && git fetch "${f.file}" ${f.branch}:${f.branch} && git log --oneline ${f.branch}`),
+        });
+      } catch (e) {
+        res.status((e as { status?: number }).status ?? 500).json({ error: (e as Error).message });
+      }
+    }),
+  );
+
+  /**
+   * Apply one repository's work to the real repository as the feature
+   * branch verstas/<session>: bundle inside the container, fetch on the
+   * host into the work target. Your checked-out branch is never moved.
+   */
+  api.post(
+    "/sessions/:id/apply",
+    wrap(async (req, res) => {
+      const { repo } = z.object({ repo: z.string().min(1) }).parse(req.body);
+      const h = await d.hub.get(param(req, "id"));
+      const spec = h.session.repos.find((r) => r.name === repo);
+      if (!spec) {
+        res.status(404).json({ error: `No repository ${repo} in this session` });
         return;
       }
-      await ensureSessionSandbox(d.runConfig, h.session, path.join(h.paths.dir, "sandbox.env"), undefined);
-      const sh = dockerShell(d.sandbox, h.id);
-      await sh.exec(["mkdir", "-p", "/workspace/.verstas/export"]);
-      const files: { repo: string; file: string; branch: string; bytes: number }[] = [];
-      for (const repo of h.session.repos) {
-        const bundle = `/workspace/.verstas/export/${repo.name}.bundle`;
-        const r = await sh.exec(["git", "bundle", "create", bundle, "--all"], { workdir: `/workspace/${repo.name}`, timeoutMs: 600_000 });
-        if (r.code !== 0) throw new Error(`bundle ${repo.name}: ${r.stderr.slice(-500)}`);
-        const src = path.join(h.paths.workspace, ".verstas", "export", `${repo.name}.bundle`);
-        const dst = path.join(h.paths.exportDir, `${repo.name}.bundle`);
-        await fs.mkdir(h.paths.exportDir, { recursive: true });
-        await fs.copyFile(src, dst);
-        await fs.rm(src, { force: true });
-        files.push({ repo: repo.name, file: dst, branch: repo.runBranch, bytes: (await fs.stat(dst)).size });
+      try {
+        const [file] = await bundleRepos(h, [repo]);
+        const result = await applyBundle({ targetPath: spec.sourcePath, bundleFile: file!.file, branch: spec.runBranch, baseCommit: spec.baseCommit, sourceBranch: spec.branch });
+        res.json(result);
+      } catch (e) {
+        const status = e instanceof ApplyError ? 400 : ((e as { status?: number }).status ?? 500);
+        res.status(status).json({ error: (e as Error).message });
       }
-      await stopSandbox(d.sandbox, h.id);
-      res.json({
-        files,
-        howTo: files.map((f) => `cd <your ${f.repo} checkout> && git fetch "${f.file}" ${f.branch}:${f.branch} && git log --oneline ${f.branch}`),
-      });
     }),
   );
 

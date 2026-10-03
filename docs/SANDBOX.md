@@ -155,6 +155,10 @@ machine (`core.fsmonitor`, `core.sshCommand`, `pre-commit`). So:
   `<session>/export/<repo>.bundle`. A bundle is pure data: fetching from it
   on the host runs no code from the repository. The UI tells you the exact
   `git fetch <bundle> <branch>` line.
+- **Apply to repo** does the fetch for you: host git reads the bundle (pure
+  data) and writes into your own checkout, force-updating only the branch
+  `verstas/<session>` and refusing if that branch is checked out. The
+  workspace's `.git` is still never read by host git.
 - Do not `git fetch` or `git pull` directly from `workspace/<repo>` on the
   host. The UI does not offer it and this document is why.
 
