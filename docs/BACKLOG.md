@@ -191,6 +191,33 @@ Two workers on independent tickets in two containers sharing one
 workspace; needs per-ticket worktrees or branch-per-ticket merges. Not
 before everything above is boring.
 
+## V-14 · Virtual machine sandbox backend  (L, out of MVP scope)
+
+**Why.** Some setups need what a container cannot give safely: root for
+the agent, a Docker daemon inside the box (`docker compose up` across ten
+repositories, testing Verstas's own sandbox code), kernel-level isolation
+instead of a shared kernel. A VM gives all three; nested Docker in a
+container does not (socket mount = root on the host, docker-in-docker =
+`--privileged`, rootless/Sysbox not available on Docker Desktop).
+
+**Shape.** A second implementation of the sandbox seam (argument builder,
+lifecycle, shell, worker runner) driven by a VM CLI: Tart on Apple Silicon
+(Virtualization.framework, fast clones from a base image, `softnet`
+network isolation with an allowlist), Lima as the alternative, Firecracker
+or plain KVM on Linux. Workers start over SSH; logs come over SSH. The
+workspace is a shared directory (virtiofs). The proxy and the agent API
+stay on the host unchanged; the guest gets a route only to the host, so a
+root agent cannot lift the allowlist from inside. Snapshots give a clean
+box in seconds. The loop, board and agent API do not change.
+
+**Costs.** Gigabytes of RAM reserved per VM, seconds to a minute to boot,
+a disk image per session, two backends to keep working, less convenient
+observability than `docker exec`/`docker logs`. Do it only after V-04, so
+that a root agent still never holds the real token.
+
+**Trigger.** The first session that genuinely needs Docker inside, or
+more than a handful of repositories with their own compose stacks.
+
 ---
 
 ## Done
