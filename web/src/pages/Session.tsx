@@ -153,6 +153,27 @@ export const SessionPage = ({ id }: { id: string }) => {
           {run?.pauseReason && !active ? ` · ${run.pauseReason}` : ""}
         </span>
         <span className="muted small">{done}/{board.tickets.length} done · {fmtUsd(run?.cost.usd)} · sandbox {sandbox ? `${sandbox.container}/${sandbox.proxy}` : "?"} · {live ? "live" : "reconnecting…"}</span>
+        <label className="row small" style={{ gap: 6 }} title="Applies to the next worker that starts; the one running keeps its model">
+          <span className="muted">model</span>
+          <select
+            id="model-select"
+            value={session.model && !MODEL_CHOICES.includes(session.model) ? "__custom" : (session.model ?? "")}
+            onChange={(e) => {
+              const v = e.target.value;
+              if (v === "__custom") {
+                const custom = prompt("Model id or alias", session.model ?? "");
+                if (custom !== null) void act("model", () => api("PUT", `/sessions/${encodeURIComponent(id)}/caps`, { model: custom.trim() || null }));
+                return;
+              }
+              void act("model", () => api("PUT", `/sessions/${encodeURIComponent(id)}/caps`, { model: v || null }));
+            }}
+            style={{ width: "auto" }}
+          >
+            <option value="">token default</option>
+            {MODEL_CHOICES.map((m) => <option key={m} value={m}>{m}</option>)}
+            {session.model && !MODEL_CHOICES.includes(session.model) ? <option value="__custom">{session.model}</option> : <option value="__custom">other…</option>}
+          </select>
+        </label>
         <span className="row" style={{ marginLeft: "auto" }}>
           {!active && <button className="pri" onClick={() => runAction("start")} disabled={Boolean(busy)}>Start run</button>}
           {!active && <button onClick={() => runAction("plan")} disabled={Boolean(busy)}>Plan (planner adds tickets)</button>}
