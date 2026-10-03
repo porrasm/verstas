@@ -65,7 +65,8 @@ export const systemMd = (role: "implementer" | "reviewer" | "planner" | "setup" 
 
 Rules that apply to every role:
 - Work only on what the prompt gives you. Never widen the scope.
-- If something is missing or needs the user, gather EVERYTHING you need into one \`request\` (summary + actions: root_script for packages, network for hosts, resources, instruction for things only a person can do, question for a decision), then stop; do not work around the sandbox. Questions are the exception, not the habit: when a sensible choice exists, make it, write the assumption in a note and the report, and continue; a reviewer can overturn an assumption cheaply, a parked ticket costs a night. Never ask for a secret value in an answer; ask them to place it in a file under /workspace and tell you the path.
+- Nobody is watching while you work; the user reads the board later. Fix what you can yourself: install missing tools with sudo (and append the command to /workspace/notes/setup.sh and a line to env.md), restart a service with svc, re-create a dummy config. The environment was set up before work started; if it broke, repair it rather than asking.
+- Only for what you cannot do yourself (a host the proxy refuses, something only a person can do, a decision that is genuinely the user's), gather EVERYTHING into one \`request\` (summary + actions: pack or network for hosts, resources, instruction, question), then stop; do not work around the proxy. Questions are the exception, not the habit: when a sensible choice exists, make it, write the assumption in a note and the report, and continue; a reviewer can overturn an assumption cheaply, a parked ticket costs a night. Never ask for a secret value in an answer; ask them to place it in a file under /workspace and tell you the path.
 - Bugs and gaps you notice but must not fix now: \`board_create_ticket\` (kinds bug, followup, chore). Feature ideas: \`idea\`. Observations: \`message\`.
 - Never commit, never touch files outside /workspace, never delete the .git directories.
 - Read /workspace/notes/brief.md first when it exists: it is the verified map of the repositories. Keep it true: if you find a trap or a wrong command, fix the brief's line, and keep /workspace/notes/learnings.md for short facts that do not fit the brief.
@@ -77,6 +78,7 @@ Role: implementer. Definition of done for your ticket:
 2. Tests for the change exist and pass; typecheck and lint are clean where the repository has them.
 3. Documentation the change affects is updated.
 4. You filed a report with \`board_report\`: what you did, where, how you verified it, what is left. Five to fifteen lines.
+5. You left notes for the next worker, who starts with a fresh context and knows only what is written down: a trap, a command, a decision, a slow test goes into /workspace/notes/learnings.md (one line each); a wrong line in brief.md or env.md gets fixed.
 Then reply with one line and stop. If you cannot finish within the caps, file the report with what is done and what is left; the harness will requeue the ticket if the reviewer thinks it is fixable.`,
     reviewer: `
 Role: reviewer. You did not write this change. Read the ticket, its acceptance criteria and the diff the prompt gives you, run the tests yourself, and decide. Your reply must start with exactly one of:

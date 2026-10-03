@@ -125,7 +125,7 @@ export const HOSTNAME_PATTERN = /^(\*\.)?([a-z0-9-]+\.)+[a-z0-9-]+$/i;
 /**
  * One request = a summary for the user plus zero or more actions, each
  * decided on its own. The ticket parks until every action has a decision.
- * Kinds Verstas applies itself: network, resources, root_script. Kinds the
+ * Kinds Verstas applies itself: network, pack, resources. Kinds the
  * user performs or answers: instruction, question.
  */
 export const actionDetailSchema = z.discriminatedUnion("kind", [
@@ -142,12 +142,6 @@ export const actionDetailSchema = z.discriminatedUnion("kind", [
     workerMinutes: z.number().int().min(1).max(600).optional(),
     workerTurns: z.number().int().min(1).max(500).optional(),
     memoryMb: z.number().int().min(256).max(65536).optional(),
-  }),
-  /** Multi-line bash, run as root inside the container with `bash -e` on stdin after the user read it. */
-  z.object({
-    kind: z.literal("root_script"),
-    script: z.string().min(1).max(20_000),
-    cwd: z.string().max(500).optional(),
   }),
   /** A named bundle of hosts (src/network/packs.ts), e.g. "playwright"; approval adds them all. */
   z.object({
@@ -210,7 +204,6 @@ export const requestOutcome = (r: AgentRequest): string => {
       d.kind === "network" ? `network ${d.host}${d.port ? `:${d.port}` : ""}` :
       d.kind === "pack" ? `network pack ${d.pack}` :
       d.kind === "resources" ? `resources ${JSON.stringify({ ...d, kind: undefined })}` :
-      d.kind === "root_script" ? `root script (${d.script.split("\n").length} lines)` :
       d.kind === "instruction" ? `instruction: ${d.text.slice(0, 200)}` :
       `question: ${d.text.slice(0, 200)}`;
     lines.push(`  ${a.id} ${what} -> ${a.state}${a.outcome ? `: ${a.outcome}` : ""}`);
@@ -314,7 +307,7 @@ export const setupResultSchema = z.object({
 });
 export type SetupResult = z.infer<typeof setupResultSchema>;
 
-/** A root script the user approved; replayed when the container is recreated. */
+/** A root script the user approved, from before the agent had sudo; still replayed when the container is recreated (no snapshot). */
 export const rootScriptRecordSchema = z.object({
   script: z.string().min(1).max(20_000),
   cwd: z.string().max(500).optional(),

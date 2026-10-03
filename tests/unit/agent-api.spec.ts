@@ -109,7 +109,7 @@ test("requests carry a summary and typed actions; halt is its own tool; messages
     const r = await s.call("POST", "/requests", {
       summary: "Need Postgres and two decisions before the tests can run.",
       actions: [
-        { kind: "root_script", script: "apt-get update\napt-get install -y postgresql" },
+        { kind: "pack", pack: "playwright" },
         { kind: "network", host: "fonts.googleapis.com" },
         { kind: "question", text: "Fresh empty database, or restore a dump?", options: ["fresh", "dump"] },
         { kind: "instruction", text: "Place real OPENAI_API_KEY in /workspace/secrets/apps.env if you want LLM features." },
@@ -127,12 +127,16 @@ test("requests carry a summary and typed actions; halt is its own tool; messages
     // Validation still bites per action.
     expect((await s.call("POST", "/requests", { summary: "x", actions: [{ kind: "network", host: "10.0.0.1" }] })).status).toBe(400);
     expect((await s.call("POST", "/requests", { summary: "x", actions: [{ kind: "install", manager: "apt", packages: ["tree"] }] })).status).toBe(400);
+    // root_script is retired, with a message that says what to do instead.
+    const retired = await s.call("POST", "/requests", { summary: "x", actions: [{ kind: "root_script", script: "apt-get install -y tree" }] });
+    expect(retired.status).toBe(400);
+    expect(String(retired.json.error)).toContain("sudo");
     expect((await s.call("POST", "/messages", { text: "tests are slow" })).json.id).toBe("M-1");
     expect((await s.call("POST", "/ideas", { title: "Per-track pages", pitch: "would sell" })).json.id).toBe("I-1");
 
     const h = await s.hub.get(s.id);
     expect(h.inbox.requests.map((r) => [r.id, r.ticketId, r.state, r.actions.length, Boolean(r.halt)])).toEqual([["R-1", "T-2", "open", 4, false], ["R-2", "T-2", "open", 0, false], ["R-3", "T-2", "open", 0, true]]);
-    expect(h.inbox.requests[0]!.actions.map((a) => a.detail.kind)).toEqual(["root_script", "network", "question", "instruction"]);
+    expect(h.inbox.requests[0]!.actions.map((a) => a.detail.kind)).toEqual(["pack", "network", "question", "instruction"]);
     expect(h.inbox.messages[0]).toMatchObject({ ticketId: "T-2", read: false });
     expect(h.inbox.ideas[0]).toMatchObject({ ticketId: "T-2", title: "Per-track pages" });
     expect(h.board.tickets.find((t) => t.id === "T-2")!.notes.map((n) => n.text).join("\n")).toContain("Halt requested (critical)");

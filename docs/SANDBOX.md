@@ -216,16 +216,12 @@ variable name in its context.
 ## Boundary 7: root inside the box
 
 The agent installs system packages itself with `sudo`; see "Capability
-inside, boundary outside" above. What follows describes the two root
-paths that remain for text the agent did not run itself.
-
-A worker may still file a request whose `root_script` action carries
-bash verbatim (this path is being retired in favour of sudo). The inbox shows every line.
-If you approve, the host app runs it **as root inside the session
-container** (`docker exec -u root … bash -e -s` with the script on stdin),
-with a 15-minute cap, and the output tail goes back to the worker as the
-action's outcome. Approved scripts are recorded on the session and
-replayed if the container is ever recreated.
+inside, boundary outside" above. The `root_script` request kind, through
+which a worker asked you to run bash as root, is retired: the agent API
+refuses it, and old requests of that kind are shown as instructions with
+their script. Root scripts approved before the change are still replayed
+when a container is recreated without a snapshot. What follows describes
+the root paths for text the agent did not run itself at that moment.
 
 Root here is root in a container with Docker's default capabilities minus
 raw sockets and device nodes, under the default seccomp profile, not on your
@@ -308,7 +304,7 @@ labelled resources without a matching directory and offers to remove them.
       cloning.
 - [ ] The agent API has no route that touches sessions, Docker or other
       runs, and every route checks the run token first.
-- [ ] A root script runs only after approval of that action in the inbox,
-      as root inside the container only, with a cap, and is recorded on
-      the session.
+- [ ] Root inside the box (sudo, recipes, setup scripts) only ever runs
+      inside the session container, and the container's flags match the
+      table in Boundary 2.
 - [ ] Deleting a session removes network, proxy, container and directory.

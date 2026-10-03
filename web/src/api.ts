@@ -27,7 +27,6 @@ export type ActionDetail =
   | { kind: "network"; host: string; port?: number }
   | { kind: "pack"; pack: string }
   | { kind: "resources"; workerMinutes?: number; workerTurns?: number; memoryMb?: number }
-  | { kind: "root_script"; script: string; cwd?: string }
   | { kind: "instruction"; text: string }
   | { kind: "question"; text: string; options?: string[] };
 export type RequestAction = { id: string; detail: ActionDetail; state: "open" | "approved" | "declined"; outcome?: string; decidedAt?: string };

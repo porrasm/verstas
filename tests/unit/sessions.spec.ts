@@ -198,15 +198,19 @@ test("old request shapes are migrated on load into summary plus actions", () => 
   };
   const inbox = inboxSchema.parse(migrateInbox(old));
   expect(inbox.requests.map((r) => [r.id, r.state, r.actions.map((a) => `${a.detail.kind}:${a.state}`).join(","), Boolean(r.halt)])).toEqual([
-    ["R-1", "open", "root_script:open", false],
+    ["R-1", "open", "instruction:open", false],
     ["R-2", "resolved", "question:approved", false],
     ["R-3", "resolved", "network:declined", false],
     ["R-4", "open", "", true],
   ]);
-  expect(inbox.requests[0]!.actions[0]!.detail).toMatchObject({ script: "apt-get update && apt-get install -y --no-install-recommends tree jq" });
+  expect(inbox.requests[0]!.actions[0]!.detail).toMatchObject({ kind: "instruction", text: expect.stringContaining("apt-get update && apt-get install -y --no-install-recommends tree jq") });
   expect(inbox.requests[1]!.answer).toBe("11");
   // Already-new shapes pass through untouched.
   expect(inboxSchema.parse(migrateInbox(inbox)).requests).toEqual(inbox.requests);
+  // A new-shape request with a retired root_script action becomes an instruction that keeps the script.
+  const retired = inboxSchema.parse(migrateInbox({ requests: [{ id: "R-9", summary: "pg", state: "resolved", createdAt: "2026-10-03T00:00:00.000Z", actions: [{ id: "a1", state: "approved", outcome: "ran as root, exit 100", detail: { kind: "root_script", script: "apt-get install -y postgresql-15" } }, { id: "a2", state: "approved", detail: { kind: "network", host: "x.com" } }] }] }));
+  expect(retired.requests[0]!.actions.map((a) => a.detail.kind)).toEqual(["instruction", "network"]);
+  expect(retired.requests[0]!.actions[0]!.outcome).toBe("ran as root, exit 100");
 });
 
 test("setup scripts are copied into the session and their hosts join the allowlist", async () => {

@@ -231,19 +231,28 @@ export const saveSession = async (root: string, session: Session): Promise<void>
  * the single-`detail` requests of 2026-10-03 (install, decision, secret,
  * network, resources, root_command, ask, halt) become one request with one
  * action (or a halt flag). Saved back in the new shape on the next write.
+ *
+ * root_script actions (retired 2026-10-04: the agent installs with sudo)
+ * become instructions that keep the script, so the history reads right and
+ * an open one can still be done by hand or declined.
  */
 export const migrateInbox = (raw: unknown): unknown => {
   if (!raw || typeof raw !== "object") return raw;
   const r = raw as { requests?: Record<string, unknown>[] };
   if (!Array.isArray(r.requests)) return raw;
+  const retire = (detail: Record<string, unknown>): Record<string, unknown> =>
+    detail.kind === "root_script"
+      ? { kind: "instruction", text: `Retired request kind: run as root in the box (the agent now installs with sudo itself; decline to let the next worker do it).\n\n${String(detail.script ?? "").slice(0, 4800)}` }
+      : detail;
   const requests = r.requests.map((req) => {
-    if (Array.isArray(req.actions) || !req.detail) return req;
+    if (Array.isArray(req.actions)) return { ...req, actions: (req.actions as Record<string, unknown>[]).map((a) => (a && typeof a === "object" && a.detail ? { ...a, detail: retire(a.detail as Record<string, unknown>) } : a)) };
+    if (!req.detail) return req;
     const d = req.detail as Record<string, unknown>;
     const why = String(req.why ?? "");
     const oldState = String(req.state ?? "open");
     const actionState = oldState === "approved" ? "approved" : oldState === "denied" ? "declined" : "open";
     const base = { id: req.id, ticketId: req.ticketId, summary: why || "(migrated request)", state: oldState === "open" ? "open" : "resolved", answer: req.answer, createdAt: req.createdAt, decidedAt: req.decidedAt };
-    const act = (detail: Record<string, unknown>) => ({ ...base, actions: [{ id: "a1", detail, state: actionState, outcome: req.answer, decidedAt: req.decidedAt }] });
+    const act = (detail: Record<string, unknown>) => ({ ...base, actions: [{ id: "a1", detail: retire(detail), state: actionState, outcome: req.answer, decidedAt: req.decidedAt }] });
     switch (d.kind) {
       case "network":
       case "resources":

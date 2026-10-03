@@ -30,7 +30,7 @@ import type { SessionHub } from "../sessions/hub.js";
 import { createSession, deleteSessionDir, listSessions, sessionPaths } from "../sessions/sessions.js";
 import { applyBundle, ApplyError } from "../sessions/apply.js";
 import type { SessionHandle } from "../sessions/hub.js";
-import { removeSandbox, runRootScript, sandboxStatus, snapshotSandbox, stopSandbox, type SandboxConfig } from "../sandbox/lifecycle.js";
+import { removeSandbox, sandboxStatus, snapshotSandbox, stopSandbox, type SandboxConfig } from "../sandbox/lifecycle.js";
 import { dockerAvailable } from "../sandbox/docker.js";
 import type { RunManager } from "../harness/run.js";
 import { dockerShell, ensureSessionSandbox, runSetup, type RunManagerConfig } from "../harness/docker-worker.js";
@@ -868,7 +868,7 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
 
   /**
    * Decide one or more actions of a request, with an optional free-text
-   * answer. Approved network/resources/root_script actions are applied here;
+   * answer. Approved network/pack/resources actions are applied here;
    * instruction and question actions just record what you said. The request
    * resolves, and the ticket returns to ready, once every action is decided.
    */
@@ -924,8 +924,6 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
             if (!session.allowlist.includes(entry)) session = { ...session, allowlist: [...session.allowlist, entry] };
           } else if (det.kind === "pack") {
             session = { ...session, packs: [...new Set([...session.packs, det.pack])], allowlist: [...new Set([...session.allowlist, ...packHosts([det.pack])])] };
-          } else if (det.kind === "root_script") {
-            session = { ...session, rootScripts: [...session.rootScripts, { script: det.script, cwd: det.cwd, at: now(), requestId: next.id }] };
           } else if (det.kind === "resources") {
             session = {
               ...session,
@@ -986,14 +984,6 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
 /** The side effect of approving one action; returns the outcome text the worker will read. */
 const applyAction = async (d: UiApiDeps, sessionId: string, a: RequestAction, note?: string): Promise<string> => {
   const det = a.detail;
-  if (det.kind === "root_script") {
-    const h = await d.hub.get(sessionId);
-    const st = await sandboxStatus(d.sandbox, sessionId).catch(() => null);
-    if (st?.container !== "running") await ensureSessionSandbox(d.runConfig, h.session, path.join(h.paths.dir, "sandbox.env"), undefined);
-    const r = await runRootScript(d.sandbox, sessionId, det.script, det.cwd);
-    const tail = r.output.trim().split("\n").slice(-30).join("\n");
-    return `${r.ok ? "ran as root, exit 0" : `ran as root, exit ${r.code}`}${note ? ` (${note})` : ""}${tail ? `\n--- output (tail) ---\n${tail}` : ""}`;
-  }
   if (det.kind === "network") return `allowed${note ? `: ${note}` : ""}`;
   if (det.kind === "pack") return `allowed ${packHosts([det.pack]).filter((h) => h !== "api.anthropic.com").join(", ")}${note ? ` (${note})` : ""}`;
   if (det.kind === "resources") return `applied${note ? `: ${note}` : ""}`;

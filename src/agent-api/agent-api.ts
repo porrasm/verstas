@@ -184,6 +184,11 @@ export const createAgentApi = (hub: SessionHub, tokens: RunTokens): express.Expr
   r.post(
     "/requests",
     wrap(async (req, res) => {
+      const raw = req.body as { actions?: { kind?: unknown }[] } | undefined;
+      if (Array.isArray(raw?.actions) && raw.actions.some((a) => a?.kind === "root_script")) {
+        res.status(400).json({ error: "root_script is retired: you have passwordless sudo. Run the install yourself, append it to /workspace/notes/setup.sh, and note it in /workspace/notes/env.md." });
+        return;
+      }
       const { summary, actions } = z.object({ summary: z.string().min(1).max(8000), actions: z.array(actionDetailSchema).max(20).default([]) }).parse(req.body);
       const h = await hub.get(req.run.sessionId);
       const created = await h.mutate((d) => {

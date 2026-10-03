@@ -103,7 +103,7 @@ export const TOOLS: Tool[] = [
   {
     name: "request",
     description:
-      "Ask the user for everything you need right now in ONE request, then STOP working on the ticket. Give a summary (what you need and why) and a list of actions. Kinds Verstas performs on approval: 'network' (a host to allow), 'pack' (a named bundle of hosts for a toolchain, e.g. 'playwright'; listed in /workspace/VERSTAS.md), 'resources' (more minutes/turns/memory), 'root_script' (bash run as root inside this container, e.g. apt-get installs; you get the output). Kinds the user performs or answers: 'instruction' (something only a person can do), 'question' (a decision; offer options). Ask questions rarely: if a sensible choice exists, make it, note the assumption, and continue. The ticket parks until every action is decided; the next worker gets the outcomes.",
+      "For what you cannot do yourself (you have sudo: install packages yourself). Ask the user for everything you need right now in ONE request, then STOP working on the ticket. Give a summary (what you need and why) and a list of actions. Kinds Verstas performs on approval: 'network' (a host to allow), 'pack' (a named bundle of hosts for a toolchain, e.g. 'playwright'; listed in /workspace/VERSTAS.md), 'resources' (more minutes/turns/memory). Kinds the user performs or answers: 'instruction' (something only a person can do), 'question' (a decision; offer options). Ask questions rarely: if a sensible choice exists, make it, note the assumption, and continue. The ticket parks until every action is decided; the next worker gets the outcomes.",
     inputSchema: obj(
       {
         summary: str("What you need and why, for the user. One paragraph.", 8000),
@@ -113,15 +113,13 @@ export const TOOLS: Tool[] = [
           items: {
             type: "object",
             properties: {
-              kind: { type: "string", enum: ["network", "pack", "resources", "root_script", "instruction", "question"] },
+              kind: { type: "string", enum: ["network", "pack", "resources", "instruction", "question"] },
               host: str("network: hostname or *.suffix", 253),
               pack: str("pack: the pack name, e.g. playwright", 40),
               port: { type: "integer", minimum: 1, maximum: 65535 },
               workerMinutes: { type: "integer", minimum: 1, maximum: 600 },
               workerTurns: { type: "integer", minimum: 1, maximum: 500 },
               memoryMb: { type: "integer", minimum: 256, maximum: 65536 },
-              script: str("root_script: the bash to run as root (multi-line is fine)", 20_000),
-              cwd: str("root_script: working directory (default /workspace)", 500),
               text: str("instruction or question: the text", 5000),
               options: { type: "array", items: str("question: an option", 200), maxItems: 8 },
             },

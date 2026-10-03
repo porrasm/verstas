@@ -50,7 +50,6 @@ const ACTION_LABELS: Record<string, { title: string; yes: string; no: string; to
   network: { title: "Allow a host", yes: "Allow", no: "Decline", tone: "sig" },
   pack: { title: "Allow a toolchain's hosts", yes: "Allow all", no: "Decline", tone: "sig" },
   resources: { title: "Change caps", yes: "Apply", no: "Decline", tone: "sig" },
-  root_script: { title: "Run as root in the box", yes: "Run as root", no: "Decline", tone: "warn" },
   instruction: { title: "For you to do", yes: "Done", no: "Decline", tone: "sig" },
   question: { title: "A question", yes: "Answer", no: "Skip", tone: "info" },
 };
@@ -817,7 +816,7 @@ const RequestItem = ({ r, onDecide, onOpenTicket }: { r: AgentRequest; onDecide:
   return (
     <div className="req">
       <div className="head">
-        <span className={`pill ${r.halt ? "warn" : kinds.includes("root_script") ? "warn" : "sig"}`}>{r.halt ? "halt" : kinds.length ? kinds.map((k) => k.replace("_", " ")).join(" · ") : "question"}</span>
+        <span className={`pill ${r.halt ? "warn" : "sig"}`}>{r.halt ? "halt" : kinds.length ? kinds.map((k) => k.replace("_", " ")).join(" · ") : "question"}</span>
         <strong style={{ color: "var(--text)" }}>{r.halt ? "The agent stopped the run" : `${r.actions.length} action${r.actions.length === 1 ? "" : "s"}, ${open.length} open`}</strong>
         {r.ticketId && <a href="#" onClick={(e) => { e.preventDefault(); onOpenTicket(r.ticketId!); }} className="mono">{r.ticketId}</a>}
         <span title={fmtDateTime(r.createdAt)}>{fmtTime(r.createdAt)}</span>
@@ -835,8 +834,6 @@ const RequestItem = ({ r, onDecide, onOpenTicket }: { r: AgentRequest; onDecide:
               <span className="muted small">{l.title}</span>
               {decided && <span className={`pill ${a.state === "approved" ? "good" : "quiet"} end`}>{a.state}</span>}
             </div>
-            {d.kind === "root_script" && <pre className="mono">{d.script}</pre>}
-            {d.kind === "root_script" && !decided && <div className="muted small">Runs as root inside the session container{d.cwd ? ` in ${d.cwd}` : ""}. Read every line; the output tail goes back to the worker.</div>}
             {d.kind === "network" && <div className="mono">allow {d.host}{d.port ? `:${d.port}` : ""} (HTTPS)</div>}
             {d.kind === "pack" && <div className="mono">allow the {d.pack} pack (HTTPS; the hosts are listed under Network on the New session form)</div>}
             {d.kind === "resources" && <div className="mono small">{(["workerMinutes", "workerTurns", "memoryMb"] as const).filter((k) => d[k] !== undefined).map((k) => `${k}: ${String(d[k])}`).join(" · ")}</div>}
@@ -1269,10 +1266,11 @@ const SessionSettings = ({ session, onSave }: { session: Session; onSave: (patch
           {state === "dirty" && <button className="quiet" onClick={() => { setF(fromSession()); setState("clean"); }}>Discard</button>}
           <span className={`state ${state === "saved" ? "ok" : state === "error" ? "err" : ""}`}>{state === "saving" ? "Saving…" : state === "saved" ? "Saved" : state === "error" ? msg : state === "dirty" ? "Unsaved changes" : ""}</span>
         </div>
-        <div className="small muted">
-          Root scripts approved so far: {session.rootScripts.length ? session.rootScripts.map((c) => <code key={c.at} style={{ marginRight: 6 }}>{c.script.split("\n")[0]!.slice(0, 60)}</code>) : "none"}. They are replayed if the container is recreated.
-        </div>
-        <div className="small faint mono">{session.image} · {session.id}</div>
+        {session.rootScripts.length > 0 && (
+          <div className="small muted">
+            Root scripts approved before the agent had sudo: {session.rootScripts.map((c) => <code key={c.at} style={{ marginRight: 6 }}>{c.script.split("\n")[0]!.slice(0, 60)}</code>)}. Replayed if the container is recreated without a snapshot.
+          </div>
+        )}        <div className="small faint mono">{session.image} · {session.id}</div>
       </div>
     </details>
   );
