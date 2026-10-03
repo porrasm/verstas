@@ -5,6 +5,14 @@ further context: what, why, how, what stays compatible, what to test, which
 docs to touch. Sizes: S under half a day, M about a day, L several days.
 Progress goes in a `Status:` line under the heading.
 
+**Direction (2026-10-04).** Verstas is a loop manager: a box that can
+become any development environment, a loop that says "do the next item",
+and a boundary that makes it safe to walk away. Setup is the one place a
+person is expected; after it, every park is a night lost. The design is
+the [Verstas Loop Manager](https://claude.ai/artifact/HZq6BDVKcU1bwLs9MBqxDm)
+artifact. Phase 0 (fixes) and Phase 1 (root inside, setup phase) are done;
+Phase 2 is below as LM-2x and needs design before it starts.
+
 Rules that apply to every item: `docs/SANDBOX.md` changes in the same commit
 as any boundary change; a new loop outcome gets a unit test with the fakes
 in `tests/unit/run.spec.ts`; the agent API never gains a route that touches
@@ -105,6 +113,12 @@ approved commands).
 
 ## V-04 · Token never enters the box: proxy credential injection  (M)
 
+**Status: interim done 2026-10-04.** The tokens are no longer in the
+container environment (each worker's exec gets them by name) and every
+commit is scanned for the Claude token. The proxy injection below is still
+open, and matters more now that root in the box can read any process's
+environment.
+
 **Why.** Today `CLAUDE_CODE_OAUTH_TOKEN` is in the container environment and
 readable by every process, including installers and agent commands. The
 only way to keep a secret from a process is not to give it to it.
@@ -171,17 +185,29 @@ ticket and per run from the `cost` events (already emitted); show
 "1.2M in (90% cached) · 9k out · $0.14 API-equiv." on cards, header and the
 sessions list. After V-04 the proxy's counts replace the stream's.
 
-## V-08 · Continuity policy: keep a worker across dependent tickets  (S)
+## V-08 · Session resume: keep a Claude session across attempts or tickets  (M)
+
+**Status: deferred by decision, 2026-10-04.** Fresh context per ticket plus
+notes for the next worker is the memory model. Resume has real benefits and
+stays on the list; it starts only when the questions below have answers
+from real runs.
 
 **Why.** Context gathering is the expensive part of a chain of small
-tickets; a fresh context per ticket is still the right default.
+tickets, and a retry after a cap or a fixable verdict starts from a report,
+a lossy compression of what the previous attempt knew.
 
-**How.** Drop `--no-session-persistence`, record the Claude session id
-from the init event in `worker_done`, pass `resumeSessionId` in the next
-`job.json`, driver adds `--resume`. Per-session policy `fresh | keep | auto`;
-`auto` continues when the next ticket depends on the one just finished in
-the same repo, and starts fresh after a fixable or blocked verdict, a repo
-change, or a rate-limit sleep. Reviewer and planner always fresh.
+**Open questions first.** When to resume (after a park on a request, yes;
+after a cap? after a fixable verdict, whose context produced the mistake?).
+When to compact, and who decides: Claude Code's own auto-compaction, or a
+harness threshold. When to discard: a repo change, a rate-limit sleep, a
+reviewer's "blocked". How a resumed session sees what changed while it was
+parked (the user's answer, other tickets' commits).
+
+**How, once answered.** Drop `--no-session-persistence`, record the Claude
+session id from the init event in `worker_done`, pass `resumeSessionId` in
+the next `job.json`, the driver adds `--resume`. Per-session policy
+`fresh | keep | auto`; reviewer and planner always fresh. Sessions live in
+the home volume, so they survive a container recreate.
 
 ## V-09 · UI design pass  (M)
 
@@ -198,8 +224,8 @@ Same script text as V-03.
 
 ## V-11 · Pre-approval rules and notifications  (S each)
 
-Per session: auto-allow listed hosts; auto-approve root commands matching
-a pattern you wrote. A notification when a request arrives (voice channel
+Per session: auto-allow listed hosts and packs (root commands no longer
+need approval: the agent has sudo). Part of this is LM-25. A notification when a request arrives (voice channel
 from the porras.club setup, or the V-01 dashboard's push).
 
 ## V-12 · Second worker driver  (M)
@@ -241,9 +267,72 @@ that a root agent still never holds the real token.
 **Trigger.** The first session that genuinely needs Docker inside, or
 more than a handful of repositories with their own compose stacks.
 
+## Loop manager, Phase 2 (needs design before it starts)
+
+From the Loop Manager design. Not started; each item wants a short design
+pass first, which is why Phase 1 stopped here.
+
+### LM-21 · Better handoffs between fresh workers  (S)
+
+The next attempt's prompt carries the diff stat and the last report; the
+implementer files its report early and keeps it current, so a cap does not
+erase what it knew; a cap hit twice in a row asks the reviewer to split the
+ticket. Open: whether the harness should write a report itself when the
+worker filed none.
+
+### LM-22 · Checks the box can pass  (S)
+
+The brief gains a `verify` block (the setup worker writes the commands it
+saw pass) and a ticket may carry `checks`; those become the gates, and the
+harness's guessed npm/pytest gates stay evidence for the reviewer. Open:
+format, and what a check that needs a running service does.
+
+### LM-23 · Sidecar services  (M)
+
+A `service` request kind: image, tag, environment, port. The host app runs
+it on the session's internal network, labelled and memory-capped, reachable
+as `<name>:<port>`. Official images from a curated list are approved
+automatically (decided 2026-10-04); others are one click. Open: pull
+through which network, volumes for data, lifecycle with the session.
+
+### LM-24 · Compose reader  (M)
+
+Offers the `image:`-only services of a repository's docker-compose file as
+sidecars, and writes their connection strings into env.md. Depends on LM-23.
+
+### LM-25 · Denials become requests by themselves  (S)
+
+The loop already reads the proxy's denial lines. Group them per host and
+file a pending network request with the count and the ticket, so a worker
+never spends a turn asking for a host it already tried. With pre-approval
+rules from V-11.
+
+### LM-26 · Inbox items per done ticket  (S)
+
+The number to steer by, on every session and in the sessions list:
+requests filed after the setup phase, divided by done tickets.
+
+### LM-3 · A container runtime inside the box  (L, out of the MVP)
+
+Rootless podman in the session container, or V-14's VM backend. Decided
+2026-10-04: out of the MVP; the VM is the likely answer when a real
+project needs it, with its resource cost accepted then.
+
 ---
 
 ## Done
+
+- 2026-10-04 · Loop manager Phase 1: the agent has passwordless sudo (logged),
+  `svc` for services, browser libraries in the image, a per-session home
+  volume; session requirements with a setup worker and a gate you confirm;
+  notes/env.md and notes/setup.sh; a prompt box; a snapshot of the box on
+  confirmation; recipes saved from sessions; root_script retired; tokens
+  only on the worker's exec and commits scanned for the token.
+- 2026-10-04 · Loop manager Phase 0: root in the box can install (Docker's
+  default capabilities minus NET_RAW and MKNOD), executable /tmp, approved
+  hosts reach the proxy live, attempts count verdicts only, gates advise
+  the reviewer, tickets can be done without a diff, host restarts leave no
+  orphans, network packs detected from the repositories.
 
 - 2026-10-03 · Requests reshaped: one request = summary + typed actions
   (network, resources, root_script, instruction, question), each decided
