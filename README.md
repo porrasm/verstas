@@ -56,6 +56,32 @@ Then, in the web app:
 Run `npm run dev` in a terminal that stays open; the host app stops its
 runs when it exits and requeues the ticket a worker held.
 
+## Watching a run closely
+
+Three views, from least to most detail:
+
+- **Session page**: the live log (translated, trimmed events), the board,
+  the inbox. Enough for a normal run.
+- **Terminal**: `npm run dev` prints one line per API request and per run
+  event. `npm run dev:debug` (or `VERSTAS_DEBUG=1`) adds every Docker
+  command with its exit code, worker stderr, full tool output, and the
+  events untrimmed.
+- **Files**, under `<sessions root>/<session>/runs/<n>/`:
+  `events.jsonl` (every event), `tickets/<id>.md` (the worker reports per
+  ticket), and in debug mode `worker-<ticket>-<role>-<time>.raw.jsonl`,
+  the raw `claude -p` stream of each worker, for when you want to see
+  exactly what the model saw and said.
+
+Two Docker commands are useful while a run is on:
+
+```bash
+docker logs -f verstas-<session-id>-proxy     # allowed and denied connections, live
+```
+
+```bash
+docker exec -it verstas-<session-id> bash     # look around the box as the agent user
+```
+
 ## Development
 
 ```bash

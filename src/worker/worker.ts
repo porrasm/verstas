@@ -33,6 +33,8 @@ export type Job = {
   claudeBinary?: string;
   /** Defaults to /workspace; tests on the host point it elsewhere. */
   cwd?: string;
+  /** Keep full tool output in events and echo the raw claude stream as `raw` lines. */
+  debug?: boolean;
 };
 
 const emit = (e: VerstasEvent | Record<string, unknown>) => process.stdout.write(JSON.stringify(e) + "\n");
@@ -83,7 +85,8 @@ export const runJob = async (job: Job): Promise<number> => {
 
   const rl = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
   for await (const line of rl) {
-    const out = translateLine(line, { ticket: job.ticket, role: job.role });
+    if (job.debug) emit({ kind: "raw", t: new Date().toISOString(), line });
+    const out = translateLine(line, { ticket: job.ticket, role: job.role, maxLen: job.debug ? 6000 : undefined });
     for (const e of out.events) emit(e);
     if (out.result) result = out.result;
     if (out.assistantTurn) {

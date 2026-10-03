@@ -28,8 +28,10 @@ export interface Shell {
 
 /** Runs one worker job inside the container; streams events; resolves with the final line. */
 export interface WorkerRunner {
-  run(job: Job, onEvent: (e: VerstasEvent) => void, signal: AbortSignal): Promise<WorkerDone>;
+  run(job: Job, onEvent: (e: VerstasEvent) => void, signal: AbortSignal, opts?: { rawLog?: string }): Promise<WorkerDone>;
 }
+
+export const DEBUG = Boolean(process.env.VERSTAS_DEBUG);
 
 export type RunDeps = {
   hub: SessionHub;
@@ -350,8 +352,10 @@ export class RunManager {
       caps: { minutes: h.session.caps.workerMinutes, turns: h.session.caps.workerTurns, budgetUsd: h.session.caps.budgetUsd },
       mcpConfigFile: `/workspace/${WORKSPACE_FILES}/mcp.json`,
     };
+    if (DEBUG) spec.debug = true;
     await fs.writeFile(path.join(dir, "job.json"), JSON.stringify(spec, null, 2));
-    const done = await this.deps.worker(h.id).run(spec, (e) => void log(e), signal);
+    const rawLog = DEBUG ? path.join(h.paths.runs, String(run.id), `worker-${job.ticket ?? "planner"}-${job.role}-${Date.now()}.raw.jsonl`) : undefined;
+    const done = await this.deps.worker(h.id).run(spec, (e) => void log(e), signal, { rawLog });
     await log(done);
     return done;
   }

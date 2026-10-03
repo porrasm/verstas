@@ -7,7 +7,7 @@
  */
 import type { VerstasEvent } from "../core/types.js";
 
-export type StreamContext = { ticket?: string; role?: "implementer" | "reviewer" | "planner"; now?: () => string };
+export type StreamContext = { ticket?: string; role?: "implementer" | "reviewer" | "planner"; now?: () => string; maxLen?: number };
 
 export type Translated = {
   events: VerstasEvent[];
@@ -17,7 +17,8 @@ export type Translated = {
   assistantTurn: boolean;
 };
 
-const clip = (s: string, n = 200): string => (s.length > n ? s.slice(0, n - 1) + "…" : s);
+let CLIP = 200;
+const clip = (s: string, n = CLIP): string => (s.length > n ? s.slice(0, n - 1) + "…" : s);
 
 const summarizeToolUse = (name: string, input: unknown): string => {
   const i = (input ?? {}) as Record<string, unknown>;
@@ -51,6 +52,7 @@ const summarizeToolResult = (content: unknown): { ok: boolean; summary: string }
 
 export const translateLine = (line: string, ctx: StreamContext = {}): Translated => {
   const t = (ctx.now ?? (() => new Date().toISOString()))();
+  CLIP = ctx.maxLen ?? 200;
   const base = { t, ticket: ctx.ticket };
   const empty: Translated = { events: [], assistantTurn: false };
   if (!line.trim()) return empty;

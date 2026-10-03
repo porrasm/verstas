@@ -113,14 +113,15 @@ hub.on("change", (c) => broadcast({ type: "change", ...c }));
 hub.on("event", (e) => {
   broadcast({ type: "event", ...e });
   const ev = e.event;
-  if (!process.env.VERSTAS_QUIET && ev.kind !== "cost" && ev.kind !== "tool_result") {
-    const text = "text" in ev ? ev.text : "summary" in ev ? `${"tool" in ev ? ev.tool + " " : ""}${ev.summary}` : "state" in ev ? `${ev.state}${"reason" in ev && ev.reason ? ` (${ev.reason})` : ""}` : "";
-    console.log(`[run ${e.sessionId}#${e.runId}] ${ev.kind}${"ticket" in ev && ev.ticket ? ` ${ev.ticket}` : ""} ${String(text).slice(0, 160)}`);
+  const debug = Boolean(process.env.VERSTAS_DEBUG);
+  if (!process.env.VERSTAS_QUIET && ev.kind !== "cost" && (debug || ev.kind !== "tool_result")) {
+    const text = "text" in ev ? ev.text : "summary" in ev ? `${"tool" in ev ? ev.tool + " " : ""}${"ok" in ev && !ev.ok ? "FAILED " : ""}${ev.summary}` : "state" in ev ? `${ev.state}${"reason" in ev && ev.reason ? ` (${ev.reason})` : ""}` : "";
+    console.log(`[run ${e.sessionId}#${e.runId}] ${ev.kind}${"ticket" in ev && ev.ticket ? ` ${ev.ticket}` : ""} ${debug ? String(text) : String(text).slice(0, 160)}`);
   }
 });
 
 server.listen(config.uiPort, "127.0.0.1", () => {
-  console.log(`verstas ${version}  http://127.0.0.1:${config.uiPort}  sessions in ${config.sessionsRoot}`);
+  console.log(`verstas ${version}  http://127.0.0.1:${config.uiPort}  sessions in ${config.sessionsRoot}${process.env.VERSTAS_DEBUG ? "  [debug: docker commands, raw worker streams, full tool output]" : ""}`);
 });
 
 for (const sig of ["SIGINT", "SIGTERM"] as const) {

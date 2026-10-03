@@ -1,3 +1,4 @@
+import { createWriteStream } from "node:fs";
 import path from "node:path";
 import type { Session } from "../core/types.js";
 import type { SessionHub } from "../sessions/hub.js";
@@ -19,11 +20,17 @@ export const dockerShell = (cfg: SandboxConfig, sessionId: string): Shell => ({
 });
 
 export const dockerWorker = (cfg: SandboxConfig, sessionId: string): WorkerRunner => ({
-  async run(job: Job, onEvent, signal): Promise<WorkerDone> {
+  async run(job: Job, onEvent, signal, opts = {}): Promise<WorkerDone> {
     const child = execInSandbox(cfg, sessionId, WORKER_COMMAND);
     child.stdin?.end();
     let stderr = "";
-    child.stderr?.setEncoding("utf8").on("data", (d: string) => (stderr = (stderr + d).slice(-4000)));
+    const raw = opts.rawLog ? createWriteStream(opts.rawLog, { flags: "a" }) : null;
+    child.stderr?.setEncoding("utf8").on("data", (d: string) => {
+      stderr = (stderr + d).slice(-4000);
+      if (raw) raw.write(`# stderr: ${d}`);
+      if (process.env.VERSTAS_DEBUG) process.stderr.write(`[worker ${job.ticket ?? job.role} stderr] ${d}`);
+    });
+    if (raw) child.stdout?.on("data", (d: Buffer) => raw.write(d));
     const onAbort = () => {
       // Stop the driver; the harness's `docker exec` child dies, and the
       // driver's own SIGTERM handling stops claude. The container stays up.
@@ -35,6 +42,7 @@ export const dockerWorker = (cfg: SandboxConfig, sessionId: string): WorkerRunne
     const done = await readWorkerStream(child.stdout!, onEvent);
     const code = await new Promise<number>((resolve) => child.on("close", (c) => resolve(c ?? 1)));
     signal.removeEventListener("abort", onAbort);
+    raw?.end();
     return (
       done ?? {
         kind: "worker_done",

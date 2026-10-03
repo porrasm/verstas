@@ -9,6 +9,7 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "dev": "tsx watch src/main.ts",
+    "dev:debug": "VERSTAS_DEBUG=1 tsx watch src/main.ts",
     "web:dev": "vite --config web/vite.config.ts",
     "web:build": "vite build --config web/vite.config.ts",
     "typecheck:web": "tsc --noEmit -p web/tsconfig.json",

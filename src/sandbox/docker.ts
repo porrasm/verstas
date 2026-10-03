@@ -23,8 +23,12 @@ export type DockerRunner = {
   spawn(args: readonly string[]): ChildProcess;
 };
 
+const DEBUG = Boolean(process.env.VERSTAS_DEBUG);
+const show = (args: readonly string[]): string => args.map((a) => (/[\s"']/.test(a) ? JSON.stringify(a) : a)).join(" ").slice(0, 400);
+
 export const createDockerRunner = (binary = "docker"): DockerRunner => ({
   async run(args, opts = {}) {
+    const t0 = Date.now();
     const child = spawn(binary, args, { stdio: ["pipe", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
@@ -41,10 +45,12 @@ export const createDockerRunner = (binary = "docker"): DockerRunner => ({
     });
     if (timer) clearTimeout(timer);
     const result = { code, stdout, stderr };
+    if (DEBUG) console.log(`[docker] ${code} ${Date.now() - t0}ms  docker ${show(args)}${code !== 0 ? `\n         ${stderr.trim().slice(0, 300)}` : ""}`);
     if (code !== 0 && !opts.allowFailure) throw new DockerError(args, result);
     return result;
   },
   spawn(args) {
+    if (DEBUG) console.log(`[docker] spawn  docker ${show(args)}`);
     return spawn(binary, args, { stdio: ["pipe", "pipe", "pipe"] });
   },
 });
