@@ -4,8 +4,9 @@ import { z } from "zod";
 import { verstasHome } from "../config.js";
 
 /**
- * The setup script library: named bash scripts you write once and tick
- * at session creation. Stored as two files per script under
+ * The recipe library (formerly setup scripts): named bash you write once,
+ * or save from a session whose setup worker wrote it, and tick at session
+ * creation. Stored as two files per script under
  * `~/.verstas/scripts/`: `<name>.sh` (the script, editable in any editor)
  * and `<name>.json` (description, hosts it downloads from, a note for the
  * worker). Sessions get a copy at creation, so editing the library never
@@ -21,6 +22,14 @@ export const setupScriptMetaSchema = z.object({
   hosts: z.array(z.string().trim().min(1).max(260)).max(50).default([]),
   /** One paragraph for VERSTAS.md: what is installed and how to use it. */
   note: z.string().max(2000).default(""),
+  /**
+   * root: run as root (hand-written scripts, apt-get without sudo).
+   * agent: run as the agent with sudo available (recipes a setup worker
+   * wrote: they mix project steps and sudo installs).
+   */
+  runAs: z.enum(["root", "agent"]).default("root"),
+  /** The environment description saved with a recipe; seeds notes/env.md of sessions that use it. */
+  env: z.string().max(50_000).default(""),
 });
 
 export const setupScriptSchema = setupScriptMetaSchema.extend({
@@ -53,14 +62,17 @@ export const getScript = async (name: string, home = verstasHome()): Promise<Set
   const dir = scriptsDir(home);
   const meta = setupScriptMetaSchema.parse({ ...JSON.parse(await fs.readFile(path.join(dir, `${name}.json`), "utf8")), name });
   const script = await fs.readFile(path.join(dir, `${name}.sh`), "utf8");
-  return setupScriptSchema.parse({ ...meta, script });
+  const env = await fs.readFile(path.join(dir, `${name}.env.md`), "utf8").catch(() => "");
+  return setupScriptSchema.parse({ ...meta, script, env });
 };
 
 export const saveScript = async (input: unknown, home = verstasHome()): Promise<SetupScript> => {
   const s = setupScriptSchema.parse(input);
   const dir = scriptsDir(home);
   await fs.mkdir(dir, { recursive: true, mode: 0o700 });
-  const { script, ...meta } = s;
+  const { script, env, ...meta } = s;
+  if (env.trim()) await fs.writeFile(path.join(dir, `${s.name}.env.md`), env, { mode: 0o600 });
+  else await fs.rm(path.join(dir, `${s.name}.env.md`), { force: true });
   await fs.writeFile(path.join(dir, `${s.name}.sh`), script.endsWith("\n") ? script : script + "\n", { mode: 0o600 });
   await fs.writeFile(path.join(dir, `${s.name}.json`), JSON.stringify(meta, null, 2) + "\n", { mode: 0o600 });
   return s;
@@ -71,6 +83,7 @@ export const deleteScript = async (name: string, home = verstasHome()): Promise<
   const dir = scriptsDir(home);
   await fs.rm(path.join(dir, `${name}.sh`), { force: true });
   await fs.rm(path.join(dir, `${name}.json`), { force: true });
+  await fs.rm(path.join(dir, `${name}.env.md`), { force: true });
 };
 
 /** "# needs-hosts: a.com b.com" in the first 20 lines, the convention the LLM context asks for. */

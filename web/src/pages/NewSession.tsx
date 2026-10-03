@@ -173,8 +173,8 @@ export const NewSessionPage = () => {
       </section>
 
       <section className="card">
-        <h3>Setup scripts</h3>
-        <p className="lead">Run once as root when the container is created, in this order. Their download hosts join the allowlist. Manage them under <a href="#/scripts">Setup scripts</a>.</p>
+        <h3>Recipes</h3>
+        <p className="lead">Run once when the container is created, in this order, so the box starts set up. Their download hosts join the allowlist. Save one from a session page after its setup, or write one under <a href="#/scripts">Recipes</a>.</p>
         {scripts.length === 0 && <div className="muted small">The library is empty.</div>}
         {scripts.map((sc) => (
           <label className="chk" key={sc.name}>

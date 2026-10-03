@@ -454,6 +454,7 @@ const SetupPanel = ({ session, base, active, onDone }: { session: Session; base:
   const [show, setShow] = useState<"" | "brief" | "env" | "recipe" | "sudo">("");
   const [sudo, setSudo] = useState<{ count: number; commands: string[] } | null>(null);
   const [editing, setEditing] = useState<string | null>(null);
+  const [recipeName, setRecipeName] = useState<string | null>(null);
   useEffect(() => {
     api<SetupInfo>("GET", `${base}/setup`).then(setInfo).catch(() => setInfo(null));
     api<{ text: string; updatedAt: string | null; words: number }>("GET", `${base}/brief`).then(setBrief).catch(() => setBrief(null));
@@ -527,7 +528,15 @@ const SetupPanel = ({ session, base, active, onDone }: { session: Session; base:
       </div>
       <div className="small">
         <span className={`dot ${info?.recipe ? "good" : ""}`} /> <strong>setup.sh</strong> <span className="muted">{info?.recipe ? "the recipe that rebuilds the box after a recreate" : "written by the setup worker"}</span>{" "}
-        {info?.recipe && <button className="quiet sm" onClick={() => toggle("recipe")}>{show === "recipe" ? "hide" : "view"}</button>}
+        {info?.recipe && <button className="quiet sm" onClick={() => toggle("recipe")}>{show === "recipe" ? "hide" : "view"}</button>}{" "}
+        {info?.recipe && recipeName === null && <button className="quiet sm" onClick={() => setRecipeName(session.repos.map((r) => r.name).join("-") || "recipe")} title="Save setup.sh and env.md to the recipe library, to tick on the next session">Save as recipe</button>}
+        {recipeName !== null && (
+          <div className="row" style={{ marginTop: 6 }}>
+            <input value={recipeName} onChange={(e) => setRecipeName(e.target.value)} placeholder="recipe name" style={{ maxWidth: 240 }} />
+            <button className="pri sm" disabled={busy || !recipeName.trim()} onClick={() => act(async () => { await api("POST", `${base}/recipe/promote`, { name: recipeName.trim() }); setRecipeName(null); }, "Saved to Recipes. Tick it on the next session for these repositories.")}>Save</button>
+            <button className="sm" onClick={() => setRecipeName(null)}>Cancel</button>
+          </div>
+        )}
         {show === "recipe" && <pre className="mono" style={{ whiteSpace: "pre-wrap", maxHeight: 360, overflow: "auto", marginTop: 6 }}>{info?.recipe}{info?.recipeLog ? `\n\n--- last replay ---\n${info.recipeLog.slice(-3000)}` : ""}</pre>}
       </div>
       <div className="small">
@@ -546,7 +555,7 @@ const SetupPanel = ({ session, base, active, onDone }: { session: Session; base:
 
       {session.setupScripts.length > 0 && (
         <div className="small" style={{ borderTop: "1px solid var(--line)", paddingTop: 8 }}>
-          <strong>Setup scripts</strong> <span className="muted">from the library, run as root when the container is created</span>
+          <strong>Recipes</strong> <span className="muted">from the library, run when the container is created</span>
           {session.setupScripts.map((sc) => {
             const res = session.setup.find((x) => x.name === sc.name);
             return (
@@ -558,7 +567,7 @@ const SetupPanel = ({ session, base, active, onDone }: { session: Session; base:
               </div>
             );
           })}
-          <button className="sm" style={{ marginTop: 4 }} onClick={() => act(() => api("POST", `${base}/setup/rerun`), "Setup scripts ran again.")} disabled={busy || active} title={active ? "Pause or stop the run first" : "Run every setup script again as root"}>Re-run setup scripts</button>
+          <button className="sm" style={{ marginTop: 4 }} onClick={() => act(() => api("POST", `${base}/setup/rerun`), "Setup scripts ran again.")} disabled={busy || active} title={active ? "Pause or stop the run first" : "Run every recipe again"}>Re-run recipes</button>
         </div>
       )}
       {msg && <div className="muted small">{msg}</div>}

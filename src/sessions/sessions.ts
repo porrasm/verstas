@@ -166,6 +166,14 @@ export const createSession = async (root: string, input: CreateSessionInput): Pr
     }
     // A copy of each script, readable in the session directory; the container runs the copy.
     for (const sc of session.setupScripts) await fs.writeFile(path.join(paths.setup, `${sc.name}.sh`), sc.script, { mode: 0o600 });
+    // A recipe saved from another session brings its environment description; the setup worker verifies and corrects it.
+    const envs = session.setupScripts.filter((sc) => sc.env.trim());
+    if (envs.length) {
+      await fs.writeFile(
+        path.join(paths.notes, "env.md"),
+        envs.map((sc) => `<!-- from recipe ${sc.name}; true for the session it was saved from, verify here -->\n${sc.env.trim()}`).join("\n\n") + "\n",
+      );
+    }
     await writeJsonAtomic(paths.session, session);
     await saveBoard(paths.dir, emptyBoard(input.goal));
     await writeJsonAtomic(paths.inbox, inboxSchema.parse({}));

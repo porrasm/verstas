@@ -37,7 +37,7 @@ ${session.requirements.trim().split("\n").map((l) => `  ${l}`).join("\n")}` : ""
   is refused with 403. Ask with \`request\` kind \`pack\` for a whole toolchain
   or kind \`network\` for one host. Packs on: ${session.packs.join(", ") || "(none recorded)"}.
   Packs you can ask for: ${NETWORK_PACKS.filter((p) => p.name !== "anthropic" && !session.packs.includes(p.name)).map((p) => `\`${p.name}\` (${p.title})`).join(", ")}.
-- Setup scripts the user chose ran once as root when this container was created:
+- Recipes the user chose ran when this container was created:
 ${session.setupScripts.length ? session.setupScripts.map((x) => `  - ${x.name}: ${x.note || x.description || "(no note)"}`).join("\n") : "  - (none)"}
 - You have passwordless \`sudo\`. Install what you need yourself
   (\`sudo apt-get install -y …\`, \`sudo npm install -g …\`); every sudo

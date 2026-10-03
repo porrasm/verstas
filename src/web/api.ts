@@ -8,6 +8,7 @@ import express, { type Request, type Response } from "express";
 import { z } from "zod";
 import {
   capsSchema,
+  DEFAULT_ALLOWLIST,
   limitsSchema,
   needsSetup,
   now,
@@ -520,6 +521,35 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
       const text = await fs.readFile(path.join(h.paths.workspace, ".verstas", "logs", "sudo.log"), "utf8").catch(() => "");
       const commands = [...text.matchAll(/COMMAND=(.*)$/gm)].map((m) => m[1]!.trim());
       res.json({ count: commands.length, commands: commands.slice(-200) });
+    }),
+  );
+
+  /**
+   * Saves this session's recipe (notes/setup.sh) and environment description
+   * (notes/env.md) to the library under a name, to tick on the next session
+   * for the same repositories. It runs as the agent, with sudo, like here.
+   */
+  api.post(
+    "/sessions/:id/recipe/promote",
+    wrap(async (req, res) => {
+      const body = z.object({ name: z.string(), description: z.string().max(500).default("") }).parse(req.body);
+      const h = await d.hub.get(param(req, "id"));
+      const script = await fs.readFile(path.join(h.paths.notes, "setup.sh"), "utf8").catch(() => "");
+      if (!script.trim()) {
+        res.status(404).json({ error: "This session has no notes/setup.sh yet; the setup worker writes it." });
+        return;
+      }
+      const env = await fs.readFile(path.join(h.paths.notes, "env.md"), "utf8").catch(() => "");
+      const saved = await saveScript({
+        name: body.name,
+        description: body.description || `Recipe from session ${h.session.name}`,
+        hosts: [...new Set([...hostsFromScript(script), ...h.session.allowlist.filter((x) => !DEFAULT_ALLOWLIST.includes(x))])],
+        note: `Recipe saved from session ${h.session.name} (${h.session.repos.map((r) => r.name).join(", ") || "no repositories"}). It already ran; notes/env.md describes the result.`,
+        script,
+        runAs: "agent",
+        env,
+      });
+      res.json({ ok: true, name: saved.name });
     }),
   );
 

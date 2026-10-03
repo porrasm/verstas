@@ -51,7 +51,7 @@ export type Session = {
   caps: { workerMinutes: number; workerTurns: number; runTickets: number; budgetUsd: number; ticketAttempts: number; reviewer: boolean };
   limits: { memory: string; cpus: number; pids: number; workspaceMb: number };
   rootScripts: { script: string; cwd?: string; at: string; requestId?: string }[];
-  setupScripts: { name: string; description: string; hosts: string[]; note: string; script: string }[];
+  setupScripts: { name: string; description: string; hosts: string[]; note: string; script: string; runAs: "root" | "agent" }[];
   setup: { name: string; ok: boolean; code: number; at: string; tail: string }[];
   requirements: string;
   readiness?: Readiness;
@@ -62,7 +62,7 @@ export type Readiness = { verdict: "ready" | "needs"; at: string; summary: strin
 /** Tickets wait for the environment: requirements set and not confirmed. Mirrors src/core/types.ts. */
 export const needsSetup = (s: { requirements: string; readiness?: Readiness }): boolean => Boolean(s.requirements.trim()) && !s.readiness?.confirmedAt;
 export type NetworkPack = { name: string; title: string; hosts: string[] };
-export type SetupScript = { name: string; description: string; hosts: string[]; note: string; script: string };
+export type SetupScript = { name: string; description: string; hosts: string[]; note: string; script: string; runAs: "root" | "agent"; env: string };
 export type Run = { id: number; state: string; startedAt: string; endedAt?: string; currentTicket?: string; ticketsDone: number; cost: { usd?: number }; pauseReason?: string; resumeAt?: string };
 export type VEvent = { kind: string; t: string; ticket?: string; [k: string]: unknown };
 export type Totals = { usd: number; runs: number; lastActivityAt: string };

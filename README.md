@@ -47,12 +47,14 @@ Then, in the web app:
 3. **Session page**: approve tickets by moving them from backlog to ready,
    start the run, watch the live log, answer requests in the inbox, pause
    or stop at any time.
-4. **Setup scripts** (own tab): bash that runs once as root when a
-   session's container is created, for Chromium, Postgres, Godot, an SDK
-   from a zip. Tick them on the New session form. Two ready-made ones to
-   paste are in `docs/examples/scripts/` (Postgres, Chromium). "Copy context for an LLM"
-   gives any assistant the facts of the box so it can write the script, or
-   a board.
+4. **Recipes** (own tab): bash that runs once when a session's container
+   is created, so the box starts set up. After a session's setup worker
+   built an environment, "Save as recipe" on the session page puts its
+   `notes/setup.sh` and `notes/env.md` in the library; tick it on the next
+   session for the same repositories. Hand-written ones run as root; two
+   to paste are in `docs/examples/scripts/` (Postgres, Chromium). "Copy
+   context for an LLM" gives any assistant the facts of the box so it can
+   write one, or a board.
 5. **Session requirements** (optional, on the New session form): what the
    box must be able to do before any ticket runs ("Postgres 17 reachable,
    migrations applied; the e2e suite runs"). When set, the session has a

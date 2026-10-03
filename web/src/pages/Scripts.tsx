@@ -1,11 +1,12 @@
 import { useEffect, useState } from "react";
 import { api, copyText, type SetupScript } from "../api";
 
-const EMPTY: SetupScript = { name: "", description: "", hosts: [], note: "", script: "#!/usr/bin/env bash\n# needs-hosts: \n# note: \nset -euo pipefail\nexport DEBIAN_FRONTEND=noninteractive\n\n" };
+const EMPTY: SetupScript = { name: "", description: "", hosts: [], note: "", runAs: "root", env: "", script: "#!/usr/bin/env bash\n# needs-hosts: \n# note: \nset -euo pipefail\nexport DEBIAN_FRONTEND=noninteractive\n\n" };
 
 /**
- * The setup script library. A script runs once as root when a session's
- * container is created; sessions tick scripts at creation and get a copy.
+ * The recipe library. A recipe runs once when a session's container is
+ * created; sessions tick recipes at creation and get a copy. Recipes are
+ * written here by hand, or saved from a session whose setup worker wrote one.
  */
 export const ScriptsPage = () => {
   const [list, setList] = useState<SetupScript[] | null>(null);
@@ -40,7 +41,7 @@ export const ScriptsPage = () => {
     }
   };
   const remove = async () => {
-    if (!sel || !confirm(`Delete script ${sel}? Existing sessions keep their copy.`)) return;
+    if (!sel || !confirm(`Delete recipe ${sel}? Existing sessions keep their copy.`)) return;
     await api("DELETE", `/scripts/${encodeURIComponent(sel)}`);
     pick(null);
     await load();
@@ -60,9 +61,9 @@ export const ScriptsPage = () => {
   return (
     <div className="form" style={{ maxWidth: 1100 }}>
       <div>
-        <h1>Setup scripts</h1>
+        <h1>Recipes</h1>
         <p className="muted" style={{ marginTop: 6 }}>
-          Bash that runs once, as root, when a session's container is created. Tick scripts on the New session form. The hosts a script downloads from are added to that session's allowlist; the note tells the worker how to use what was installed.
+          Bash that runs once when a session's container is created, so the box starts set up. Write one here, or save one from a session page ("Save as recipe") after its setup worker built the environment. Tick recipes on the New session form. The hosts a recipe downloads from join that session's allowlist; the note tells the worker what was installed.
         </p>
       </div>
       {msg && (
@@ -100,8 +101,19 @@ export const ScriptsPage = () => {
             <input id="sc-note" value={draft.note} onChange={(e) => setDraft({ ...draft, note: e.target.value })} placeholder="Postgres is installed; start it with pg_ctlcluster 16 main start; connect with psql -U postgres." />
           </label>
           <label>
-            Script <span className="help">Runs as root with <code>bash -e</code>, non-interactive. Make it idempotent.</span>
+            Runs as <span className="help">root for hand-written installs; the agent (with sudo) for a recipe saved from a session</span>
+            <select id="sc-runas" value={draft.runAs} onChange={(e) => setDraft({ ...draft, runAs: e.target.value as "root" | "agent" })}>
+              <option value="root">root</option>
+              <option value="agent">the agent, with sudo</option>
+            </select>
+          </label>
+          <label>
+            Script <span className="help">Runs with <code>bash -e</code>, non-interactive. Make it idempotent.</span>
             <textarea id="sc-script" className="mono" value={draft.script} onChange={(e) => setDraft({ ...draft, script: e.target.value })} style={{ minHeight: 360 }} spellCheck={false} />
+          </label>
+          <label>
+            Environment description <span className="help">Seeds notes/env.md of sessions that tick this recipe; the setup worker verifies it</span>
+            <textarea id="sc-env" className="mono" value={draft.env} onChange={(e) => setDraft({ ...draft, env: e.target.value })} style={{ minHeight: 100 }} spellCheck={false} />
           </label>
           <div className="row">
             <button className="pri" onClick={save} disabled={busy || !draft.name.trim() || !draft.script.trim() || !dirty}>{sel ? "Save changes" : "Add to library"}</button>

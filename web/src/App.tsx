@@ -43,7 +43,7 @@ export const App = () => {
         <nav>
           <a href="#/" className={onSessions ? "on" : ""}>Sessions</a>
           <a href="#/new" className={route.startsWith("#/new") ? "on" : ""}>New session</a>
-          <a href="#/scripts" className={route.startsWith("#/scripts") ? "on" : ""}>Setup scripts</a>
+          <a href="#/scripts" className={route.startsWith("#/scripts") ? "on" : ""}>Recipes</a>
           <a href="#/settings" className={route.startsWith("#/settings") ? "on" : ""}>Settings</a>
         </nav>
         <div className="right">

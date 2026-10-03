@@ -25,6 +25,23 @@ test("the script library saves two files per script and lists them in name order
   }
 });
 
+test("a recipe saved from a session runs as the agent and keeps its env.md beside it", async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "verstas-scripts-"));
+  try {
+    await saveScript({ name: "apps", script: "sudo apt-get install -y postgresql-15\n", runAs: "agent", env: "# Environment\n- pg on 5432\n" }, home);
+    const r = await getScript("apps", home);
+    expect(r).toMatchObject({ runAs: "agent", env: "# Environment\n- pg on 5432\n" });
+    expect(await fs.readFile(path.join(home, "scripts", "apps.env.md"), "utf8")).toContain("pg on 5432");
+    expect((await getScript("apps", home)).runAs).toBe("agent");
+    await saveScript({ name: "plain", script: "true" }, home);
+    expect(await getScript("plain", home)).toMatchObject({ runAs: "root", env: "" });
+    await deleteScript("apps", home);
+    expect(await fs.readdir(path.join(home, "scripts"))).toEqual(["plain.json", "plain.sh"]);
+  } finally {
+    await fs.rm(home, { recursive: true, force: true });
+  }
+});
+
 test("needs-hosts header is read from the first lines", () => {
   expect(hostsFromScript("#!/usr/bin/env bash\n# needs-hosts: a.com, b.org  c.net\necho")).toEqual(["a.com", "b.org", "c.net"]);
   expect(hostsFromScript("echo nothing")).toEqual([]);
@@ -33,7 +50,7 @@ test("needs-hosts header is read from the first lines", () => {
 test("context builder: tails and facts", () => {
   const config = configSchema.parse({ workTargets: [{ name: "nuppi", path: "/x" }] });
   const facts = { image: "verstas-devbox:local", os: "Debian 12", arch: "aarch64", node: "v22.23.3", npm: "10.9.9", python: "Python 3.11.2", git: "git version 2.39", claude: "2.1.287", packages: ["git", "curl"] };
-  const script = buildContext({ tail: "script", config, facts, scripts: [{ name: "postgres", description: "pg", hosts: ["deb.debian.org"], note: "", script: "x" }] });
+  const script = buildContext({ tail: "script", config, facts, scripts: [{ name: "postgres", description: "pg", hosts: ["deb.debian.org"], note: "", script: "x", runAs: "root", env: "" }] });
   expect(script).toContain("Debian 12, aarch64");
   expect(script).toContain("`postgres`: pg · needs deb.debian.org");
   expect(script).toContain("# needs-hosts:");

@@ -298,6 +298,9 @@ export const sessionSetupScriptSchema = z.object({
   hosts: z.array(z.string()).default([]),
   note: z.string().max(2000).default(""),
   script: z.string().min(1).max(200_000),
+  /** root, or the agent with sudo available (a recipe saved from a session). */
+  runAs: z.enum(["root", "agent"]).default("root"),
+  env: z.string().max(50_000).default(""),
 });
 export type SessionSetupScript = z.infer<typeof sessionSetupScriptSchema>;
 

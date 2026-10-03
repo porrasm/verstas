@@ -241,7 +241,9 @@ that reaches a root-capable shell without a person reading it first; that
 gives the agent nothing it did not already have through sudo, and it never
 runs outside the session container.
 
-**Setup scripts** are the other root path: bash you wrote in the library,
+**Recipes** (formerly setup scripts) are the other path: bash in the
+library, either written by you (runs as root) or saved from a session's
+`notes/setup.sh` (runs as the agent, with sudo),
 copied into the session at creation, run once as root with `bash -e` when
 the container is created (and again on recreate or re-run), output logged
 to `<session>/setup/<name>.log`. The agent never writes or edits them; it

@@ -166,7 +166,7 @@ export const runSetup = async (c: RunManagerConfig, sessionId: string): Promise<
   await h.mutate((d) => ({ next: { session: { ...d.session, setup: [] } } }));
   for (const sc of h.session.setupScripts) {
     const t0 = Date.now();
-    const r = await runSetupScript(c.sandbox, sessionId, sc.script);
+    const r = await runSetupScript(c.sandbox, sessionId, sc.script, sc.runAs);
     const logFile = `${h.paths.setup}/${sc.name}.log`;
     await fs.writeFile(logFile, `# ${sc.name} · ${now()} · exit ${r.code} · ${Math.round((Date.now() - t0) / 1000)}s
 ${r.output}`);

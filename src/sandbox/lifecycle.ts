@@ -224,9 +224,10 @@ export const runRootScript = async (cfg: SandboxConfig, sessionId: string, scrip
   return { ok: r.code === 0, code: r.code, output: (r.stdout + r.stderr).slice(-6000) };
 };
 
-/** Runs one setup script as root (docs/SANDBOX.md Boundary 7); the script is yours, not the agent's. */
-export const runSetupScript = async (cfg: SandboxConfig, sessionId: string, script: string): Promise<{ ok: boolean; code: number; output: string }> => {
-  const r = await cfg.docker.run(setupScriptArgs(sessionId), { input: script, allowFailure: true, timeoutMs: 30 * 60_000 });
+/** Runs one library script (docs/SANDBOX.md Boundary 7): as root, or as the agent with sudo for a saved recipe. */
+export const runSetupScript = async (cfg: SandboxConfig, sessionId: string, script: string, runAs: "root" | "agent" = "root"): Promise<{ ok: boolean; code: number; output: string }> => {
+  const args = runAs === "root" ? setupScriptArgs(sessionId) : execArgs(sessionId, ["bash", "-e", "-s"], { stdin: true, env: { DEBIAN_FRONTEND: "noninteractive" } });
+  const r = await cfg.docker.run(args, { input: script, allowFailure: true, timeoutMs: 30 * 60_000 });
   return { ok: r.code === 0, code: r.code, output: r.stdout + r.stderr };
 };
 

@@ -221,8 +221,12 @@ test("setup scripts are copied into the session and their hosts join the allowli
       repos: [{ target: { name: "app", path: src } }],
       zips: [],
       image: "i",
-      setupScripts: [{ name: "postgres", description: "", hosts: ["deb.debian.org"], note: "pg at /usr/lib/postgresql", script: "apt-get install -y postgresql\n" }],
+      setupScripts: [
+        { name: "postgres", description: "", hosts: ["deb.debian.org"], note: "pg at /usr/lib/postgresql", script: "apt-get install -y postgresql\n", runAs: "root", env: "" },
+        { name: "apps", description: "", hosts: [], note: "", script: "sudo true\n", runAs: "agent", env: "# Environment\n- pg on 5432\n" },
+      ],
     });
+    expect(await fs.readFile(path.join(paths.notes, "env.md"), "utf8")).toContain("<!-- from recipe apps;");
     expect(session.allowlist).toContain("deb.debian.org");
     expect(session.allowlist).toContain("api.anthropic.com");
     expect(session.setupScripts[0]!.name).toBe("postgres");
