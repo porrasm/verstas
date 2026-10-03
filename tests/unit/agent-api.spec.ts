@@ -113,20 +113,22 @@ test("requests, messages and ideas land in the inbox tied to the current ticket"
     const halt = await s.call("POST", "/requests", { detail: { kind: "halt", reason: "spec contradiction", severity: "critical" }, why: "x" });
     expect(halt.json.id).toBe("R-2");
     expect(String(halt.json.next)).toContain("pause");
-    expect((await s.call("POST", "/requests", { detail: { kind: "install", manager: "apt", packages: ["chromium; rm -rf /"] }, why: "x" })).status).toBe(400);
+    expect((await s.call("POST", "/requests", { detail: { kind: "root_command", command: "apt-get install -y tree" }, why: "x" })).json.id).toBe("R-3");
+    expect((await s.call("POST", "/requests", { detail: { kind: "ask", what: "log in to namecheap and add a CNAME", how: "panel > DNS", verify: "dig" }, why: "x" })).json.id).toBe("R-4");
+    expect((await s.call("POST", "/requests", { detail: { kind: "install", manager: "apt", packages: ["tree"] }, why: "x" })).status).toBe(400);
     expect((await s.call("POST", "/requests", { detail: { kind: "network", host: "10.0.0.1" }, why: "x" })).status).toBe(400);
     expect((await s.call("POST", "/messages", { text: "tests are slow" })).json.id).toBe("M-1");
     expect((await s.call("POST", "/ideas", { title: "Per-track pages", pitch: "would sell" })).json.id).toBe("I-1");
 
     const h = await s.hub.get(s.id);
-    expect(h.inbox.requests.map((r) => [r.id, r.ticketId, r.state])).toEqual([["R-1", "T-2", "open"], ["R-2", "T-2", "open"]]);
+    expect(h.inbox.requests.map((r) => [r.id, r.ticketId, r.state])).toEqual([["R-1", "T-2", "open"], ["R-2", "T-2", "open"], ["R-3", "T-2", "open"], ["R-4", "T-2", "open"]]);
     expect(h.inbox.messages[0]).toMatchObject({ ticketId: "T-2", read: false });
     expect(h.inbox.ideas[0]).toMatchObject({ ticketId: "T-2", title: "Per-track pages" });
     // The ticket's notes record the request.
-    expect(h.board.tickets.find((t) => t.id === "T-2")!.notes.at(-1)?.text).toContain("R-2 (halt)");
+    expect(h.board.tickets.find((t) => t.id === "T-2")!.notes.map((n) => n.text).join("\n")).toContain("R-2 (halt)");
     // Persisted to disk, not just memory.
     const onDisk = JSON.parse(await fs.readFile(h.paths.inbox, "utf8")) as { requests: unknown[] };
-    expect(onDisk.requests).toHaveLength(2);
+    expect(onDisk.requests).toHaveLength(4);
   } finally {
     await s.close();
   }

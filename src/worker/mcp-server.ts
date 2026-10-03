@@ -103,21 +103,21 @@ export const TOOLS: Tool[] = [
   {
     name: "request",
     description:
-      "Ask the user for something you cannot do yourself, then STOP working on the ticket: network access to a host, a package install, more time or memory, a decision, or a halt of the whole run for a critical problem. The ticket parks until the user answers; the answer is given to the next worker on it.",
+      "Ask the user for something you cannot do yourself, then STOP working on the ticket: the ticket parks until the user answers, and the answer is given to the next worker on it. Kinds: 'network' (a host you need to reach; approval adds it to the allowlist), 'resources' (more minutes, turns or memory), 'root_command' (a command to run as root inside this container, e.g. apt-get install; the user reads it and runs it, you get the output), 'ask' (anything a person must do or decide: a website, a credential placed in a file, a choice), 'halt' (stop the whole run for a critical problem).",
     inputSchema: obj(
       {
-        kind: { type: "string", enum: ["network", "install", "resources", "decision", "secret", "halt"] },
+        kind: { type: "string", enum: ["network", "resources", "root_command", "ask", "halt"] },
         why: str("Why you need it, one or two sentences", 5000),
         host: str("network: hostname or *.suffix", 253),
         port: { type: "integer", minimum: 1, maximum: 65535 },
-        manager: { type: "string", enum: ["apt", "npm", "pip"] },
-        packages: { type: "array", items: str("package name", 100), maxItems: 20 },
         workerMinutes: { type: "integer", minimum: 1, maximum: 600 },
         workerTurns: { type: "integer", minimum: 1, maximum: 500 },
         memoryMb: { type: "integer", minimum: 256, maximum: 65536 },
-        question: str("decision: the question", 5000),
-        name: str("secret: environment variable name", 64),
-        purpose: str("secret: what it is for", 2000),
+        command: str("root_command: the exact shell command, e.g. 'apt-get update && apt-get install -y tree'", 4000),
+        cwd: str("root_command: working directory (default /workspace)", 500),
+        what: str("ask: what you need", 5000),
+        how: str("ask: what the user should do, step by step", 5000),
+        verify: str("ask: how you will check it afterwards", 2000),
         reason: str("halt: what is wrong", 5000),
         severity: { type: "string", enum: ["major", "critical"] },
       },

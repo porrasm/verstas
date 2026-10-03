@@ -3,7 +3,7 @@ import path from "node:path";
 import type { Session } from "../core/types.js";
 import type { SessionHub } from "../sessions/hub.js";
 import type { RunTokens } from "../agent-api/agent-api.js";
-import { buildSpec, ensureSandboxUp, execInSandbox, healSandbox, installInSandbox, proxyLogsSince, runInSandbox, writeEnvFile, type SandboxConfig } from "../sandbox/lifecycle.js";
+import { buildSpec, ensureSandboxUp, execInSandbox, healSandbox, proxyLogsSince, runInSandbox, runRootCommand, writeEnvFile, type SandboxConfig } from "../sandbox/lifecycle.js";
 import { readWorkerStream, RunManager, type Shell, type WorkerDone, type WorkerRunner } from "./run.js";
 import type { Job } from "../worker/worker.js";
 
@@ -21,7 +21,7 @@ export const dockerShell = (cfg: SandboxConfig, sessionId: string): Shell => ({
 
 export const dockerWorker = (cfg: SandboxConfig, sessionId: string): WorkerRunner => ({
   async run(job: Job, onEvent, signal, opts = {}): Promise<WorkerDone> {
-    const child = execInSandbox(cfg, sessionId, WORKER_COMMAND);
+    const child = execInSandbox(cfg, sessionId, WORKER_COMMAND, { env: opts.runToken ? { VERSTAS_RUN_TOKEN: opts.runToken } : undefined });
     child.stdin?.end();
     let stderr = "";
     const raw = opts.rawLog ? createWriteStream(opts.rawLog, { flags: "a" }) : null;
@@ -93,8 +93,9 @@ export type RunManagerConfig = {
 
 /**
  * Brings a session's sandbox up for a run: writes the env file with the two
- * secrets (docs/SANDBOX.md Boundary 6), recreates the container so image
- * and limits are current, and re-applies installs approved earlier.
+ * secrets (docs/SANDBOX.md Boundary 6) at a stable per-session path, so the
+ * container is recreated only when image or limits change, and replays the
+ * root commands the user approved earlier when a recreate does happen.
  */
 export const ensureSessionSandbox = async (c: RunManagerConfig, session: Session, envFile: string, runToken: string | undefined): Promise<void> => {
   const env: Record<string, string> = { VERSTAS_SESSION: session.id };
@@ -106,9 +107,12 @@ export const ensureSessionSandbox = async (c: RunManagerConfig, session: Session
   }
   await writeEnvFile(envFile, env);
   const h = await c.hub.get(session.id);
-  await ensureSandboxUp(c.sandbox, buildSpec(c.sandbox, session, h.paths, envFile), { recreate: true });
-  for (const inst of session.installs) {
-    await installInSandbox(c.sandbox, session.id, inst.manager, inst.packages);
+  const { recreated } = await ensureSandboxUp(c.sandbox, buildSpec(c.sandbox, session, h.paths, envFile));
+  if (recreated) {
+    for (const rc of session.rootCommands) {
+      const r = await runRootCommand(c.sandbox, session.id, rc.command, rc.cwd);
+      if (!r.ok) console.warn(`[sandbox ${session.id}] replaying approved root command failed (${r.code}): ${rc.command.slice(0, 120)}`);
+    }
   }
 };
 

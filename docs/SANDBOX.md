@@ -173,15 +173,30 @@ Secrets requested by the agent (a third-party API key) are a later feature.
 When added, they are injected the same way and the agent sees only the
 variable name in its context.
 
-## Boundary 7: installs requested by the agent
+## Boundary 7: root commands approved by you
 
-The agent user cannot install system packages. When a worker files an
-install request and you approve it, the **harness** runs the install with
-`docker exec -u root` using a command it assembles itself from the request's
-structured fields: a package manager from a fixed set (`apt-get`, `npm -g`,
-`pip`) and package names validated against a strict pattern. The agent's
-free text never reaches a shell. Approved installs are recorded in
-`session.json` so a rebuilt container gets them again.
+The agent user cannot install system packages or change anything outside
+`/workspace`. When a worker needs that, it files a `root_command` request
+with the exact shell command. The inbox shows the command verbatim. If you
+approve, the host app runs it **as root inside the session container**
+(`docker exec -u root … sh -c <command>`), with a 15-minute cap, and the
+output tail goes back to the worker as the answer. Approved commands are
+recorded on the session and replayed if the container is ever recreated.
+
+This is the one place agent-written text reaches a shell, and the rule
+that makes it acceptable is that nothing runs until a person has read it.
+Root here is root in a capability-less container, not on your machine (see
+Boundary 2 and the Residual risks), but it does own the container: a
+malicious install script could replace `node`, `git` or `claude` for every
+later worker in that session. Read the command, not just the package name.
+
+Everything else a worker needs from a person goes through the plain `ask`
+request: a website to configure, a decision, a credential placed in a file
+under the workspace. Those run nothing; you act, you answer, the ticket
+resumes.
+
+The container is created once per session and recreated only when its
+image, limits or mounts change; so what you install stays for the session.
 
 ## Cleanup
 
@@ -219,6 +234,6 @@ labelled resources without a matching directory and offers to remove them.
       cloning.
 - [ ] The agent API has no route that touches sessions, Docker or other
       runs, and every route checks the run token first.
-- [ ] Install commands are built from validated fields, never from agent
-      text.
+- [ ] A root command runs only after approval in the inbox, as root inside
+      the container only, with a cap, and is recorded on the session.
 - [ ] Deleting a session removes network, proxy, container and directory.

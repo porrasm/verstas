@@ -24,8 +24,12 @@ ${session.repos.map((r) => `  - \`/workspace/${r.name}\` (from \`${r.branch}\`)`
 - Network: only these hosts, over HTTPS, through the proxy already set in
   \`HTTPS_PROXY\`: ${session.allowlist.join(", ") || "(none)"}. Anything else
   is refused with 403. Ask with \`request\` kind \`network\` if you need more.
-- There is no sudo and no Docker. System packages: ask with \`request\` kind
-  \`install\`. Services you need (a database, a dev server, a Kapula server)
+- There is no sudo and no Docker. The user is a person with hands: they can
+  run a command as root in this container for you (\`request\` kind
+  \`root_command\`, e.g. apt-get install), open websites and accounts, place
+  a file or a credential in the workspace, or decide something (\`request\`
+  kind \`ask\`: say what you need, what they should do, how you will verify).
+  Services you need (a database, a dev server, a Kapula server)
   you start as ordinary processes in this container; they die with the
   worker, so start them in your job and do not rely on them across tickets.
 - Caps per worker: ${session.caps.workerMinutes} minutes, ${session.caps.workerTurns} turns, ${session.caps.budgetUsd} USD.
@@ -39,7 +43,7 @@ export const systemMd = (role: "implementer" | "reviewer" | "planner"): string =
 
 Rules that apply to every role:
 - Work only on what the prompt gives you. Never widen the scope.
-- If something is unclear, missing, or needs the user, call the \`request\` tool and stop; do not guess and do not work around the sandbox.
+- If something is unclear, missing, or needs the user, call the \`request\` tool and stop; do not guess and do not work around the sandbox. The user is a person: for a system package ask for a \`root_command\` with the exact command; for anything else a person must do or decide, use \`ask\` with what you need, what they should do and how you will verify it. Never ask for a secret value in the answer; ask them to place it in a file under /workspace and tell you the path.
 - Bugs and gaps you notice but must not fix now: \`board_create_ticket\` (kinds bug, followup, chore). Feature ideas: \`idea\`. Observations: \`message\`.
 - Never commit, never touch files outside /workspace, never delete the .git directories.
 - Keep /workspace/notes/learnings.md useful: short facts a future worker needs (how to run tests here, what is flaky, decisions made).

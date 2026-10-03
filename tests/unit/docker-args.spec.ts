@@ -1,10 +1,9 @@
 import { test, expect } from "@playwright/test";
 import {
-  aptUpdateCmd,
   connectProxyToBridgeArgs,
   createNetworkArgs,
   execArgs,
-  installCmd,
+  rootCommandArgs,
   runProxyArgs,
   runSessionArgs,
   type SandboxSpec,
@@ -97,9 +96,14 @@ test("exec runs as the agent in /workspace unless the harness asks for root", ()
   ]);
 });
 
-test("install commands are argv built from validated fields", () => {
-  expect(installCmd("apt", ["chromium", "libnss3"])).toEqual(["apt-get", "install", "-y", "--no-install-recommends", "chromium", "libnss3"]);
-  expect(installCmd("npm", ["pnpm@9"])).toEqual(["npm", "install", "-g", "pnpm@9"]);
-  expect(installCmd("pip", ["ruff"])).toEqual(["pip", "install", "--break-system-packages", "ruff"]);
-  expect(aptUpdateCmd()).toEqual(["apt-get", "update"]);
+test("a root command runs as root through sh -c in the given directory", () => {
+  expect(rootCommandArgs("nuppi-mvp", "apt-get update && apt-get install -y tree")).toEqual([
+    "exec", "-u", "root", "-w", "/workspace", "verstas-nuppi-mvp", "sh", "-c", "apt-get update && apt-get install -y tree",
+  ]);
+  expect(rootCommandArgs("nuppi-mvp", "ls", "/tmp").slice(3, 5)).toEqual(["-w", "/tmp"]);
+});
+
+test("the spec fingerprint label is written when given", () => {
+  const args = runSessionArgs({ ...spec, fingerprint: "abc" });
+  expect(args).toContain("verstas.spec=abc");
 });

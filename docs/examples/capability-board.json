@@ -116,14 +116,14 @@
     },
     {
       "id": "T-8",
-      "title": "Install request flow: a package install through the harness",
+      "title": "Root command flow: a package install approved by the user",
       "kind": "chore",
       "repo": "capability",
       "size": "S",
       "priority": 21,
       "deps": ["T-4"],
       "state": "ready",
-      "spec": "Two attempts on purpose, like T-7. ATTEMPT 1: check command -v tree. If present already, record UNEXPECTED (the image should not have it), skip the request, and file the report. If absent: append '## T-8 Install request, attempt 1' noting tree is absent, call request with kind install, manager apt, packages ['tree'], why 'Capability test of the install flow.', and STOP with a one-line reply. ATTEMPT 2 (the prompt has the user's answer): if approved, run tree --version and tree -L 1 /workspace (expected: works, installed by the harness as root between attempts); if denied, confirm tree is still absent. Append '## T-8 Install request, attempt 2' with the answer and the result.",
+      "spec": "Two attempts on purpose, like T-7. ATTEMPT 1: check command -v tree. If present already, record UNEXPECTED (the image should not have it), skip the request, and file the report. If absent: append '## T-8 Root command request, attempt 1' noting tree is absent, call request with kind root_command, command 'apt-get update && apt-get install -y --no-install-recommends tree', why 'Capability test of the root command flow.', and STOP with a one-line reply. ATTEMPT 2 (the prompt has the user's answer, including the command's output tail): if approved, run tree --version and tree -L 1 /workspace (expected: works, the user ran the command as root between attempts); if declined, confirm tree is still absent. Append '## T-8 Root command request, attempt 2' with the answer and the result.",
       "acceptance": [
         "Attempt 1 filed exactly one install request and stopped (or recorded that tree already existed)",
         "Attempt 2 recorded the outcome",

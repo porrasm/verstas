@@ -41,7 +41,7 @@ export type Session = {
   allowlist: string[];
   caps: { workerMinutes: number; workerTurns: number; runTickets: number; budgetUsd: number; ticketAttempts: number; reviewer: boolean };
   limits: { memory: string; cpus: number; pids: number; workspaceMb: number };
-  installs: { manager: string; packages: string[]; at: string }[];
+  rootCommands: { command: string; cwd?: string; at: string; requestId?: string }[];
   state: string;
 };
 export type Run = { id: number; state: string; startedAt: string; endedAt?: string; currentTicket?: string; ticketsDone: number; cost: { usd?: number }; pauseReason?: string; resumeAt?: string };

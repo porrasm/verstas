@@ -8,6 +8,8 @@ import type { Limits } from "../core/types.js";
  */
 
 export const LABEL_KEY = "verstas.session";
+/** Holds the spec fingerprint the container was created with (see lifecycle.specFingerprint). */
+export const SPEC_LABEL = "verstas.spec";
 export const PROXY_PORT = 3128;
 export const PROXY_IMAGE = "node:22-alpine";
 export const AGENT_API_HOST = "host.docker.internal";
@@ -33,6 +35,8 @@ export type SandboxSpec = {
   agentApiPort: number;
   /** Linux needs host-gateway spelled out; Docker Desktop provides host.docker.internal itself. */
   linuxHost: boolean;
+  /** Written as a label so a later start can tell whether the container must be recreated. */
+  fingerprint?: string;
 };
 
 const label = (sessionId: string): string[] => ["--label", `${LABEL_KEY}=${sessionId}`];
@@ -109,6 +113,7 @@ export const runSessionArgs = (spec: SandboxSpec): string[] => [
   "--name",
   containerName(spec.sessionId),
   ...label(spec.sessionId),
+  ...(spec.fingerprint ? ["--label", `${SPEC_LABEL}=${spec.fingerprint}`] : []),
   "--network",
   networkName(spec.sessionId),
   "--user",
@@ -200,26 +205,12 @@ export const listLabelledNetworksArgs = (): string[] => [
 ];
 export const duArgs = (sessionId: string): string[] => execArgs(sessionId, ["du", "-sm", "/workspace"]);
 
-// --- Installs requested by the agent (docs/SANDBOX.md Boundary 7) -----------
-
-export type InstallManager = "apt" | "npm" | "pip";
+// --- Root commands approved by the user (docs/SANDBOX.md Boundary 7) -------
 
 /**
- * The install command the harness runs as root. Built from validated
- * fields only: the manager is one of three and every package name already
- * matched PACKAGE_NAME_PATTERN at the schema. No shell is involved; this is
- * an argv.
+ * The argv for a user-approved root command: `sh -c <command>` as root in
+ * the given directory. The command string is the agent's, shown to and
+ * approved by the user first; it never runs otherwise.
  */
-export const installCmd = (manager: InstallManager, packages: readonly string[]): string[] => {
-  switch (manager) {
-    case "apt":
-      return ["apt-get", "install", "-y", "--no-install-recommends", ...packages];
-    case "npm":
-      return ["npm", "install", "-g", ...packages];
-    case "pip":
-      return ["pip", "install", "--break-system-packages", ...packages];
-  }
-};
-
-/** apt needs an index; run before the first apt install of a container. */
-export const aptUpdateCmd = (): string[] => ["apt-get", "update"];
+export const rootCommandArgs = (sessionId: string, command: string, cwd = "/workspace"): string[] =>
+  execArgs(sessionId, ["sh", "-c", command], { user: "root", workdir: cwd });

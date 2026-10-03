@@ -25,7 +25,7 @@ import { emptyBoard, addNote, BoardError, exportBoard, getTicket, importBoard, p
 import { configSchema, loadConfig, loadSecrets, saveConfig, saveSecrets, verstasHome, workTargetSchema, type Config } from "../config.js";
 import type { SessionHub } from "../sessions/hub.js";
 import { createSession, deleteSessionDir, listSessions, sessionPaths } from "../sessions/sessions.js";
-import { installInSandbox, removeSandbox, sandboxStatus, stopSandbox, type SandboxConfig } from "../sandbox/lifecycle.js";
+import { removeSandbox, runRootCommand, sandboxStatus, stopSandbox, type SandboxConfig } from "../sandbox/lifecycle.js";
 import { dockerAvailable } from "../sandbox/docker.js";
 import type { RunManager } from "../harness/run.js";
 import { dockerShell, ensureSessionSandbox, type RunManagerConfig } from "../harness/docker-worker.js";
@@ -335,8 +335,7 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
         res.status(409).json({ error: "Pause or stop the run first" });
         return;
       }
-      const envFile = path.join(h.paths.runs, "export.env");
-      await ensureSessionSandbox(d.runConfig, h.session, envFile, undefined);
+      await ensureSessionSandbox(d.runConfig, h.session, path.join(h.paths.dir, "sandbox.env"), undefined);
       const sh = dockerShell(d.sandbox, h.id);
       await sh.exec(["mkdir", "-p", "/workspace/.verstas/export"]);
       const files: { repo: string; file: string; branch: string; bytes: number }[] = [];
@@ -559,8 +558,8 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
           const entry = request.detail.port ? `${request.detail.host}:${request.detail.port}` : request.detail.host;
           if (!session.allowlist.includes(entry)) session = { ...session, allowlist: [...session.allowlist, entry] };
         }
-        if (request.detail.kind === "install" && decision === "approve") {
-          session = { ...session, installs: [...session.installs, { manager: request.detail.manager, packages: request.detail.packages, at: now() }] };
+        if (request.detail.kind === "root_command" && decision === "approve") {
+          session = { ...session, rootCommands: [...session.rootCommands, { command: request.detail.command, cwd: request.detail.cwd, at: now(), requestId: request.id }] };
         }
         if (request.detail.kind === "resources" && decision === "approve") {
           const r = request.detail;
@@ -611,15 +610,19 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
 /** Side effects of approving a request that need the sandbox now; the rest is recorded on the session. */
 const applyRequest = async (d: UiApiDeps, sessionId: string, request: AgentRequest): Promise<string> => {
   const det = request.detail;
-  if (det.kind === "install") {
+  if (det.kind === "root_command") {
+    const h = await d.hub.get(sessionId);
     const st = await sandboxStatus(d.sandbox, sessionId).catch(() => null);
-    if (st?.container !== "running") return "recorded; installed when the container next starts";
-    const r = await installInSandbox(d.sandbox, sessionId, det.manager, det.packages);
-    return r.ok ? "installed" : `install failed: ${r.output.slice(-300)}`;
+    if (st?.container !== "running") {
+      // Bring the box up without a run token: the command does not need one.
+      await ensureSessionSandbox(d.runConfig, h.session, path.join(h.paths.dir, "sandbox.env"), undefined);
+    }
+    const r = await runRootCommand(d.sandbox, sessionId, det.command, det.cwd);
+    const tail = r.output.trim().split("\n").slice(-30).join("\n");
+    return `${r.ok ? "ran as root, exit 0" : `ran as root, exit ${r.code}`}${tail ? `\n--- output (tail) ---\n${tail}` : ""}`;
   }
   if (det.kind === "network") return "added to the allowlist";
   if (det.kind === "resources") return "caps updated";
-  if (det.kind === "secret") return "secrets are not supported yet; tell the worker in the answer";
   return "";
 };
 

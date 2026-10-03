@@ -28,7 +28,7 @@ export interface Shell {
 
 /** Runs one worker job inside the container; streams events; resolves with the final line. */
 export interface WorkerRunner {
-  run(job: Job, onEvent: (e: VerstasEvent) => void, signal: AbortSignal, opts?: { rawLog?: string }): Promise<WorkerDone>;
+  run(job: Job, onEvent: (e: VerstasEvent) => void, signal: AbortSignal, opts?: { rawLog?: string; runToken?: string }): Promise<WorkerDone>;
 }
 
 export const DEBUG = Boolean(process.env.VERSTAS_DEBUG);
@@ -133,7 +133,10 @@ export class RunManager {
       await setSessionState("running");
       await saveRun();
 
-      const envFile = path.join(runDir, "env");
+      // One env file per session: the container is created once and keeps its
+      // environment, so only session-stable values go in it. The run token is
+      // passed to each worker on exec instead (see docker-worker.ts).
+      const envFile = path.join(h.paths.dir, "sandbox.env");
       await d.ensureSandbox(h.session, envFile, token);
       await this.writeWorkspaceFiles(h, token);
 
@@ -142,7 +145,7 @@ export class RunManager {
         await setSessionState("planning");
         d.tokens.update(token, { role: "planner", currentTicket: undefined });
         await status("planner: turning the goal into tickets");
-        const done = await this.runJob(h, run, { role: "planner", promptText: plannerPrompt(h.session, h.board) }, log, ctl.signal);
+        const done = await this.runJob(h, run, { role: "planner", promptText: plannerPrompt(h.session, h.board) }, log, ctl.signal, token);
         addCost(run, done.costUsd);
         await saveRun();
         d.tokens.update(token, { role: "worker" });
@@ -282,7 +285,7 @@ export class RunManager {
     run.currentTicket = ticket.id;
     d.tokens.update(token, { currentTicket: ticket.id, role: "worker" });
 
-    const impl = await this.runJob(h, run, { role: "implementer", ticket: ticket.id, promptText: implementerPrompt(h.board, getTicket(h.board, ticket.id), answer) }, log, signal);
+    const impl = await this.runJob(h, run, { role: "implementer", ticket: ticket.id, promptText: implementerPrompt(h.board, getTicket(h.board, ticket.id), answer) }, log, signal, token);
     addCost(run, impl.costUsd);
     await this.writeTicketReport(h, run, ticket.id, "implementer", impl);
 
@@ -320,7 +323,7 @@ export class RunManager {
     if (!changed) verdictNote = "no files changed";
     if (caps.reviewer && changed) {
       d.tokens.update(token, { role: "worker", currentTicket: ticket.id });
-      const rev = await this.runJob(h, run, { role: "reviewer", ticket: ticket.id, promptText: reviewerPrompt(getTicket(h.board, ticket.id), stat, diff, gates) }, log, signal);
+      const rev = await this.runJob(h, run, { role: "reviewer", ticket: ticket.id, promptText: reviewerPrompt(getTicket(h.board, ticket.id), stat, diff, gates) }, log, signal, token);
       addCost(run, rev.costUsd);
       await this.writeTicketReport(h, run, ticket.id, "reviewer", rev);
       if (rev.rateLimited) {
@@ -369,6 +372,7 @@ export class RunManager {
     job: { role: Job["role"]; ticket?: string; promptText: string },
     log: (e: VerstasEvent) => Promise<void>,
     signal: AbortSignal,
+    token: string,
   ): Promise<WorkerDone> {
     const dir = path.join(h.paths.workspace, WORKSPACE_FILES);
     await fs.mkdir(dir, { recursive: true });
@@ -386,7 +390,7 @@ export class RunManager {
     if (DEBUG) spec.debug = true;
     await fs.writeFile(path.join(dir, "job.json"), JSON.stringify(spec, null, 2));
     const rawLog = DEBUG ? path.join(h.paths.runs, String(run.id), `worker-${job.ticket ?? "planner"}-${job.role}-${Date.now()}.raw.jsonl`) : undefined;
-    const done = await this.deps.worker(h.id).run(spec, (e) => void log(e), signal, { rawLog });
+    const done = await this.deps.worker(h.id).run(spec, (e) => void log(e), signal, { rawLog, runToken: token });
     await log(done);
     return done;
   }

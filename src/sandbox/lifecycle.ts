@@ -4,12 +4,11 @@ import type { ChildProcess } from "node:child_process";
 import type { Session } from "../core/types.js";
 import type { SessionPaths } from "../sessions/sessions.js";
 import {
-  aptUpdateCmd,
+  SPEC_LABEL,
   connectProxyToBridgeArgs,
   containerName,
   createNetworkArgs,
   execArgs,
-  installCmd,
   listLabelledArgs,
   listLabelledNetworksArgs,
   logsArgs,
@@ -17,10 +16,10 @@ import {
   proxyName,
   rmArgs,
   rmNetworkArgs,
+  rootCommandArgs,
   runProxyArgs,
   runSessionArgs,
   stopArgs,
-  type InstallManager,
   type SandboxSpec,
 } from "./docker-args.js";
 import type { DockerRunner } from "./docker.js";
@@ -69,7 +68,8 @@ export const writeEnvFile = async (file: string, env: Record<string, string>): P
   await fs.writeFile(file, body + "\n", { mode: 0o600 });
 };
 
-export const buildSpec = (cfg: SandboxConfig, session: Session, paths: SessionPaths, envFileHostPath: string): SandboxSpec => ({
+export const buildSpec = (cfg: SandboxConfig, session: Session, paths: SessionPaths, envFileHostPath: string): SandboxSpec => {
+  const spec: SandboxSpec = {
   sessionId: session.id,
   image: session.image,
   workspaceHostPath: paths.workspace,
@@ -80,14 +80,28 @@ export const buildSpec = (cfg: SandboxConfig, session: Session, paths: SessionPa
   limits: session.limits,
   agentApiPort: cfg.agentApiPort,
   linuxHost: cfg.linuxHost,
-});
+  };
+  spec.fingerprint = specFingerprint(spec);
+  return spec;
+};
+
+/** What the container was created with; a change means it must be recreated. */
+export const specFingerprint = (spec: SandboxSpec): string =>
+  JSON.stringify([spec.image, spec.limits.memory, spec.limits.cpus, spec.limits.pids, spec.workspaceHostPath, spec.workerDistHostPath, spec.envFileHostPath]);
+
+const currentFingerprint = async (docker: DockerRunner, name: string): Promise<string | null> => {
+  const r = await docker.run(["inspect", "--format", `{{index .Config.Labels "${SPEC_LABEL}"}}`, name], { allowFailure: true });
+  return r.code === 0 ? r.stdout.trim() : null;
+};
 
 /**
- * Idempotent: creates what is missing, starts what is stopped, replaces the
- * session container when its spec (image, limits) changed since it was
- * created, which `recreate` forces.
+ * Idempotent: creates what is missing, starts what is stopped, and replaces
+ * the session container only when its spec (image, limits, mounts) differs
+ * from what it was created with, or when `recreate` forces it. Root
+ * commands the user approved earlier are replayed by the caller after a
+ * recreate (see harness/docker-worker.ts).
  */
-export const ensureSandboxUp = async (cfg: SandboxConfig, spec: SandboxSpec, opts: { recreate?: boolean } = {}): Promise<void> => {
+export const ensureSandboxUp = async (cfg: SandboxConfig, spec: SandboxSpec, opts: { recreate?: boolean } = {}): Promise<{ recreated: boolean }> => {
   const { docker } = cfg;
   const st = await sandboxStatus(cfg, spec.sessionId);
   if (!st.network) await docker.run(createNetworkArgs(spec.sessionId));
@@ -100,12 +114,16 @@ export const ensureSandboxUp = async (cfg: SandboxConfig, spec: SandboxSpec, opt
     await docker.run(["start", proxyName(spec.sessionId)]);
   }
 
-  if (st.container === "absent" || opts.recreate) {
+  const want = specFingerprint(spec);
+  const have = st.container === "absent" ? null : await currentFingerprint(docker, containerName(spec.sessionId));
+  const mustRecreate = st.container === "absent" || opts.recreate || have !== want;
+  if (mustRecreate) {
     if (st.container !== "absent") await docker.run(rmArgs(containerName(spec.sessionId)), { allowFailure: true });
     await docker.run(runSessionArgs(spec));
-  } else if (st.container === "stopped") {
-    await docker.run(["start", containerName(spec.sessionId)]);
+    return { recreated: true };
   }
+  if (st.container === "stopped") await docker.run(["start", containerName(spec.sessionId)]);
+  return { recreated: false };
 };
 
 /** Starts whatever is stopped, recreates nothing; returns what it did, for the log. */
@@ -144,15 +162,10 @@ export const execInSandbox = (cfg: SandboxConfig, sessionId: string, cmd: readon
 export const runInSandbox = (cfg: SandboxConfig, sessionId: string, cmd: readonly string[], opts: { timeoutMs?: number; allowFailure?: boolean; input?: string; workdir?: string } = {}) =>
   cfg.docker.run(execArgs(sessionId, cmd, { workdir: opts.workdir, stdin: opts.input !== undefined }), { timeoutMs: opts.timeoutMs ?? 600_000, allowFailure: opts.allowFailure, input: opts.input });
 
-/** The one root operation: an approved install (docs/SANDBOX.md Boundary 7). */
-export const installInSandbox = async (cfg: SandboxConfig, sessionId: string, manager: InstallManager, packages: readonly string[]): Promise<{ ok: boolean; output: string }> => {
-  const run = (cmd: string[]) => cfg.docker.run(execArgs(sessionId, cmd, { user: "root", workdir: "/" }), { allowFailure: true, timeoutMs: 900_000 });
-  if (manager === "apt") {
-    const upd = await run(aptUpdateCmd());
-    if (upd.code !== 0) return { ok: false, output: (upd.stdout + upd.stderr).slice(-4000) };
-  }
-  const r = await run(installCmd(manager, packages));
-  return { ok: r.code === 0, output: (r.stdout + r.stderr).slice(-4000) };
+/** The one root operation: a command the user read and approved (docs/SANDBOX.md Boundary 7). */
+export const runRootCommand = async (cfg: SandboxConfig, sessionId: string, command: string, cwd?: string): Promise<{ ok: boolean; code: number; output: string }> => {
+  const r = await cfg.docker.run(rootCommandArgs(sessionId, command, cwd), { allowFailure: true, timeoutMs: 15 * 60_000 });
+  return { ok: r.code === 0, code: r.code, output: (r.stdout + r.stderr).slice(-6000) };
 };
 
 /** Proxy log lines since a timestamp; the loop turns "denied" lines into events. */

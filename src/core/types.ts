@@ -118,10 +118,10 @@ export type BoardImport = z.infer<typeof boardImportSchema>;
 
 // --- Inbox: requests, messages, ideas ---------------------------------------
 
-export const PACKAGE_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._+@/-]{0,99}$/;
 export const HOSTNAME_PATTERN = /^(\*\.)?([a-z0-9-]+\.)+[a-z0-9-]+$/i;
 
 export const requestDetailSchema = z.discriminatedUnion("kind", [
+  /** Handled by Verstas on approval: the host joins the session allowlist and the proxy reloads. */
   z.object({
     kind: z.literal("network"),
     host: z
@@ -130,26 +130,31 @@ export const requestDetailSchema = z.discriminatedUnion("kind", [
       .refine((h) => !/^\d{1,3}(\.\d{1,3}){3}$/.test(h), "IP literals are not allowed"),
     port: z.number().int().min(1).max(65535).optional(),
   }),
-  z.object({
-    kind: z.literal("install"),
-    manager: z.enum(["apt", "npm", "pip"]),
-    packages: z.array(z.string().regex(PACKAGE_NAME_PATTERN)).min(1).max(20),
-  }),
+  /** Handled by Verstas on approval: caps and limits change. */
   z.object({
     kind: z.literal("resources"),
     workerMinutes: z.number().int().min(1).max(600).optional(),
     workerTurns: z.number().int().min(1).max(500).optional(),
     memoryMb: z.number().int().min(256).max(65536).optional(),
   }),
+  /**
+   * Shown to the user verbatim; approval runs it as root inside the session
+   * container (sh -c), with the output tail returned as the answer. The one
+   * place agent text reaches a shell, and only after a human read it.
+   */
   z.object({
-    kind: z.literal("decision"),
-    question: z.string().min(1).max(5000),
+    kind: z.literal("root_command"),
+    command: z.string().min(1).max(4000),
+    cwd: z.string().max(500).optional(),
   }),
+  /** Anything a person has to do: a website, a credential placed in a file, a decision. */
   z.object({
-    kind: z.literal("secret"),
-    name: z.string().regex(/^[A-Z][A-Z0-9_]{1,63}$/, "An environment variable name"),
-    purpose: z.string().min(1).max(2000),
+    kind: z.literal("ask"),
+    what: z.string().min(1).max(5000),
+    how: z.string().max(5000).optional(),
+    verify: z.string().max(2000).optional(),
   }),
+  /** Stops the run after the current worker; for problems that make continuing pointless or harmful. */
   z.object({
     kind: z.literal("halt"),
     reason: z.string().min(1).max(5000),
@@ -243,10 +248,12 @@ export const limitsSchema = z.object({
 });
 export type Limits = z.infer<typeof limitsSchema>;
 
-export const installRecordSchema = z.object({
-  manager: z.enum(["apt", "npm", "pip"]),
-  packages: z.array(z.string().regex(PACKAGE_NAME_PATTERN)),
+/** A root command the user approved; replayed when the container is recreated. */
+export const rootCommandRecordSchema = z.object({
+  command: z.string().min(1).max(4000),
+  cwd: z.string().max(500).optional(),
   at: z.string(),
+  requestId: z.string().optional(),
 });
 
 export const sessionStateSchema = z.enum([
@@ -273,12 +280,10 @@ export const sessionSchema = z.object({
   allowlist: z.array(z.string()).default([]),
   caps: capsSchema.prefault({}),
   limits: limitsSchema.prefault({}),
-  installs: z.array(installRecordSchema).default([]),
+  rootCommands: z.array(rootCommandRecordSchema).default([]),
   /** Per-session auto-approval rules (P2); present in the schema so files stay forward-compatible. */
   preapprove: z
     .object({
-      npm: z.boolean().default(false),
-      pip: z.boolean().default(false),
       hosts: z.array(z.string()).default([]),
     })
     .prefault({}),

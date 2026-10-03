@@ -273,16 +273,41 @@ const InboxPanel = ({ inbox, onDecide, onRead, onPromote }: { inbox: Inbox; onDe
     <div className="card inbox">
       <h3>Inbox · {open.length} request{open.length === 1 ? "" : "s"} · {unread.length} message{unread.length === 1 ? "" : "s"} · {ideas.length} idea{ideas.length === 1 ? "" : "s"}</h3>
       {open.map((r) => {
-        const { kind, ...rest } = r.detail;
+        const d = r.detail as Record<string, unknown> & { kind: string };
+        const labels: Record<string, [string, string]> = {
+          network: ["Allow host", "Deny"],
+          resources: ["Apply", "Deny"],
+          root_command: ["Run as root in the box", "Decline"],
+          ask: ["Answer", "Decline"],
+          halt: ["Acknowledge", "Dismiss"],
+        };
+        const [yes, no] = labels[d.kind] ?? ["Approve", "Deny"];
         return (
           <div className="item" key={r.id}>
-            <div><span className="pill warn">{kind}</span> <span className="muted small">{r.id}{r.ticketId ? ` · ${r.ticketId}` : ""} · {fmtTime(r.createdAt)}</span></div>
-            <div className="mono small">{Object.entries(rest).map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join(", ") : String(v)}`).join(" · ")}</div>
-            <div className="small">{r.why}</div>
+            <div><span className={`pill ${d.kind === "root_command" ? "warn" : d.kind === "halt" ? "warn" : "sig"}`}>{d.kind}</span> <span className="muted small">{r.id}{r.ticketId ? ` · ${r.ticketId}` : ""} · {fmtTime(r.createdAt)}</span></div>
+            {d.kind === "root_command" && (
+              <>
+                <pre className="mono" style={{ whiteSpace: "pre-wrap", margin: "6px 0", padding: 8, background: "var(--panel-2)", borderRadius: 6 }}>{String(d.command)}</pre>
+                <div className="muted small">Runs as root inside the session container{d.cwd ? ` in ${String(d.cwd)}` : ""}. Read it first; the output tail goes back to the worker.</div>
+              </>
+            )}
+            {d.kind === "ask" && (
+              <div className="small" style={{ margin: "6px 0" }}>
+                <div><strong>Needs:</strong> {String(d.what)}</div>
+                {d.how ? <div><strong>Please:</strong> {String(d.how)}</div> : null}
+                {d.verify ? <div className="muted"><strong>Will verify by:</strong> {String(d.verify)}</div> : null}
+              </div>
+            )}
+            {d.kind === "network" && <div className="mono small">allow {String(d.host)}{d.port ? `:${String(d.port)}` : ""} (HTTPS)</div>}
+            {d.kind === "resources" && <div className="mono small">{["workerMinutes", "workerTurns", "memoryMb"].filter((k) => d[k] !== undefined).map((k) => `${k}: ${String(d[k])}`).join(" · ")}</div>}
+            {d.kind === "halt" && <div className="small err">{String(d.severity)}: {String(d.reason)}</div>}
+            <div className="small muted">{r.why}</div>
             <div className="row" style={{ marginTop: 6 }}>
-              <input placeholder="answer / note for the worker (optional)" value={answers[r.id] ?? ""} onChange={(e) => setAnswers({ ...answers, [r.id]: e.target.value })} />
-              <button className="pri" onClick={() => onDecide(r.id, "approve", answers[r.id] ?? "")}>Approve</button>
-              <button className="warn" onClick={() => onDecide(r.id, "deny", answers[r.id] ?? "")}>Deny</button>
+              <textarea placeholder={d.kind === "ask" ? "your answer (what you did, paths, decisions)" : "note for the worker (optional)"} value={answers[r.id] ?? ""} onChange={(e) => setAnswers({ ...answers, [r.id]: e.target.value })} style={{ minHeight: d.kind === "ask" ? 70 : 34 }} />
+            </div>
+            <div className="row" style={{ marginTop: 6 }}>
+              <button className={d.kind === "root_command" ? "warn" : "pri"} onClick={() => onDecide(r.id, "approve", answers[r.id] ?? "")}>{yes}</button>
+              <button onClick={() => onDecide(r.id, "deny", answers[r.id] ?? "")}>{no}</button>
             </div>
           </div>
         );
@@ -338,7 +363,7 @@ const SessionSettings = ({ session, onSave }: { session: Session; onSave: (patch
           <label>Memory<input defaultValue={session.limits.memory} onBlur={(e) => onSave({ limits: { memory: e.target.value } })} /></label>
           <label>CPUs<input type="number" step="0.5" defaultValue={session.limits.cpus} onBlur={(e) => onSave({ limits: { cpus: Number(e.target.value) } })} /></label>
         </div>
-        <div className="small muted">Installs approved so far: {session.installs.length ? session.installs.map((i) => `${i.manager} ${i.packages.join(" ")}`).join("; ") : "none"}. Container changes (memory, CPUs, installs) apply when the next run recreates the container.</div>
+        <div className="small muted">Root commands approved so far: {session.rootCommands.length ? session.rootCommands.map((c) => c.command.slice(0, 60)).join("; ") : "none"}. They are replayed if the container is recreated (image or limits changed).</div>
         <div className="small muted mono">image {session.image} · {session.id}</div>
       </div>
     </details>
