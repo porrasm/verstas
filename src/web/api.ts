@@ -3,6 +3,7 @@ import { execFile } from "node:child_process";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
+import os from "node:os";
 import express, { type Request, type Response } from "express";
 import { z } from "zod";
 import {
@@ -51,16 +52,29 @@ const wrap =
   (fn: (req: Request, res: Response) => Promise<void>) =>
   (req: Request, res: Response) => {
     fn(req, res).catch((e: unknown) => {
-      if (e instanceof z.ZodError) res.status(400).json({ error: `Invalid input: ${e.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}` });
-      else if (e instanceof BoardError) res.status(e.code === "unknown_ticket" ? 404 : 409).json({ error: e.message });
-      else if ((e as NodeJS.ErrnoException).code === "ENOENT") res.status(404).json({ error: "Not found" });
-      else res.status(500).json({ error: (e as Error).message });
+      if (e instanceof z.ZodError) {
+        const msg = `Invalid input: ${e.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`;
+        console.warn(`[ui] 400 ${req.method} ${req.originalUrl}: ${msg}`);
+        res.status(400).json({ error: msg });
+      } else if (e instanceof BoardError) {
+        console.warn(`[ui] ${req.method} ${req.originalUrl}: ${e.message}`);
+        res.status(e.code === "unknown_ticket" ? 404 : 409).json({ error: e.message });
+      } else if ((e as NodeJS.ErrnoException).code === "ENOENT") {
+        console.warn(`[ui] 404 ${req.method} ${req.originalUrl}: ${(e as Error).message}`);
+        res.status(404).json({ error: `Not found: ${(e as NodeJS.ErrnoException).path ?? ""}` });
+      } else {
+        console.error(`[ui] 500 ${req.method} ${req.originalUrl}:`, e);
+        res.status(500).json({ error: (e as Error).message });
+      }
     });
   };
 
 const USER_STATES = ["backlog", "ready", "blocked", "done"] as const;
 
 const param = (req: Request, key: string): string => String(req.params[key] ?? "");
+
+/** "~/work/x" -> "/Users/me/work/x"; shells expand this, forms do not. */
+const expandHome = (p: string): string => (p === "~" || p.startsWith("~/") ? path.join(os.homedir(), p.slice(1)) : p);
 
 export const createUiApi = (d: UiApiDeps): express.Express => {
   const app = express();
@@ -87,6 +101,7 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
     "/config",
     wrap(async (req, res) => {
       const patch = configSchema.partial().parse(req.body);
+      if (patch.sessionsRoot) patch.sessionsRoot = path.resolve(expandHome(patch.sessionsRoot));
       const next = configSchema.parse({ ...d.getConfig(), ...patch });
       await fs.mkdir(next.sessionsRoot, { recursive: true });
       await d.setConfig(next);
@@ -107,7 +122,7 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
     "/work-targets",
     wrap(async (req, res) => {
       const t = workTargetSchema.parse(req.body);
-      const abs = path.resolve(t.path);
+      const abs = path.resolve(expandHome(t.path));
       const inside = await execFileP("git", ["-C", abs, "rev-parse", "--is-inside-work-tree"]).then((r) => r.stdout.trim()).catch(() => "false");
       if (inside !== "true") {
         res.status(400).json({ error: `${abs} is not a git work tree` });

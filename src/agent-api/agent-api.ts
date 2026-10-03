@@ -90,7 +90,10 @@ export const createAgentApi = (hub: SessionHub, tokens: RunTokens): express.Expr
       fn(req as AgentRequestWithRun, res).catch((e: unknown) => {
         if (e instanceof z.ZodError) res.status(400).json({ error: `Invalid input: ${e.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}` });
         else if (e instanceof BoardError) res.status(e.code === "unknown_ticket" ? 404 : 403).json({ error: e.message });
-        else res.status(500).json({ error: (e as Error).message });
+        else {
+          console.error(`[agent] 500 ${req.method} ${req.originalUrl}:`, e);
+          res.status(500).json({ error: (e as Error).message });
+        }
       });
     };
 
