@@ -6,6 +6,7 @@ import type { RunTokens } from "../agent-api/agent-api.js";
 import { promises as fs } from "node:fs";
 import { buildSpec, ensureSandboxUp, execInSandbox, healSandbox, proxyLogsSince, runInSandbox, runRootScript, runSetupScript, writeEnvFile, type SandboxConfig } from "../sandbox/lifecycle.js";
 import { now, type SetupResult } from "../core/types.js";
+import { writeAllowlist } from "../sessions/sessions.js";
 import { readWorkerStream, RunManager, type Shell, type WorkerDone, type WorkerRunner } from "./run.js";
 import type { Job } from "../worker/worker.js";
 
@@ -109,6 +110,8 @@ export const ensureSessionSandbox = async (c: RunManagerConfig, session: Session
   }
   await writeEnvFile(envFile, env);
   const h = await c.hub.get(session.id);
+  // Sessions created before the proxy directory existed get it here.
+  await writeAllowlist(h.paths, session.allowlist);
   const { recreated } = await ensureSandboxUp(c.sandbox, buildSpec(c.sandbox, session, h.paths, envFile));
   // Setup scripts run on a fresh container, and also when a previous setup never completed.
   const setupPending = session.setupScripts.length > 0 && (recreated || session.setup.length === 0 || session.setup.some((r) => !r.ok));

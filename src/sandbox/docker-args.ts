@@ -10,6 +10,8 @@ import type { Limits } from "../core/types.js";
 export const LABEL_KEY = "verstas.session";
 /** Holds the spec fingerprint the container was created with (see lifecycle.specFingerprint). */
 export const SPEC_LABEL = "verstas.spec";
+/** Same idea for the proxy container. */
+export const PROXY_SPEC_LABEL = "verstas.proxyspec";
 export const PROXY_PORT = 3128;
 export const PROXY_IMAGE = "node:22-alpine";
 export const AGENT_API_HOST = "host.docker.internal";
@@ -53,8 +55,8 @@ export type SandboxSpec = {
   image: string;
   /** Host path of <session>/workspace, bind-mounted at /workspace. */
   workspaceHostPath: string;
-  /** Host path of <session>/allowlist.json, mounted read-only into the proxy. */
-  allowlistHostPath: string;
+  /** Host path of <session>/proxy/, mounted read-only into the proxy; holds allowlist.json. */
+  allowlistDirHostPath: string;
   /** Host path of the compiled proxy directory (dist/src/proxy), mounted read-only. */
   proxyDistHostPath: string;
   /** Host path of the compiled worker directory (dist/src/worker), mounted read-only over the image's copy. */
@@ -67,6 +69,8 @@ export type SandboxSpec = {
   linuxHost: boolean;
   /** Written as a label so a later start can tell whether the container must be recreated. */
   fingerprint?: string;
+  /** The same for the proxy. */
+  proxyFingerprint?: string;
 };
 
 const label = (sessionId: string): string[] => ["--label", `${LABEL_KEY}=${sessionId}`];
@@ -87,6 +91,7 @@ export const runProxyArgs = (spec: SandboxSpec): string[] => [
   "--name",
   proxyName(spec.sessionId),
   ...label(spec.sessionId),
+  ...(spec.proxyFingerprint ? ["--label", `${PROXY_SPEC_LABEL}=${spec.proxyFingerprint}`] : []),
   "--network",
   networkName(spec.sessionId),
   "--network-alias",
@@ -112,9 +117,11 @@ export const runProxyArgs = (spec: SandboxSpec): string[] => [
   "-v",
   `${spec.proxyDistHostPath}:/proxy:ro`,
   "-v",
-  `${spec.allowlistHostPath}:/allowlist.json:ro`,
+  // A directory, not the file: the host rewrites allowlist.json by rename,
+  // and a single-file bind mount would keep showing the old inode.
+  `${spec.allowlistDirHostPath}:/allowlist:ro`,
   "-e",
-  "ALLOWLIST_FILE=/allowlist.json",
+  "ALLOWLIST_FILE=/allowlist/allowlist.json",
   "-e",
   `VERSTAS_AGENT_API=${AGENT_API_HOST}:${spec.agentApiPort}`,
   "-e",

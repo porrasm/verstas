@@ -14,7 +14,7 @@ const spec: SandboxSpec = {
   sessionId: "nuppi-mvp",
   image: "verstas-devbox:local",
   workspaceHostPath: "/Users/me/verstas/sessions/nuppi-mvp/workspace",
-  allowlistHostPath: "/Users/me/verstas/sessions/nuppi-mvp/allowlist.json",
+  allowlistDirHostPath: "/Users/me/verstas/sessions/nuppi-mvp/proxy",
   proxyDistHostPath: "/Users/me/verstas/dist/src/proxy",
   workerDistHostPath: "/Users/me/verstas/dist/src/worker",
   envFileHostPath: "/Users/me/verstas/sessions/nuppi-mvp/runs/1/env",
@@ -80,10 +80,10 @@ test("the proxy is read-only, unprivileged, and only mounts its code and the all
   expect(pairs("--restart")).toEqual(["on-failure:5"]);
   expect(pairs("-v")).toEqual([
     `${spec.proxyDistHostPath}:/proxy:ro`,
-    `${spec.allowlistHostPath}:/allowlist.json:ro`,
+    `${spec.allowlistDirHostPath}:/allowlist:ro`,
   ]);
   expect(pairs("-e")).toEqual([
-    "ALLOWLIST_FILE=/allowlist.json",
+    "ALLOWLIST_FILE=/allowlist/allowlist.json",
     "VERSTAS_AGENT_API=host.docker.internal:4701",
     "PORT=3128",
   ]);

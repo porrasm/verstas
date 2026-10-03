@@ -4,6 +4,7 @@ import type { ChildProcess } from "node:child_process";
 import type { Session } from "../core/types.js";
 import type { SessionPaths } from "../sessions/sessions.js";
 import {
+  PROXY_SPEC_LABEL,
   SANDBOX_VERSION,
   SPEC_LABEL,
   connectProxyToBridgeArgs,
@@ -74,7 +75,7 @@ export const buildSpec = (cfg: SandboxConfig, session: Session, paths: SessionPa
   sessionId: session.id,
   image: session.image,
   workspaceHostPath: paths.workspace,
-  allowlistHostPath: paths.allowlist,
+  allowlistDirHostPath: paths.proxyDir,
   proxyDistHostPath: cfg.proxyDistHostPath,
   workerDistHostPath: cfg.workerDistHostPath,
   envFileHostPath,
@@ -83,6 +84,7 @@ export const buildSpec = (cfg: SandboxConfig, session: Session, paths: SessionPa
   linuxHost: cfg.linuxHost,
   };
   spec.fingerprint = specFingerprint(spec);
+  spec.proxyFingerprint = proxyFingerprint(spec);
   return spec;
 };
 
@@ -90,8 +92,12 @@ export const buildSpec = (cfg: SandboxConfig, session: Session, paths: SessionPa
 export const specFingerprint = (spec: SandboxSpec): string =>
   JSON.stringify([SANDBOX_VERSION, spec.image, spec.limits.memory, spec.limits.cpus, spec.limits.pids, spec.workspaceHostPath, spec.workerDistHostPath, spec.envFileHostPath]);
 
-const currentFingerprint = async (docker: DockerRunner, name: string): Promise<string | null> => {
-  const r = await docker.run(["inspect", "--format", `{{index .Config.Labels "${SPEC_LABEL}"}}`, name], { allowFailure: true });
+/** What the proxy was created with. */
+export const proxyFingerprint = (spec: SandboxSpec): string =>
+  JSON.stringify([SANDBOX_VERSION, spec.allowlistDirHostPath, spec.proxyDistHostPath, spec.agentApiPort, spec.linuxHost]);
+
+const currentFingerprint = async (docker: DockerRunner, name: string, label = SPEC_LABEL): Promise<string | null> => {
+  const r = await docker.run(["inspect", "--format", `{{index .Config.Labels "${label}"}}`, name], { allowFailure: true });
   return r.code === 0 ? r.stdout.trim() : null;
 };
 
@@ -107,7 +113,8 @@ export const ensureSandboxUp = async (cfg: SandboxConfig, spec: SandboxSpec, opt
   const st = await sandboxStatus(cfg, spec.sessionId);
   if (!st.network) await docker.run(createNetworkArgs(spec.sessionId));
 
-  if (st.proxy === "absent" || opts.recreate) {
+  const proxyHave = st.proxy === "absent" ? null : await currentFingerprint(docker, proxyName(spec.sessionId), PROXY_SPEC_LABEL);
+  if (st.proxy === "absent" || opts.recreate || proxyHave !== proxyFingerprint(spec)) {
     if (st.proxy !== "absent") await docker.run(rmArgs(proxyName(spec.sessionId)), { allowFailure: true });
     await docker.run(runProxyArgs(spec));
     await docker.run(connectProxyToBridgeArgs(spec.sessionId));

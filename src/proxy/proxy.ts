@@ -11,7 +11,7 @@
  * node:22-alpine as two files. See docs/SANDBOX.md, Boundary 3.
  *
  * Environment:
- *   ALLOWLIST_FILE     JSON array of entries; re-read when its mtime changes
+ *   ALLOWLIST_FILE     JSON array of entries; re-read when its inode, mtime or size changes
  *   VERSTAS_AGENT_API  "host:port" of the agent API (plain http target)
  *   PORT               listen port (default 3128)
  */
@@ -34,7 +34,7 @@ const IDLE_MS = 120_000;
 const RELOAD_POLL_MS = 2_000;
 
 let allowlist: AllowEntry[] = [];
-let lastMtime = -1;
+let lastStamp = "";
 let tunnels = 0;
 
 const log = (record: Record<string, unknown>) => {
@@ -44,8 +44,10 @@ const log = (record: Record<string, unknown>) => {
 const reload = () => {
   try {
     const st = fs.statSync(ALLOWLIST_FILE);
-    if (st.mtimeMs === lastMtime) return;
-    lastMtime = st.mtimeMs;
+    // The host replaces the file by rename, so the inode is the reliable signal.
+    const stamp = `${st.ino}:${st.mtimeMs}:${st.size}`;
+    if (stamp === lastStamp) return;
+    lastStamp = stamp;
     const raw: unknown = JSON.parse(fs.readFileSync(ALLOWLIST_FILE, "utf8"));
     if (!Array.isArray(raw) || !raw.every((x) => typeof x === "string")) throw new Error("not a string array");
     allowlist = parseAllowlist(raw as string[]);

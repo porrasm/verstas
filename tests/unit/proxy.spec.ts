@@ -106,10 +106,19 @@ test("proxy allows CONNECT to listed host:port, forwards agent api under /agent/
     expect(await rawRequest(proxyPort, `GET http://127.0.0.1:${apiPort}/agent/../sessions HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n`)).toContain("403");
     expect(await rawRequest(proxyPort, "GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n")).toContain("403");
 
-    // Live reload: remove the echo entry, wait past the poll, CONNECT is now refused.
-    await fs.writeFile(allowlistFile, JSON.stringify(["api.anthropic.com"]));
+    // Live reload, the way the host writes it (temp file + rename, same size):
+    // remove the echo entry, wait past the poll, CONNECT is now refused.
+    const replace = async (list: string[]) => {
+      await fs.writeFile(`${allowlistFile}.tmp`, JSON.stringify(list));
+      await fs.rename(`${allowlistFile}.tmp`, allowlistFile);
+    };
+    await replace(["api.anthropic.com"]);
     await new Promise((r) => setTimeout(r, 2600));
     expect(await rawRequest(proxyPort, `CONNECT localhost:${echoPort} HTTP/1.1\r\nHost: x\r\n\r\n`)).toContain("403");
+    // And an approval comes back in the same way.
+    await replace([`localhost:${echoPort}`]);
+    await new Promise((r) => setTimeout(r, 2600));
+    expect(await rawRequest(proxyPort, `CONNECT localhost:${echoPort} HTTP/1.1\r\nHost: x\r\n\r\n`)).toContain("200");
   } finally {
     child.kill("SIGTERM");
     echo.close();

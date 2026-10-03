@@ -106,9 +106,12 @@ the default bridge, so it alone has egress.
   for `HTTP_PROXY`. Tools that honour the variables (git, npm, pip, curl,
   Claude Code) work; tools that do not simply fail to connect, which is the
   desired failure mode.
-- **Allowlist.** A file in the session directory, `allowlist.json`, mounted
-  read-only into the proxy and re-read when it changes, so approving a
-  request takes effect without a restart. Entries are `host` or
+- **Allowlist.** A file in the session directory, `proxy/allowlist.json`.
+  The `proxy/` directory (never the file alone) is mounted read-only into
+  the proxy, which re-reads the file when its inode, mtime or size changes,
+  so approving a request takes effect within two seconds without a restart.
+  The host writes the file by rename; a single-file bind mount would keep
+  showing the old inode, which is how approvals once failed to apply. Entries are `host` or
   `*.suffix`, with an optional port. HTTPS (`CONNECT`) is allowed only to
   port 443 of listed hosts. Plain HTTP is allowed only to the agent API
   (below). Everything else gets `403` and a log line.

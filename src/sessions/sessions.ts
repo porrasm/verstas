@@ -22,7 +22,8 @@ import { cloneWorkTarget, extractZip, type CloneResult, type ExtractResult } fro
  *     session.json      Session (core/types)
  *     board.json        Board
  *     inbox.json        requests, messages, ideas
- *     allowlist.json    string[]; mounted read-only into the proxy
+ *     proxy/            mounted read-only into the proxy (a directory, so
+ *       allowlist.json  atomic rewrites are seen; a single-file mount pins the old inode)
  *     workspace/        the one bind mount
  *       <repo>/         fresh clones
  *       attachments/    extracted zips
@@ -40,6 +41,8 @@ export type SessionPaths = {
   session: string;
   board: string;
   inbox: string;
+  /** Directory mounted into the proxy; holds allowlist.json. */
+  proxyDir: string;
   allowlist: string;
   workspace: string;
   attachments: string;
@@ -57,7 +60,8 @@ export const sessionPaths = (root: string, id: string): SessionPaths => {
     session: path.join(dir, "session.json"),
     board: path.join(dir, "board.json"),
     inbox: path.join(dir, "inbox.json"),
-    allowlist: path.join(dir, "allowlist.json"),
+    proxyDir: path.join(dir, "proxy"),
+    allowlist: path.join(dir, "proxy", "allowlist.json"),
     workspace: path.join(dir, "workspace"),
     attachments: path.join(dir, "workspace", "attachments"),
     notes: path.join(dir, "workspace", "notes"),
@@ -164,8 +168,13 @@ export const createSession = async (root: string, input: CreateSessionInput): Pr
   return { session, paths, clones, extracts };
 };
 
-/** The proxy re-reads this file; mode 0644 because the proxy runs as uid 1000. */
+/**
+ * The proxy re-reads this file; mode 0644 because the proxy runs as uid 1000.
+ * Written to a temp file and renamed: the proxy mounts the directory, so it
+ * sees the new file at the same path and never a half-written one.
+ */
 export const writeAllowlist = async (paths: SessionPaths, allowlist: readonly string[]): Promise<void> => {
+  await fs.mkdir(paths.proxyDir, { recursive: true, mode: 0o755 });
   const tmp = `${paths.allowlist}.tmp`;
   await fs.writeFile(tmp, JSON.stringify(allowlist, null, 2) + "\n", { mode: 0o644 });
   await fs.rename(tmp, paths.allowlist);
