@@ -117,6 +117,7 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
   const [busy, setBusy] = useState("");
   const [logTicket, setLogTicket] = useState("");
   const [lastEventAt, setLastEventAt] = useState<string | null>(null);
+  const [dir, setDir] = useState("");
   const now = useNow();
 
   const base = `/sessions/${encodeURIComponent(id)}`;
@@ -129,6 +130,7 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
     setTotals(d.totals);
     setActive(d.active);
     setSandbox(d.sandbox);
+    setDir(d.dir);
   };
   const loadEvents = async (runId: number | null) => {
     const q = runId ? `?run=${runId}&limit=1000` : "?limit=1000";
@@ -261,6 +263,7 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
           <span>created <b title={fmtDateTime(session.createdAt)}>{fmtAgo(session.createdAt, now)}</b></span>
           <span className={sb.tone === "good" ? "ok" : ""}>{sb.text}</span>
           <span>{session.repos.length ? <>repos <span className="mono">{session.repos.map((r) => r.name).join(", ")}</span></> : "no repositories"}</span>
+          {dir && <SessionDir dir={dir} />}
           <ModelPicker session={session} onChange={(model) => tryAct("model", () => api("PUT", `${base}/caps`, { model }))} />
           <NotifyToggle />
           <RemoteToggle session={session} onSet={(remote) => tryAct("remote", () => api("PUT", `${base}/remote`, { remote }))} />
@@ -643,6 +646,22 @@ const notifyFor = (sessionName: string, e: VEvent) => {
   } catch {
     // ignore
   }
+};
+
+/** The session directory, with a button that copies `cd <dir>` for a terminal. */
+const SessionDir = ({ dir }: { dir: string }) => {
+  const [copied, setCopied] = useState(false);
+  const cd = `cd ${/^[\w@%+=:,./-]+$/.test(dir) ? dir : `'${dir.replace(/'/g, `'\\''`)}'`}`;
+  const copy = async () => {
+    await copyText(cd);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
+  return (
+    <button className="chip" onClick={() => void copy()} title={`Copy "${cd}"`}>
+      <span className="mono">{dir.replace(/^\/Users\/[^/]+/, "~")}</span> {copied ? "· copied" : "· copy cd"}
+    </button>
+  );
 };
 
 /**

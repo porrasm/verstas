@@ -75,7 +75,7 @@ export type VEvent = { kind: string; t: string; ticket?: string; [k: string]: un
 export type Totals = { usd: number; runs: number; lastActivityAt: string };
 export type SessionSummary = { session: Session; counts: Record<string, number>; run?: Run; openRequests: number; ideas: number; totals?: Totals; error?: string };
 export type Sandbox = { network: boolean; proxy: "running" | "stopped" | "absent"; container: "running" | "stopped" | "absent" };
-export type SessionDetail = { session: Session; board: Board; inbox: Inbox; run?: Run; runs: Run[]; totals: Totals; sandbox: Sandbox | null; active: boolean };
+export type SessionDetail = { session: Session; board: Board; inbox: Inbox; run?: Run; runs: Run[]; totals: Totals; sandbox: Sandbox | null; active: boolean; /** The session directory on this machine. */ dir: string };
 export type Status = { version: string; docker: { ok: boolean; detail: string }; image: boolean; imageName: string; sessionsRoot: string; hasClaudeToken: boolean };
 export type Config = { sessionsRoot: string; workTargets: { name: string; path: string }[]; uiPort: number; agentApiPort: number; devboxImage: string; linuxHost: boolean };
 

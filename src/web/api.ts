@@ -433,7 +433,7 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
       const run = live ?? runs[runs.length - 1];
       const sandbox = await sandboxStatus(d.sandbox, h.id).catch(() => null);
       const all = live ? [...runs.filter((r) => r.id !== live.id), live] : runs;
-      res.json({ session: h.session, board: h.board, inbox: h.inbox, run, runs: all, totals: runTotals(all, h.session.createdAt), sandbox, active: Boolean(live) });
+      res.json({ session: h.session, board: h.board, inbox: h.inbox, run, runs: all, totals: runTotals(all, h.session.createdAt), sandbox, active: Boolean(live), dir: h.paths.dir });
     }),
   );
 
