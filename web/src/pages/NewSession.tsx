@@ -10,7 +10,7 @@ export const NewSessionPage = () => {
   const [repos, setRepos] = useState<RepoPick[]>([]);
   const [uploads, setUploads] = useState<{ id: string; name: string; bytes: number }[]>([]);
   const [board, setBoard] = useState("");
-  const [allowlist, setAllowlist] = useState("api.anthropic.com\nregistry.npmjs.org\npypi.org\nfiles.pythonhosted.org\ngithub.com\nobjects.githubusercontent.com");
+  const [allowlist, setAllowlist] = useState("api.anthropic.com\nregistry.npmjs.org\npypi.org\nfiles.pythonhosted.org\ngithub.com\nobjects.githubusercontent.com\ndeb.debian.org\nsecurity.debian.org");
   const [caps, setCaps] = useState({ preflight: false, workerMinutes: 25, workerTurns: 60, runTickets: 40, budgetUsd: 50, ticketAttempts: 2, reviewer: true });
   const [scripts, setScripts] = useState<SetupScript[]>([]);
   const [picked, setPicked] = useState<string[]>([]);

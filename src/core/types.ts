@@ -333,6 +333,8 @@ export const DEFAULT_ALLOWLIST = [
   "files.pythonhosted.org",
   "github.com",
   "objects.githubusercontent.com",
+  "deb.debian.org",
+  "security.debian.org",
 ] as const;
 
 export const runStateSchema = z.enum(["running", "paused", "halted", "stopped", "finished", "failed"]);

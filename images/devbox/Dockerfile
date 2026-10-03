@@ -18,9 +18,13 @@
 FROM node:22-bookworm
 
 ENV DEBIAN_FRONTEND=noninteractive
-RUN apt-get update \
+# apt over HTTPS: the sandbox proxy allows HTTPS only, so plain-http mirrors
+# would never work for setup scripts or approved installs. deb.debian.org
+# and security.debian.org are on the default allowlist for the same reason.
+RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g; s|http://security.debian.org|https://security.debian.org|g' /etc/apt/sources.list.d/debian.sources \
+ && apt-get update \
  && apt-get install -y --no-install-recommends \
-      git ca-certificates curl jq unzip zip less procps \
+      git ca-certificates curl jq unzip zip less procps lsof psmisc iproute2 \
       python3 python3-pip python3-venv \
       build-essential pkg-config \
  && rm -rf /var/lib/apt/lists/*

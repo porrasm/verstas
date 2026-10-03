@@ -49,7 +49,8 @@ Then, in the web app:
    or stop at any time.
 4. **Setup scripts** (own tab): bash that runs once as root when a
    session's container is created, for Chromium, Postgres, Godot, an SDK
-   from a zip. Tick them on the New session form. "Copy context for an LLM"
+   from a zip. Tick them on the New session form. Two ready-made ones to
+   paste are in `docs/examples/scripts/` (Postgres, Chromium). "Copy context for an LLM"
    gives any assistant the facts of the box so it can write the script, or
    a board.
 5. **Agentic initialization** (a tick on the New session form): before any
