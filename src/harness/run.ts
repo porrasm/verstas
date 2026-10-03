@@ -34,13 +34,14 @@ export interface WorkerRunner {
 export type RunDeps = {
   hub: SessionHub;
   tokens: RunTokens;
-  shell: Shell;
-  worker: WorkerRunner;
+  /** Per session, so two sessions can run at once. */
+  shell: (sessionId: string) => Shell;
+  worker: (sessionId: string) => WorkerRunner;
   /** Called once before the loop; brings the sandbox up with the env file at the given path. */
   ensureSandbox: (session: Session, envFile: string, token: string) => Promise<void>;
   agentApiUrl: string;
   /** Proxy "denied" lines since a timestamp, for the log. */
-  proxyDenials?: (since: string) => Promise<{ host: string; port: number }[]>;
+  proxyDenials?: (sessionId: string, since: string) => Promise<{ host: string; port: number }[]>;
   /** For tests: a fixed clock. */
   now?: () => string;
   /** For tests: how long to sleep on a rate limit (ms). */
@@ -193,7 +194,7 @@ export class RunManager {
           break;
         }
         if (d.proxyDenials) {
-          const denials = await d.proxyDenials(lastDenialCheck).catch(() => []);
+          const denials = await d.proxyDenials(h.id, lastDenialCheck).catch(() => []);
           lastDenialCheck = clock();
           for (const den of denials) await log({ kind: "denied_network", t: clock(), host: den.host, port: den.port });
         }
@@ -276,8 +277,8 @@ export class RunManager {
     // Gates, diff, review.
     const current = getTicket(h.board, ticket.id);
     const repoDir = current.repo && h.session.repos.some((r) => r.name === current.repo) ? `/workspace/${current.repo}` : h.session.repos[0] ? `/workspace/${h.session.repos[0].name}` : "/workspace";
-    const gates = await this.runGates(repoDir, log, ticket.id);
-    const { stat, numstat, diff } = await this.stageAndDiff(repoDir);
+    const gates = await this.runGates(h.id, repoDir, log, ticket.id);
+    const { stat, numstat, diff } = await this.stageAndDiff(h.id, repoDir);
     const changed = numstat.files > 0;
     await move("review", `Implementer ${impl.ok ? "finished" : `stopped (${impl.stopReason})`}; ${numstat.files} files, +${numstat.added} −${numstat.removed}`);
 
@@ -350,7 +351,7 @@ export class RunManager {
       mcpConfigFile: `/workspace/${WORKSPACE_FILES}/mcp.json`,
     };
     await fs.writeFile(path.join(dir, "job.json"), JSON.stringify(spec, null, 2));
-    const done = await this.deps.worker.run(spec, (e) => void log(e), signal);
+    const done = await this.deps.worker(h.id).run(spec, (e) => void log(e), signal);
     await log(done);
     return done;
   }
@@ -375,17 +376,18 @@ export class RunManager {
   }
 
   /** Gates are whatever the repository itself offers: npm scripts and pytest. */
-  private async runGates(repoDir: string, log: (e: VerstasEvent) => Promise<void>, ticketId: string): Promise<{ name: string; ok: boolean; summary: string }[]> {
+  private async runGates(sessionId: string, repoDir: string, log: (e: VerstasEvent) => Promise<void>, ticketId: string): Promise<{ name: string; ok: boolean; summary: string }[]> {
     const clock = this.deps.now ?? now;
+    const sh = this.deps.shell(sessionId);
     const results: { name: string; ok: boolean; summary: string }[] = [];
-    const pkg = await this.deps.shell.exec(["cat", "package.json"], { workdir: repoDir, timeoutMs: 10_000 });
+    const pkg = await sh.exec(["cat", "package.json"], { workdir: repoDir, timeoutMs: 10_000 });
     const scripts = pkg.code === 0 ? safeScripts(pkg.stdout) : {};
     const candidates: [string, string[]][] = [];
     for (const name of ["typecheck", "lint", "test"]) if (scripts[name]) candidates.push([`npm run ${name}`, ["npm", "run", "--silent", name]]);
-    const py = await this.deps.shell.exec(["sh", "-c", "test -f pyproject.toml -o -f pytest.ini -o -d tests && command -v pytest >/dev/null && echo yes"], { workdir: repoDir, timeoutMs: 10_000 });
+    const py = await sh.exec(["sh", "-c", "test -f pyproject.toml -o -f pytest.ini -o -d tests && command -v pytest >/dev/null && echo yes"], { workdir: repoDir, timeoutMs: 10_000 });
     if (py.stdout.trim() === "yes" && !scripts.test) candidates.push(["pytest", ["python3", "-m", "pytest", "-q"]]);
     for (const [name, cmd] of candidates) {
-      const r = await this.deps.shell.exec(cmd, { workdir: repoDir, timeoutMs: 15 * 60_000 });
+      const r = await sh.exec(cmd, { workdir: repoDir, timeoutMs: 15 * 60_000 });
       const out = (r.stdout + "\n" + r.stderr).trim();
       const summary = out.slice(-300).replace(/\s+/g, " ");
       results.push({ name, ok: r.code === 0, summary });
@@ -394,8 +396,8 @@ export class RunManager {
     return results;
   }
 
-  private async stageAndDiff(repoDir: string): Promise<{ stat: string; numstat: { added: number; removed: number; files: number }; diff: string }> {
-    const sh = this.deps.shell;
+  private async stageAndDiff(sessionId: string, repoDir: string): Promise<{ stat: string; numstat: { added: number; removed: number; files: number }; diff: string }> {
+    const sh = this.deps.shell(sessionId);
     await sh.exec(["git", "add", "-A"], { workdir: repoDir, timeoutMs: 60_000 });
     const stat = await sh.exec(["git", "diff", "--cached", "--stat"], { workdir: repoDir, timeoutMs: 60_000 });
     const num = await sh.exec(["git", "diff", "--cached", "--numstat"], { workdir: repoDir, timeoutMs: 60_000 });
@@ -415,12 +417,13 @@ export class RunManager {
 
   /** Commits everything staged in every repo of the session, inside the container (docs/SANDBOX.md Boundary 5). */
   private async commitInContainer(h: SessionHandle, _ticket: Ticket, message: string): Promise<void> {
+    const sh = this.deps.shell(h.id);
     for (const repo of h.session.repos) {
       const dir = `/workspace/${repo.name}`;
-      await this.deps.shell.exec(["git", "add", "-A"], { workdir: dir, timeoutMs: 60_000 });
-      const staged = await this.deps.shell.exec(["git", "diff", "--cached", "--quiet"], { workdir: dir, timeoutMs: 60_000 });
+      await sh.exec(["git", "add", "-A"], { workdir: dir, timeoutMs: 60_000 });
+      const staged = await sh.exec(["git", "diff", "--cached", "--quiet"], { workdir: dir, timeoutMs: 60_000 });
       if (staged.code === 0) continue; // nothing to commit here
-      await this.deps.shell.exec(["git", "-c", "core.hooksPath=/dev/null", "commit", "-q", "--no-verify", "-m", message], { workdir: dir, timeoutMs: 60_000 });
+      await sh.exec(["git", "-c", "core.hooksPath=/dev/null", "commit", "-q", "--no-verify", "-m", message], { workdir: dir, timeoutMs: 60_000 });
     }
   }
 }

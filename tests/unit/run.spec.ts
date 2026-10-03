@@ -102,8 +102,8 @@ const manager = (s: Awaited<ReturnType<typeof makeSession>>, shell: Shell, worke
   new RunManager({
     hub: s.hub,
     tokens: new RunTokens(),
-    shell,
-    worker,
+    shell: () => shell,
+    worker: () => worker,
     ensureSandbox: async () => undefined,
     agentApiUrl: "http://host.docker.internal:4701/agent",
     rateLimitSleepMs: 20,
