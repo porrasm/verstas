@@ -444,7 +444,10 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
       const t = await h.mutate((docs) => {
         const cur = getTicket(docs.board, tid);
         if (!canTransition(cur.state, state)) throw new BoardError(`Cannot move ${tid} from ${cur.state} to ${state}`, "illegal_transition");
-        return { next: { board: transition(docs.board, tid, state, { by: "user", text: note ?? `Moved to ${state}` }) }, result: getTicket(transition(docs.board, tid, state), tid) };
+        let board = transition(docs.board, tid, state, { by: "user", text: note ?? `Moved to ${state}` });
+        // A user putting a blocked or done ticket back in play starts its attempt count over.
+        if (state === "ready" && (cur.state === "blocked" || cur.state === "done")) board = replaceTicket(board, { ...getTicket(board, tid), attempts: 0 });
+        return { next: { board }, result: getTicket(board, tid) };
       });
       res.json(t);
     }),

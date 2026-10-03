@@ -201,6 +201,7 @@ export const SessionPage = ({ id }: { id: string }) => {
                         {t.diff ? <span className="pill">+{t.diff.added} −{t.diff.removed}</span> : null}
                         {t.state === "waiting" ? <span className="pill sig">{inbox.requests.find((r) => r.ticketId === t.id && r.state === "open")?.detail.kind ?? "waiting"}</span> : null}
                       </div>
+                      {(t.state === "blocked" || t.state === "waiting") && t.notes.length ? <div className="muted small" style={{ marginTop: 5 }}>{t.notes[t.notes.length - 1]!.text.slice(0, 160)}</div> : null}
                     </div>
                   ))}
                 </div>

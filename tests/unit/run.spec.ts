@@ -6,7 +6,7 @@ import { RunTokens } from "../../src/agent-api/agent-api.js";
 import { importBoard, emptyBoard, getTicket, replaceTicket } from "../../src/board/board.js";
 import { saveBoard, writeJsonAtomic } from "../../src/board/store.js";
 import { inboxSchema, now, requestSchema, sessionSchema, type VerstasEvent } from "../../src/core/types.js";
-import { parseVerdict, RunManager, type Shell, type WorkerDone, type WorkerRunner } from "../../src/harness/run.js";
+import { describeBlockers, parseVerdict, RunManager, type Shell, type WorkerDone, type WorkerRunner } from "../../src/harness/run.js";
 import { SessionHub } from "../../src/sessions/hub.js";
 import { sessionPaths } from "../../src/sessions/sessions.js";
 import type { Job } from "../../src/worker/worker.js";
@@ -160,7 +160,7 @@ test("fixable verdicts requeue until the attempt cap, then block", async () => {
     expect(shell.commits).toEqual(["T-1 (wip attempt 1): Schema", "T-1 (blocked): Schema"]);
     // T-2 depends on T-1, which never finished: nothing ready, run pauses on dependencies.
     expect(run.state).toBe("paused");
-    expect(run.pauseReason).toBe("waiting on dependencies");
+    expect(run.pauseReason).toBe("T-2 wait on T-1 (blocked)");
     expect(h.board.tickets[1]!.state).toBe("ready");
   } finally {
     await fs.rm(s.root, { recursive: true, force: true });
@@ -291,4 +291,57 @@ test("parseVerdict reads the first verdict line and a short reason", () => {
   expect(parseVerdict("VERDICT: ok\nClean.\nTested.")).toEqual({ verdict: "ok", reason: "Clean. Tested." });
   expect(parseVerdict("Some preamble\nverdict: Fixable because x")).toEqual({ verdict: "fixable", reason: "because x" });
   expect(parseVerdict("no verdict here")).toBeNull();
+});
+
+test("a ticket naming a repo the session lacks is blocked with an explanation, without a worker", async () => {
+  const s = await makeSession({ reviewer: false });
+  try {
+    const h = await s.hub.get(s.id);
+    await h.mutate((d) => ({ next: { board: { ...d.board, tickets: d.board.tickets.map((t) => (t.id === "T-1" ? { ...t, repo: "capability" } : t)) } } }));
+    const shell = fakeShell();
+    const worker = fakeWorker(s.hub, s.id, async () => ({}));
+    const run = await (await manager(s, shell, worker).start(s.id)).done;
+    const t1 = (await s.hub.get(s.id)).board.tickets[0]!;
+    expect(t1.state).toBe("blocked");
+    expect(t1.notes.at(-1)?.text).toContain('names repo "capability" but this session has: app');
+    expect(worker.jobs).toHaveLength(0);
+    expect(run.state).toBe("paused");
+    expect(run.pauseReason).toBe("T-2 wait on T-1 (blocked)");
+  } finally {
+    await fs.rm(s.root, { recursive: true, force: true });
+  }
+});
+
+test("gates are skipped, not failed, when dependencies are not installed", async () => {
+  const s = await makeSession({ reviewer: false });
+  try {
+    const shell = fakeShell();
+    const base = shell.exec.bind(shell);
+    shell.exec = async (cmd, opts) => (cmd.join(" ") === "test -d node_modules" ? { code: 1, stdout: "", stderr: "" } : base(cmd, opts));
+    const worker = fakeWorker(s.hub, s.id, async (job, hub, id) => {
+      await fileReport(hub, id, job.ticket!, "done");
+      return {};
+    });
+    const events: VerstasEvent[] = [];
+    s.hub.on("event", (e: { event: VerstasEvent }) => events.push(e.event));
+    const run = await (await manager(s, shell, worker).start(s.id)).done;
+    expect(run.state).toBe("finished");
+    const gates = events.filter((e) => e.kind === "gate") as Extract<VerstasEvent, { kind: "gate" }>[];
+    expect(gates.every((g) => g.ok && g.summary.startsWith("skipped"))).toBe(true);
+    expect((await s.hub.get(s.id)).board.tickets.map((t) => t.state)).toEqual(["done", "done"]);
+  } finally {
+    await fs.rm(s.root, { recursive: true, force: true });
+  }
+});
+
+test("describeBlockers groups waiting tickets by what they wait on", () => {
+  const b = importBoard(emptyBoard(), {
+    tickets: [
+      { id: "T-1", title: "a" },
+      { id: "T-2", title: "b", state: "ready", deps: ["T-1"] },
+      { id: "T-3", title: "c", state: "ready", deps: ["T-1"] },
+      { id: "T-4", title: "d", state: "ready", deps: ["T-1", "T-2"] },
+    ],
+  }).board;
+  expect(describeBlockers(b)).toBe("T-2, T-3, T-4 wait on T-1 (backlog); T-4 wait on T-2 (ready)");
 });

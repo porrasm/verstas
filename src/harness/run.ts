@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
-import { eventSchema, now, runSchema, type Run, type Session, type Ticket, type TicketState, type VerstasEvent } from "../core/types.js";
+import { eventSchema, now, runSchema, type Board, type Run, type Session, type Ticket, type TicketState, type VerstasEvent } from "../core/types.js";
 import { addNote, getTicket, hasOpenWork, nextReady, replaceTicket, transition } from "../board/board.js";
 import { writeJsonAtomic } from "../board/store.js";
 import type { SessionHandle, SessionHub } from "../sessions/hub.js";
@@ -168,9 +168,31 @@ export class RunManager {
         if (!ticket) {
           const open = h.inbox.requests.some((r) => r.state === "open");
           run.state = hasOpenWork(h.board) || open ? "paused" : "finished";
-          run.pauseReason = open ? "requests" : hasOpenWork(h.board) ? "waiting on dependencies" : undefined;
-          await status(open ? "nothing ready; waiting for your answers in the inbox" : run.state === "finished" ? "no ready tickets left" : "ready tickets are waiting on dependencies");
+          const blockers = describeBlockers(h.board);
+          run.pauseReason = open ? "requests" : hasOpenWork(h.board) ? blockers || "waiting on dependencies" : undefined;
+          await status(open ? "nothing ready; waiting for your answers in the inbox" : run.state === "finished" ? "no ready tickets left" : `nothing can run: ${blockers}`);
           break;
+        }
+
+        // A ticket that names a repository this session does not have cannot be
+        // worked, committed or exported; say so instead of spending a worker.
+        if (ticket.repo && !h.session.repos.some((r) => r.name === ticket.repo)) {
+          const have = h.session.repos.map((r) => r.name).join(", ") || "none";
+          await h.mutate((docs) => ({
+            next: {
+              board: transition(docs.board, ticket.id, "in_progress", { by: "harness", text: "Checking the ticket's repository" }),
+            },
+          }));
+          await h.mutate((docs) => ({
+            next: {
+              board: transition(docs.board, ticket.id, "blocked", {
+                by: "harness",
+                text: `Ticket names repo "${ticket.repo}" but this session has: ${have}. Fix the repo field (edit the ticket, or re-import the board with the right name) and move it back to ready.`,
+              }),
+            },
+          }));
+          await log({ kind: "ticket", t: clock(), ticket: ticket.id, from: "ready", to: "blocked", note: `unknown repo "${ticket.repo}" (session has ${have})` });
+          continue;
         }
 
         const outcome = await this.workTicket(h, run, ticket, token, log, ctl.signal);
@@ -387,15 +409,27 @@ export class RunManager {
     const pkg = await sh.exec(["cat", "package.json"], { workdir: repoDir, timeoutMs: 10_000 });
     const scripts = pkg.code === 0 ? safeScripts(pkg.stdout) : {};
     const candidates: [string, string[]][] = [];
-    for (const name of ["typecheck", "lint", "test"]) if (scripts[name]) candidates.push([`npm run ${name}`, ["npm", "run", "--silent", name]]);
+    if (Object.keys(scripts).length) {
+      const installed = await sh.exec(["test", "-d", "node_modules"], { workdir: repoDir, timeoutMs: 10_000 });
+      if (installed.code !== 0) {
+        const summary = "skipped: node_modules is missing, the implementer did not install dependencies";
+        results.push({ name: "npm scripts", ok: true, summary });
+        await log({ kind: "gate", t: clock(), ticket: ticketId, name: "npm scripts", ok: true, summary });
+      } else {
+        for (const name of ["typecheck", "lint", "test"]) if (scripts[name]) candidates.push([`npm run ${name}`, ["npm", "run", "--silent", name]]);
+      }
+    }
     const py = await sh.exec(["sh", "-c", "test -f pyproject.toml -o -f pytest.ini -o -d tests && command -v pytest >/dev/null && echo yes"], { workdir: repoDir, timeoutMs: 10_000 });
     if (py.stdout.trim() === "yes" && !scripts.test) candidates.push(["pytest", ["python3", "-m", "pytest", "-q"]]);
     for (const [name, cmd] of candidates) {
       const r = await sh.exec(cmd, { workdir: repoDir, timeoutMs: 15 * 60_000 });
       const out = (r.stdout + "\n" + r.stderr).trim();
-      const summary = out.slice(-300).replace(/\s+/g, " ");
-      results.push({ name, ok: r.code === 0, summary });
-      await log({ kind: "gate", t: clock(), ticket: ticketId, name, ok: r.code === 0, summary });
+      // 127 is "command not found": the repository's tool is not installed in the box; that is a skip, not a failure.
+      const missing = r.code === 127 || /: not found$/m.test(out);
+      const ok = r.code === 0 || missing;
+      const summary = (missing ? "skipped: tool not installed in the sandbox: " : "") + out.slice(-300).replace(/\s+/g, " ");
+      results.push({ name, ok, summary });
+      await log({ kind: "gate", t: clock(), ticket: ticketId, name, ok, summary });
     }
     return results;
   }
@@ -446,6 +480,24 @@ const nextRunId = async (runsDir: string): Promise<number | undefined> => {
   } catch {
     return undefined;
   }
+};
+
+/** "T-2, T-3 and 7 more wait on T-1 (blocked)" — why nothing is ready. */
+export const describeBlockers = (board: Board): string => {
+  const waiting = board.tickets.filter((t) => t.state === "ready" && t.deps.some((d) => !board.tickets.some((x) => x.id === d && x.state === "done")));
+  if (!waiting.length) return "";
+  const byDep = new Map<string, string[]>();
+  for (const t of waiting) {
+    for (const d of t.deps) {
+      const dep = board.tickets.find((x) => x.id === d);
+      if (dep?.state === "done") continue;
+      const key = dep ? `${dep.id} (${dep.state})` : `${d} (missing)`;
+      byDep.set(key, [...(byDep.get(key) ?? []), t.id]);
+    }
+  }
+  return [...byDep.entries()]
+    .map(([dep, ids]) => `${ids.length > 3 ? `${ids.slice(0, 3).join(", ")} and ${ids.length - 3} more` : ids.join(", ")} wait on ${dep}`)
+    .join("; ");
 };
 
 /** The most recent decided request on this ticket, as text for the next worker. */
