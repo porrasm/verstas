@@ -70,10 +70,10 @@ so that a change here shows up as a test diff):
 | --- | --- |
 | `--network verstas-<id>` | A per-session network created with `--internal`: no default route, no gateway, no `host.docker.internal`. The only other member is the proxy. |
 | `--user 1000:1000` | Non-root. There is no sudo in the image. |
-| `--cap-drop ALL` | No Linux capabilities, even the defaults Docker normally keeps. |
+| `--cap-drop ALL` then `--cap-add` CHOWN, DAC_OVERRIDE, FOWNER, FSETID, KILL, SETGID, SETUID, SETPCAP, SETFCAP, NET_BIND_SERVICE, SYS_CHROOT | Docker's default set minus NET_RAW (raw sockets), MKNOD (device nodes) and AUDIT_WRITE. The agent is uid 1000, so these do nothing for it. They exist for root inside the box: apt drops to its `_apt` user, dpkg chowns installed files, installers write into root-owned trees. With `--cap-drop ALL` alone every apt-get as root failed with `setgroups: Operation not permitted`. None of these crosses a namespace; SYS_ADMIN, NET_ADMIN, SYS_PTRACE and SYS_MODULE are never added. |
 | `--security-opt no-new-privileges` | setuid binaries cannot raise privileges. |
 | `--pids-limit 2048`, `--memory <n>`, `--cpus <n>` | A runaway build or fork bomb stays inside the budget you set per session. |
-| `--tmpfs /tmp:size=1g` | Scratch space that disappears with the container. |
+| `--tmpfs /tmp:exec,size=2g`, `TMPDIR=/tmp` | Scratch space that disappears with the container. `exec` because installers and builds run binaries from the temp directory; Docker's default tmpfs is `noexec`. |
 | `-v <session>/workspace:/workspace` | The one read-write bind mount. |
 | `-v <repo>/dist/src/worker:/opt/verstas:ro` | Our worker and board MCP code, read-only, over the image's own copy, so a fix ships with `npm run build` instead of an image rebuild. The agent can read it (it is not secret) and cannot change it. |
 | `--env` only for `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY`, the Claude token and the run's board token | Nothing from your environment leaks in. |
@@ -190,7 +190,9 @@ replayed if the container is ever recreated.
 
 This is the one place agent-written text reaches a shell, and the rule
 that makes it acceptable is that nothing runs until a person has read it.
-Root here is root in a capability-less container, not on your machine (see
+Root here is root in a container with Docker's default capabilities minus
+raw sockets and device nodes, under the default seccomp profile, not on your
+machine (see
 Boundary 2 and the Residual risks), but it does own the container: a
 malicious install script could replace `node`, `git` or `claude` for every
 later worker in that session. Read the script, not just the package names.
@@ -208,7 +210,8 @@ to place) and `question` (a decision). Those run nothing; you act, you
 answer, the ticket resumes when every action is decided.
 
 The container is created once per session and recreated only when its
-image, limits or mounts change; so what you install stays for the session.
+image, limits, mounts or sandbox flags change (the flags are versioned in
+`SANDBOX_VERSION`); so what you install stays for the session.
 
 ## Cleanup
 

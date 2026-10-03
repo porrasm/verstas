@@ -4,6 +4,7 @@ import type { ChildProcess } from "node:child_process";
 import type { Session } from "../core/types.js";
 import type { SessionPaths } from "../sessions/sessions.js";
 import {
+  SANDBOX_VERSION,
   SPEC_LABEL,
   connectProxyToBridgeArgs,
   containerName,
@@ -87,7 +88,7 @@ export const buildSpec = (cfg: SandboxConfig, session: Session, paths: SessionPa
 
 /** What the container was created with; a change means it must be recreated. */
 export const specFingerprint = (spec: SandboxSpec): string =>
-  JSON.stringify([spec.image, spec.limits.memory, spec.limits.cpus, spec.limits.pids, spec.workspaceHostPath, spec.workerDistHostPath, spec.envFileHostPath]);
+  JSON.stringify([SANDBOX_VERSION, spec.image, spec.limits.memory, spec.limits.cpus, spec.limits.pids, spec.workspaceHostPath, spec.workerDistHostPath, spec.envFileHostPath]);
 
 const currentFingerprint = async (docker: DockerRunner, name: string): Promise<string | null> => {
   const r = await docker.run(["inspect", "--format", `{{index .Config.Labels "${SPEC_LABEL}"}}`, name], { allowFailure: true });

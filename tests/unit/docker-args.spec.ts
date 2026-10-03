@@ -41,11 +41,14 @@ test("the session container has exactly the documented boundaries", () => {
   expect(pairs("--network")).toEqual(["verstas-nuppi-mvp"]);
   expect(pairs("--user")).toEqual(["1000:1000"]);
   expect(pairs("--cap-drop")).toEqual(["ALL"]);
+  // Docker's defaults minus NET_RAW, MKNOD and AUDIT_WRITE: enough for root in the box to install packages.
+  expect(pairs("--cap-add")).toEqual(["CHOWN", "DAC_OVERRIDE", "FOWNER", "FSETID", "KILL", "SETGID", "SETUID", "SETPCAP", "SETFCAP", "NET_BIND_SERVICE", "SYS_CHROOT"]);
+  for (const never of ["NET_RAW", "MKNOD", "AUDIT_WRITE", "SYS_ADMIN", "NET_ADMIN", "SYS_PTRACE", "SYS_MODULE", "ALL"]) expect(pairs("--cap-add")).not.toContain(never);
   expect(pairs("--security-opt")).toEqual(["no-new-privileges"]);
   expect(pairs("--pids-limit")).toEqual(["2048"]);
   expect(pairs("--memory")).toEqual(["4g"]);
   expect(pairs("--cpus")).toEqual(["2"]);
-  expect(pairs("--tmpfs")).toEqual(["/tmp:size=1g"]);
+  expect(pairs("--tmpfs")).toEqual(["/tmp:exec,size=2g"]);
   expect(pairs("--restart")).toEqual(["no"]);
   expect(args).toContain("--init");
   // Two bind mounts: the workspace read-write, and our worker code read-only.
@@ -55,9 +58,10 @@ test("the session container has exactly the documented boundaries", () => {
   const envs = pairs("-e");
   expect(envs).toContain("HTTPS_PROXY=http://proxy:3128");
   expect(envs).toContain("NO_PROXY=localhost,127.0.0.1");
+  expect(envs).toContain("TMPDIR=/tmp");
   expect(envs.some((e) => /TOKEN|KEY|SECRET/i.test(e ?? ""))).toBe(false);
   // Nothing that opens the box.
-  for (const forbidden of ["--privileged", "--device", "--cap-add", "--pid", "--ipc", "--userns", "-p", "--publish"]) {
+  for (const forbidden of ["--privileged", "--device", "--pid", "--ipc", "--userns", "-p", "--publish"]) {
     expect(args).not.toContain(forbidden);
   }
   expect(args.some((a) => a.includes("docker.sock"))).toBe(false);

@@ -13,6 +13,36 @@ export const SPEC_LABEL = "verstas.spec";
 export const PROXY_PORT = 3128;
 export const PROXY_IMAGE = "node:22-alpine";
 export const AGENT_API_HOST = "host.docker.internal";
+/**
+ * Bumped whenever the session container's flags change, so a container
+ * created under older rules is recreated on the next start instead of
+ * silently keeping them (it joins the spec fingerprint).
+ */
+export const SANDBOX_VERSION = 2;
+
+/**
+ * Capabilities the session container keeps: Docker's default set minus
+ * NET_RAW (raw sockets, packet spoofing), MKNOD (device nodes) and
+ * AUDIT_WRITE. The agent runs as uid 1000, so these do nothing for it; they
+ * exist so that root inside the box (setup scripts, approved root scripts)
+ * can install packages: apt drops to its _apt user (SETUID/SETGID), dpkg
+ * chowns files (CHOWN/FOWNER), installers write into root-owned trees
+ * (DAC_OVERRIDE). None of them crosses a namespace. docs/SANDBOX.md
+ * Boundary 2 explains the trade.
+ */
+export const SESSION_CAPS = [
+  "CHOWN",
+  "DAC_OVERRIDE",
+  "FOWNER",
+  "FSETID",
+  "KILL",
+  "SETGID",
+  "SETUID",
+  "SETPCAP",
+  "SETFCAP",
+  "NET_BIND_SERVICE",
+  "SYS_CHROOT",
+] as const;
 
 export const networkName = (sessionId: string): string => `verstas-${sessionId}`;
 export const containerName = (sessionId: string): string => `verstas-${sessionId}`;
@@ -120,6 +150,7 @@ export const runSessionArgs = (spec: SandboxSpec): string[] => [
   "1000:1000",
   "--cap-drop",
   "ALL",
+  ...SESSION_CAPS.flatMap((c) => ["--cap-add", c]),
   "--security-opt",
   "no-new-privileges",
   "--pids-limit",
@@ -128,8 +159,9 @@ export const runSessionArgs = (spec: SandboxSpec): string[] => [
   spec.limits.memory,
   "--cpus",
   String(spec.limits.cpus),
+  // exec: installers and builds run binaries from the temp directory.
   "--tmpfs",
-  "/tmp:size=1g",
+  "/tmp:exec,size=2g",
   "--init",
   "--restart",
   "no",
@@ -155,6 +187,8 @@ export const runSessionArgs = (spec: SandboxSpec): string[] => [
   `VERSTAS_AGENT_API=http://${AGENT_API_HOST}:${spec.agentApiPort}/agent`,
   "-e",
   "HOME=/workspace/.home",
+  "-e",
+  "TMPDIR=/tmp",
   spec.image,
   "sleep",
   "infinity",
