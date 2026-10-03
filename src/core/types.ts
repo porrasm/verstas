@@ -273,14 +273,6 @@ export const attachmentSchema = z.object({
 });
 
 export const capsSchema = z.object({
-  /**
-   * "Agentic initialization": before any ticket, a preflight worker checks
-   * the box against the goal and the board (tools, services, network,
-   * permissions), files requests for what is missing, and the run proceeds
-   * only once it reports PREFLIGHT: ok. Surprises happen at the start, not
-   * on ticket seven.
-   */
-  preflight: z.boolean().default(false),
   workerMinutes: z.number().int().min(1).max(600).default(25),
   workerTurns: z.number().int().min(1).max(500).default(60),
   runTickets: z.number().int().min(1).max(1000).default(40),
@@ -327,9 +319,24 @@ export const rootScriptRecordSchema = z.object({
   requestId: z.string().optional(),
 });
 
+export const readinessSchema = z.object({
+  verdict: z.enum(["ready", "needs"]),
+  at: z.string(),
+  summary: z.string().max(4000).default(""),
+  /** One line per requirement as the setup worker checked it. */
+  checks: z.array(z.object({ text: z.string().max(1000), ok: z.boolean() })).max(60).default([]),
+  /** Set when you confirmed a "ready" verdict; the gate is open from then on. */
+  confirmedAt: z.string().optional(),
+});
+export type Readiness = z.infer<typeof readinessSchema>;
+
+/** Tickets wait for the environment: requirements are set and nobody confirmed the box meets them. */
+export const needsSetup = (s: { requirements: string; readiness?: Readiness }): boolean => Boolean(s.requirements.trim()) && !s.readiness?.confirmedAt;
+
 export const sessionStateSchema = z.enum([
   "created", // workspace built, no run yet
-  "checking", // preflight worker running (caps.preflight)
+  "setup", // requirements are set and the environment is not confirmed ready; tickets cannot run
+  "checking", // the setup worker is running
   "planning", // planner worker running
   "running",
   "paused", // by you, or by a rate limit / size check
@@ -358,8 +365,15 @@ export const sessionSchema = z.object({
   setupScripts: z.array(sessionSetupScriptSchema).default([]),
   /** Results of the last setup run, one per script, in order. Empty until the container was first created. */
   setup: z.array(setupResultSchema).default([]),
-  /** Outcome of the last preflight check (caps.preflight). */
-  preflight: z.object({ ok: z.boolean(), at: z.string(), summary: z.string().max(4000) }).optional(),
+  /**
+   * Session requirements: what the box must be able to do before any ticket
+   * runs ("Postgres 17 reachable with the schema migrated; the e2e suite
+   * runs"). Empty means no setup phase. When set, a setup worker makes the
+   * box meet them and reports; tickets run only after you confirm.
+   */
+  requirements: z.string().max(20_000).default(""),
+  /** The setup worker's last verdict on the requirements, and whether you confirmed it. */
+  readiness: readinessSchema.optional(),
   /** Per-session auto-approval rules (P2); present in the schema so files stay forward-compatible. */
   preapprove: z
     .object({
@@ -399,7 +413,7 @@ export type Run = z.infer<typeof runSchema>;
  * one vendor's format.
  */
 export const eventSchema = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("text"), t: z.string(), ticket: ticketIdSchema.optional(), role: z.enum(["implementer", "reviewer", "planner", "preflight"]).optional(), text: z.string() }),
+  z.object({ kind: z.literal("text"), t: z.string(), ticket: ticketIdSchema.optional(), role: z.enum(["implementer", "reviewer", "planner", "setup"]).optional(), text: z.string() }),
   z.object({ kind: z.literal("tool_use"), t: z.string(), ticket: ticketIdSchema.optional(), tool: z.string(), summary: z.string() }),
   z.object({ kind: z.literal("tool_result"), t: z.string(), ticket: ticketIdSchema.optional(), tool: z.string(), ok: z.boolean(), summary: z.string() }),
   z.object({ kind: z.literal("status"), t: z.string(), ticket: ticketIdSchema.optional(), text: z.string() }),
@@ -415,7 +429,7 @@ export const eventSchema = z.discriminatedUnion("kind", [
     kind: z.literal("worker_done"),
     t: z.string(),
     ticket: ticketIdSchema.optional(),
-    role: z.enum(["implementer", "reviewer", "planner", "preflight"]),
+    role: z.enum(["implementer", "reviewer", "planner", "setup"]),
     ok: z.boolean(),
     stopReason: z.string(),
     rateLimited: z.boolean(),

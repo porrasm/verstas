@@ -6,7 +6,7 @@ import { RunTokens } from "../../src/agent-api/agent-api.js";
 import { importBoard, emptyBoard, getTicket, replaceTicket } from "../../src/board/board.js";
 import { saveBoard, writeJsonAtomic } from "../../src/board/store.js";
 import { inboxSchema, now, requestSchema, sessionSchema, type VerstasEvent } from "../../src/core/types.js";
-import { describeBlockers, parsePreflight, parseVerdict, RunManager, type Shell, type WorkerDone, type WorkerRunner } from "../../src/harness/run.js";
+import { describeBlockers, parseSetup, parseVerdict, RunManager, type Shell, type WorkerDone, type WorkerRunner } from "../../src/harness/run.js";
 import { SessionHub } from "../../src/sessions/hub.js";
 import { sessionPaths } from "../../src/sessions/sessions.js";
 import type { Job } from "../../src/worker/worker.js";
@@ -17,7 +17,7 @@ import type { Job } from "../../src/worker/worker.js";
  * loop's decisions: board moves, commit messages, run state.
  */
 
-const makeSession = async (opts: { reviewer?: boolean; attempts?: number; preflight?: boolean } = {}) => {
+const makeSession = async (opts: { reviewer?: boolean; attempts?: number; requirements?: string } = {}) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "verstas-run-"));
   const id = "2026-10-03-run";
   const paths = sessionPaths(root, id);
@@ -31,7 +31,8 @@ const makeSession = async (opts: { reviewer?: boolean; attempts?: number; prefli
       goal: "g",
       createdAt: now(),
       repos: [{ name: "app", sourcePath: "/x", branch: "main", runBranch: `verstas/${id}` }],
-      caps: { reviewer: opts.reviewer ?? true, ticketAttempts: opts.attempts ?? 2, runTickets: 10, preflight: opts.preflight ?? false },
+      requirements: opts.requirements ?? "",
+      caps: { reviewer: opts.reviewer ?? true, ticketAttempts: opts.attempts ?? 2, runTickets: 10 },
     }),
   );
   await saveBoard(paths.dir, importBoard(emptyBoard("g"), { tickets: [{ id: "T-1", title: "Schema", state: "ready", repo: "app" }, { id: "T-2", title: "Engine", state: "ready", deps: ["T-1"] }] }).board);
@@ -342,55 +343,79 @@ test("describeBlockers groups waiting tickets by what they wait on", () => {
   expect(describeBlockers(b)).toBe("T-2, T-3, T-4 wait on T-1 (backlog); T-4 wait on T-2 (ready)");
 });
 
-test("preflight: a blocked verdict with a request parks the run before any ticket; an ok verdict lets work start", async () => {
-  const s = await makeSession({ reviewer: false, preflight: true });
+test("setup phase: work is refused until the box is confirmed; needs parks on its request, ready waits for you", async () => {
+  const s = await makeSession({ reviewer: false, requirements: "Postgres 17 reachable\nthe e2e suite runs" });
   try {
     const shell = fakeShell();
     let calls = 0;
+    const prompts: string[] = [];
     const worker = fakeWorker(s.hub, s.id, async (job, hub, id) => {
       calls++;
-      if (job.role === "preflight" && calls === 1) {
+      if (job.role === "setup") prompts.push(await fs.readFile(job.promptFile.replace("/workspace", s.paths.workspace), "utf8"));
+      if (job.role === "setup" && calls === 1) {
         const h = await hub.get(id);
-        await h.mutate((d) => ({ next: { inbox: { ...d.inbox, requests: [...d.inbox.requests, requestSchema.parse({ id: "R-1", summary: "the tests need a database", actions: [{ id: "a1", detail: { kind: "root_script", script: "apt-get install -y postgresql" } }], createdAt: now() })] } } }));
-        return { text: "PREFLIGHT: blocked\nPostgres is missing; filed R-1." };
+        await h.mutate((d) => ({ next: { inbox: { ...d.inbox, requests: [...d.inbox.requests, requestSchema.parse({ id: "R-1", summary: "the e2e suite needs the Playwright CDN", actions: [{ id: "a1", detail: { kind: "pack", pack: "playwright" } }], createdAt: now() })] } } }));
+        return { text: "SETUP: needs\n- [x] Postgres 17 reachable (svc pg, psql -c 'select 1')\n- [ ] the e2e suite runs (browser download refused)\nFiled R-1." };
       }
-      if (job.role === "preflight") return { text: "PREFLIGHT: ok\nEverything the board needs is present." };
+      if (job.role === "setup") return { text: "SETUP: ready\n- [x] Postgres 17 reachable (psql)\n- [x] the e2e suite runs (12 passed)\nAll set." };
       await fileReport(hub, id, job.ticket!, "done");
       return {};
     });
     const mgr = manager(s, shell, worker);
-    const run1 = await (await mgr.start(s.id)).done;
+    await expect(mgr.start(s.id)).rejects.toThrow(/Set up environment/);
+
+    const run1 = await (await mgr.start(s.id, { setup: true })).done;
     expect(run1.state).toBe("paused");
     expect(run1.pauseReason).toBe("requests");
     let h = await s.hub.get(s.id);
-    expect(h.session.preflight).toMatchObject({ ok: false });
+    expect(h.session.readiness).toMatchObject({ verdict: "needs", checks: [{ ok: true, text: "Postgres 17 reachable (svc pg, psql -c 'select 1')" }, { ok: false, text: "the e2e suite runs (browser download refused)" }] });
     expect(h.session.state).toBe("waiting");
     expect(h.board.tickets.every((t) => t.state === "ready")).toBe(true); // nothing touched
-    expect(worker.jobs.map((j) => j.role)).toEqual(["preflight"]);
+    expect(prompts[0]).toContain("Postgres 17 reachable");
 
-    // The user approves; the next run checks again and then works.
-    await h.mutate((d) => ({ next: { inbox: { ...d.inbox, requests: d.inbox.requests.map((r) => ({ ...r, state: "resolved" as const, answer: "installed", decidedAt: now(), actions: r.actions.map((a) => ({ ...a, state: "approved" as const, outcome: "ran as root, exit 0" })) })) } } }));
-    const run2 = await (await mgr.start(s.id)).done;
+    // You answer; the next setup run sees the outcome and reports ready.
+    await h.mutate((d) => ({ next: { inbox: { ...d.inbox, requests: d.inbox.requests.map((r) => ({ ...r, state: "resolved" as const, decidedAt: now(), actions: r.actions.map((a) => ({ ...a, state: "approved" as const, outcome: "allowed cdn.playwright.dev" })) })) } } }));
+    const run2 = await (await mgr.start(s.id, { setup: true })).done;
     expect(run2.state).toBe("finished");
     h = await s.hub.get(s.id);
-    expect(h.session.preflight).toMatchObject({ ok: true });
-    expect(worker.jobs.map((j) => j.role)).toEqual(["preflight", "preflight", "implementer", "implementer"]);
-    expect(worker.jobs[1]!.role).toBe("preflight");
-    const prompt = await fs.readFile(path.join(s.paths.workspace, ".verstas", "prompt.md"), "utf8").catch(() => "");
-    expect(prompt).toBeTruthy();
-    // A third run does not check again.
-    await h.mutate((d) => ({ next: { board: { ...d.board, tickets: d.board.tickets.map((t) => ({ ...t, state: "ready" as const, deps: [] })) } } }));
-    await (await mgr.start(s.id)).done;
-    expect(worker.jobs.filter((j) => j.role === "preflight")).toHaveLength(2);
+    expect(h.session.readiness).toMatchObject({ verdict: "ready" });
+    expect(h.session.state).toBe("setup"); // ready, but not confirmed
+    expect(prompts[1]).toContain("allowed cdn.playwright.dev");
+    await expect(mgr.start(s.id)).rejects.toThrow(/confirm it/);
+
+    // Confirmed: tickets run, and every worker gets the environment description.
+    await fs.writeFile(path.join(s.paths.notes, "env.md"), "# Environment\n- postgres: svc pg, port 5432\n");
+    await h.mutate((d) => ({ next: { session: { ...d.session, readiness: { ...d.session.readiness!, confirmedAt: now() } } } }));
+    const run3 = await (await mgr.start(s.id)).done;
+    expect(run3.state).toBe("finished");
+    expect(worker.jobs.map((j) => j.role)).toEqual(["setup", "setup", "implementer", "implementer"]);
+    const implPrompt = await fs.readFile(path.join(s.paths.workspace, ".verstas", "prompt.md"), "utf8");
+    expect(implPrompt).toContain("svc pg, port 5432");
+    expect(await fs.readFile(path.join(s.paths.workspace, "VERSTAS.md"), "utf8")).toContain("the e2e suite runs");
   } finally {
     await fs.rm(s.root, { recursive: true, force: true });
   }
 });
 
-test("parsePreflight reads the verdict line", () => {
-  expect(parsePreflight("PREFLIGHT: ok\nall good\nreally")).toEqual({ ok: true, summary: "all good really" });
-  expect(parsePreflight("Some text\nPREFLIGHT: blocked because x")).toEqual({ ok: false, summary: "because x" });
-  expect(parsePreflight("nothing")).toBeNull();
+test("without requirements there is no setup phase", async () => {
+  const s = await makeSession({ reviewer: false });
+  try {
+    const worker = fakeWorker(s.hub, s.id, async (job, hub, id) => {
+      await fileReport(hub, id, job.ticket!, "done");
+      return {};
+    });
+    const run = await (await manager(s, fakeShell(), worker).start(s.id)).done;
+    expect(run.state).toBe("finished");
+    expect(worker.jobs.every((j) => j.role === "implementer")).toBe(true);
+  } finally {
+    await fs.rm(s.root, { recursive: true, force: true });
+  }
+});
+
+test("parseSetup reads the verdict, the checklist and a summary", () => {
+  expect(parseSetup("SETUP: ready\n- [x] node 22 (node -v)\n* [X] tests pass\nAll good.")).toEqual({ ready: true, checks: [{ ok: true, text: "node 22 (node -v)" }, { ok: true, text: "tests pass" }], summary: "All good." });
+  expect(parseSetup("Preamble\nsetup: needs\n- [ ] redis (not installed)\nFiled R-2.")).toEqual({ ready: false, checks: [{ ok: false, text: "redis (not installed)" }], summary: "Filed R-2." });
+  expect(parseSetup("nothing")).toBeNull();
 });
 
 test("the project brief is put first in every worker prompt, and a brief-only run calls one orientation worker", async () => {
@@ -404,9 +429,9 @@ test("the project brief is put first in every worker prompt, and a brief-only ru
       prompts.push(`${job.role}:` + (await fs.readFile(job.promptFile.replace("/workspace", s.paths.workspace), "utf8")));
       if (job.role === "implementer") await fileReport(hub, id, job.ticket!, "done");
       if (job.role === "reviewer") return { text: "VERDICT: ok" };
-      if (job.role === "preflight") {
+      if (job.role === "setup") {
         await fs.writeFile(path.join(s.paths.notes, "brief.md"), "# Project brief\nrefreshed\n");
-        return { text: "PREFLIGHT: ok\nbrief refreshed" };
+        return { text: "SETUP: ready\nbrief refreshed" };
       }
       return {};
     });
@@ -419,7 +444,7 @@ test("the project brief is put first in every worker prompt, and a brief-only ru
 
     const run = await (await mgr.start(s.id, { brief: true })).done;
     expect(run.state).toBe("finished");
-    expect(worker.jobs.at(-1)?.role).toBe("preflight");
+    expect(worker.jobs.at(-1)?.role).toBe("setup");
     expect(prompts.at(-1)).toContain("# Brief only");
     expect(await fs.readFile(path.join(s.paths.notes, "brief.md"), "utf8")).toContain("refreshed");
     expect((await s.hub.get(s.id)).board.tickets.every((t) => t.state === "done")).toBe(true); // untouched by the brief run

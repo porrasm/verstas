@@ -48,14 +48,18 @@ export type Session = {
   attachments: { name: string; dir: string; bytes: number; skipped: string[] }[];
   allowlist: string[];
   packs: string[];
-  caps: { preflight: boolean; workerMinutes: number; workerTurns: number; runTickets: number; budgetUsd: number; ticketAttempts: number; reviewer: boolean };
+  caps: { workerMinutes: number; workerTurns: number; runTickets: number; budgetUsd: number; ticketAttempts: number; reviewer: boolean };
   limits: { memory: string; cpus: number; pids: number; workspaceMb: number };
   rootScripts: { script: string; cwd?: string; at: string; requestId?: string }[];
   setupScripts: { name: string; description: string; hosts: string[]; note: string; script: string }[];
   setup: { name: string; ok: boolean; code: number; at: string; tail: string }[];
-  preflight?: { ok: boolean; at: string; summary: string };
+  requirements: string;
+  readiness?: Readiness;
   state: string;
 };
+export type Readiness = { verdict: "ready" | "needs"; at: string; summary: string; checks: { text: string; ok: boolean }[]; confirmedAt?: string };
+/** Tickets wait for the environment: requirements set and not confirmed. Mirrors src/core/types.ts. */
+export const needsSetup = (s: { requirements: string; readiness?: Readiness }): boolean => Boolean(s.requirements.trim()) && !s.readiness?.confirmedAt;
 export type NetworkPack = { name: string; title: string; hosts: string[] };
 export type SetupScript = { name: string; description: string; hosts: string[]; note: string; script: string };
 export type Run = { id: number; state: string; startedAt: string; endedAt?: string; currentTicket?: string; ticketsDone: number; cost: { usd?: number }; pauseReason?: string; resumeAt?: string };

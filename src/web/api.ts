@@ -9,6 +9,7 @@ import { z } from "zod";
 import {
   capsSchema,
   limitsSchema,
+  needsSetup,
   now,
   ticketIdSchema,
   ticketImportSchema,
@@ -315,6 +316,7 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
     caps: capsSchema.partial().optional(),
     limits: limitsSchema.partial().optional(),
     board: z.string().optional(),
+    requirements: z.string().max(20_000).optional(),
     plan: z.boolean().default(false),
   });
 
@@ -349,7 +351,9 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
           return { next: { board: r.board }, result: { created: r.created, skipped: r.skipped } };
         });
       }
-      if (input.plan) await d.runs.start(created.session.id, { plan: true });
+      // With requirements, setup starts at once: it is the part that needs you, so it should happen while you are here.
+      if (created.session.requirements.trim()) await d.runs.start(created.session.id, { setup: true });
+      else if (input.plan) await d.runs.start(created.session.id, { plan: true });
       res.status(201).json({ session: created.session, clones: created.clones, extracts: created.extracts, imported });
     }),
   );
@@ -423,10 +427,16 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
   api.post(
     "/sessions/:id/run",
     wrap(async (req, res) => {
-      const { action } = z.object({ action: z.enum(["start", "plan", "brief", "pause", "stop"]) }).parse(req.body);
+      const { action } = z.object({ action: z.enum(["start", "plan", "brief", "setup", "pause", "stop"]) }).parse(req.body);
       const id = param(req, "id");
-      if (action === "start" || action === "plan" || action === "brief") {
-        const ctl = await d.runs.start(id, { plan: action === "plan", brief: action === "brief" });
+      if (action === "start" || action === "plan" || action === "brief" || action === "setup") {
+        let ctl;
+        try {
+          ctl = await d.runs.start(id, { plan: action === "plan", brief: action === "brief", setup: action === "setup" });
+        } catch (e) {
+          res.status(409).json({ error: (e as Error).message });
+          return;
+        }
         res.json({ ok: true, run: ctl.run });
         return;
       }
@@ -457,7 +467,17 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
       const h = await d.hub.get(param(req, "id"));
       const logs: Record<string, string> = {};
       for (const sc of h.session.setupScripts) logs[sc.name] = await fs.readFile(path.join(h.paths.setup, `${sc.name}.log`), "utf8").catch(() => "");
-      res.json({ scripts: h.session.setupScripts.map(({ script, ...meta }) => ({ ...meta, lines: script.split("\n").length })), results: h.session.setup, logs, preflight: h.session.preflight ?? null });
+      const note = (name: string) => fs.readFile(path.join(h.paths.notes, name), "utf8").catch(() => "");
+      res.json({
+        scripts: h.session.setupScripts.map(({ script, ...meta }) => ({ ...meta, lines: script.split("\n").length })),
+        results: h.session.setup,
+        logs,
+        requirements: h.session.requirements,
+        readiness: h.session.readiness ?? null,
+        env: await note("env.md"),
+        recipe: await note("setup.sh"),
+        recipeLog: await fs.readFile(path.join(h.paths.setup, "recipe.log"), "utf8").catch(() => ""),
+      });
     }),
   );
 
@@ -503,12 +523,38 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
     }),
   );
 
-  /** Forget the last preflight verdict so the next run checks again. */
-  api.post(
-    "/sessions/:id/preflight/reset",
+  /**
+   * Set or clear the session requirements. A change reopens the gate: the
+   * last verdict was about the old requirements. Empty requirements mean no
+   * setup phase.
+   */
+  api.put(
+    "/sessions/:id/requirements",
     wrap(async (req, res) => {
+      const { requirements } = z.object({ requirements: z.string().max(20_000) }).parse(req.body);
       const h = await d.hub.get(param(req, "id"));
-      await h.mutate((docs) => ({ next: { session: { ...docs.session, preflight: undefined } } }));
+      const session = await h.mutate((docs) => {
+        const changed = docs.session.requirements.trim() !== requirements.trim();
+        const next = { ...docs.session, requirements: requirements.trim(), readiness: changed ? undefined : docs.session.readiness };
+        const state = needsSetup(next) && !d.runs.status(h.id) ? "setup" : docs.session.state === "setup" ? "created" : docs.session.state;
+        return { next: { session: { ...next, state } }, result: next };
+      });
+      res.json({ ok: true, session });
+    }),
+  );
+
+  /** You confirm the setup worker's "ready" verdict; tickets may run from now on. Optionally starts the work run. */
+  api.post(
+    "/sessions/:id/setup/confirm",
+    wrap(async (req, res) => {
+      const { start } = z.object({ start: z.boolean().default(false) }).parse(req.body ?? {});
+      const h = await d.hub.get(param(req, "id"));
+      if (h.session.readiness?.verdict !== "ready") {
+        res.status(409).json({ error: "The setup worker has not reported the environment ready. Run setup again, or clear the requirements to skip the setup phase." });
+        return;
+      }
+      await h.mutate((docs) => ({ next: { session: { ...docs.session, readiness: { ...docs.session.readiness!, confirmedAt: now() }, state: docs.session.state === "setup" ? "created" : docs.session.state } } }));
+      if (start) await d.runs.start(h.id);
       res.json({ ok: true });
     }),
   );
@@ -844,9 +890,15 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
           board = addNote(board, t.id, "user", `${next.id} resolved${next.answer ? `: ${next.answer.slice(0, 500)}` : ""} (${actions.map((a) => `${a.id} ${a.state}`).join(", ") || "answered"})`);
           if (t.state === "waiting") board = transition(board, t.id, "ready", { by: "harness", text: "Request resolved; requeued" });
         }
-        if (resolved && (session.state === "halted" || session.state === "waiting")) session = { ...session, state: "paused" };
+        if (resolved && (session.state === "halted" || session.state === "waiting")) session = { ...session, state: needsSetup(session) ? "setup" : "paused" };
         return { next: { inbox, board, session }, result: next };
       });
+      // The setup phase keeps going while you answer: once every setup
+      // request is decided, the setup worker runs again with the outcomes.
+      const after = await d.hub.get(h.id);
+      if (result.state === "resolved" && !result.ticketId && needsSetup(after.session) && !after.inbox.requests.some((r) => r.state === "open" && !r.ticketId) && !d.runs.status(h.id)) {
+        await d.runs.start(h.id, { setup: true }).catch((e: Error) => console.warn(`[ui] could not restart setup for ${h.id}: ${e.message}`));
+      }
       res.json({ ok: true, request: result });
     }),
   );

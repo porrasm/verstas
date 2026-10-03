@@ -275,3 +275,19 @@ test("applyBundle creates and updates the feature branch in the real repo withou
     await fs.rm(tmp, { recursive: true, force: true });
   }
 });
+
+test("sessions from before the setup phase migrate: the init-check tick becomes requirements, a passed check counts as confirmed", async () => {
+  const { migrateSession, LEGACY_PREFLIGHT_REQUIREMENTS } = await import("../../src/sessions/sessions.js");
+  const { sessionSchema, needsSetup } = await import("../../src/core/types.js");
+  const base = { id: "2026-10-03-old", name: "old", goal: "g", createdAt: "2026-10-03T10:00:00Z" };
+  const passed = sessionSchema.parse(migrateSession({ ...base, caps: { preflight: true }, preflight: { ok: true, at: "2026-10-03T11:00:00Z", summary: "fine" } }));
+  expect(passed.requirements).toBe(LEGACY_PREFLIGHT_REQUIREMENTS);
+  expect(passed.readiness).toMatchObject({ verdict: "ready", confirmedAt: "2026-10-03T11:00:00Z" });
+  expect(needsSetup(passed)).toBe(false);
+  const failed = sessionSchema.parse(migrateSession({ ...base, caps: { preflight: true }, preflight: { ok: false, at: "2026-10-03T11:00:00Z", summary: "no pg" } }));
+  expect(needsSetup(failed)).toBe(true);
+  const plain = sessionSchema.parse(migrateSession({ ...base, caps: { preflight: false } }));
+  expect(plain.requirements).toBe("");
+  expect(needsSetup(plain)).toBe(false);
+  expect("preflight" in plain.caps).toBe(false);
+});

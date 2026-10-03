@@ -14,7 +14,8 @@ export const NewSessionPage = () => {
   const [packList, setPackList] = useState<NetworkPack[]>([]);
   const [packs, setPacks] = useState<string[]>(["node", "python", "debian", "github"]);
   const [detected, setDetected] = useState<Record<string, string[]>>({});
-  const [caps, setCaps] = useState({ preflight: false, workerMinutes: 25, workerTurns: 60, runTickets: 40, budgetUsd: 50, ticketAttempts: 2, reviewer: true });
+  const [requirements, setRequirements] = useState("");
+  const [caps, setCaps] = useState({ workerMinutes: 25, workerTurns: 60, runTickets: 40, budgetUsd: 50, ticketAttempts: 2, reviewer: true });
   const [scripts, setScripts] = useState<SetupScript[]>([]);
   const [picked, setPicked] = useState<string[]>([]);
   const [copied, setCopied] = useState("");
@@ -104,6 +105,7 @@ export const NewSessionPage = () => {
         model: model.trim() || undefined,
         setupScripts: picked,
         board: board.trim() || undefined,
+        requirements: requirements.trim() || undefined,
       });
       location.hash = `#/s/${encodeURIComponent(r.session.id)}`;
     } catch (e) {
@@ -137,6 +139,15 @@ export const NewSessionPage = () => {
           Goal <span className="help">The planner turns this into tickets. Workers read it on every ticket, so say what done looks like.</span>
           <textarea id="goal" value={goal} onChange={(e) => setGoal(e.target.value)} placeholder="Build the Nuppi desktop app MVP: layout editor, mapping engine, mock MIDI output…" style={{ minHeight: 110 }} />
         </label>
+        <label>
+          Session requirements <span className="help">Optional. What the box must be able to do before any ticket runs, one per line</span>
+          <textarea id="requirements" value={requirements} onChange={(e) => setRequirements(e.target.value)} placeholder={"Postgres 17 reachable, migrations applied\nThe backend and frontend dev servers start\nThe Playwright e2e suite runs"} style={{ minHeight: 80 }} />
+        </label>
+        <div className="small muted">
+          {requirements.trim()
+            ? "An AI sets the environment up right after the session is created: it installs what it can, asks you for the rest, and reports each requirement as met or not. Tickets start only after you confirm."
+            : "Left empty, there is no setup phase: tickets start as soon as you start a run."}
+        </div>
       </section>
 
       <section className="card">
@@ -171,10 +182,7 @@ export const NewSessionPage = () => {
             <strong>{sc.name}</strong> <span className="muted">{sc.description}</span>
           </label>
         ))}
-        <label className="chk" style={{ marginTop: 8 }}>
-          <input type="checkbox" checked={caps.preflight} onChange={(e) => setCaps({ ...caps, preflight: e.target.checked })} />
-          Agentic initialization <span className="muted">(before any ticket, a worker checks the box against the goal and the board, asks for what is missing, and work starts only after it reports ok)</span>
-        </label>
+
       </section>
 
       <section className="card">
@@ -235,7 +243,7 @@ export const NewSessionPage = () => {
       <div className="foot">
         <span className="muted small grow">{busy || (boardInvalid ? "Fix the board before creating the session." : !board.trim() && !goal.trim() ? "Tip: a goal lets the planner draft tickets later; a pasted board starts you with ready tickets." : "")}</span>
         <a className="btn" href="#/">Cancel</a>
-        <button className="pri" onClick={create} disabled={!name.trim() || Boolean(busy) || boardInvalid}>Create session</button>
+        <button className="pri" onClick={create} disabled={!name.trim() || Boolean(busy) || boardInvalid}>{requirements.trim() ? "Create and set up" : "Create session"}</button>
       </div>
     </div>
   );

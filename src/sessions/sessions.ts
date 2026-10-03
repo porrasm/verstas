@@ -100,6 +100,7 @@ export type CreateSessionInput = {
   /** Extra hosts beyond the packs; with no packs given, the whole allowlist (older callers). */
   allowlist?: string[];
   packs?: string[];
+  requirements?: string;
   image: string;
   model?: string;
   setupScripts?: SessionSetupScript[];
@@ -133,6 +134,7 @@ export const createSession = async (root: string, input: CreateSessionInput): Pr
     createdAt: now(),
     image: input.image,
     model: input.model?.trim() || undefined,
+    requirements: input.requirements?.trim() ?? "",
     setupScripts: input.setupScripts ?? [],
     // Packs plus extra hosts; hosts the chosen scripts download from join too.
     packs: input.packs ?? (input.allowlist ? [] : [...DEFAULT_PACKS]),
@@ -187,9 +189,29 @@ export const writeAllowlist = async (paths: SessionPaths, allowlist: readonly st
   await fs.rename(tmp, paths.allowlist);
 };
 
+export const LEGACY_PREFLIGHT_REQUIREMENTS = "The goal and the board can be worked in this box: the tools, services and network hosts the tickets need are present and verified by running them.";
+
+/**
+ * Sessions from before the setup phase: an "agentic initialization" tick
+ * (caps.preflight) becomes generic requirements, and a passed check counts
+ * as confirmed so a running session is not gated after an upgrade.
+ */
+export const migrateSession = (raw: unknown): unknown => {
+  if (!raw || typeof raw !== "object") return raw;
+  const r = { ...(raw as Record<string, unknown>) };
+  const caps = r.caps as Record<string, unknown> | undefined;
+  const pre = r.preflight as { ok?: boolean; at?: string; summary?: string } | undefined;
+  if (r.requirements === undefined && caps?.preflight === true) r.requirements = LEGACY_PREFLIGHT_REQUIREMENTS;
+  if (r.readiness === undefined && pre?.at) {
+    r.readiness = { verdict: pre.ok ? "ready" : "needs", at: pre.at, summary: pre.summary ?? "", checks: [], confirmedAt: pre.ok ? pre.at : undefined };
+  }
+  delete r.preflight;
+  return r;
+};
+
 export const loadSession = async (root: string, id: string): Promise<Session> => {
   const paths = sessionPaths(root, id);
-  return sessionSchema.parse(JSON.parse(await fs.readFile(paths.session, "utf8")));
+  return sessionSchema.parse(migrateSession(JSON.parse(await fs.readFile(paths.session, "utf8"))));
 };
 
 export const saveSession = async (root: string, session: Session): Promise<void> => {

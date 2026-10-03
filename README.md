@@ -53,13 +53,19 @@ Then, in the web app:
    paste are in `docs/examples/scripts/` (Postgres, Chromium). "Copy context for an LLM"
    gives any assistant the facts of the box so it can write the script, or
    a board.
-5. **Agentic initialization** (a tick on the New session form): before any
-   ticket, a worker checks the box against the goal and the board, asks for
-   what is missing, and work starts only after it reports ok. The same
-   worker writes the **project brief** (`notes/brief.md`: verified build
-   and test commands, layout, conventions, traps, where to look), which
-   every later worker gets first; "Refresh brief" on the session page
-   rewrites it without ticket work.
+5. **Session requirements** (optional, on the New session form): what the
+   box must be able to do before any ticket runs ("Postgres 17 reachable,
+   migrations applied; the e2e suite runs"). When set, the session has a
+   **setup phase**, the one place it expects you: a setup worker starts
+   right after creation, installs what it can with sudo, asks you in one
+   request for what it cannot, and runs again once you answer. It reports
+   each requirement as met or not. Tickets cannot run until it says
+   ready and you press **Confirm and start work**; after that the loop runs
+   alone. Left empty, there is no setup phase. The setup worker writes
+   three notes every later worker reads: `notes/brief.md` (the project
+   brief), `notes/env.md` (what is installed, services, verified
+   commands) and `notes/setup.sh` (the recipe that rebuilds the box after
+   the container is recreated).
 6. **Apply to repo** when you want the work: the session page's Work panel
    puts a repository's commits on the branch `verstas/<session>` in your
    real checkout, one commit per ticket, without touching the branch you

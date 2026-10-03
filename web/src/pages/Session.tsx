@@ -11,11 +11,13 @@ import {
   fmtUsd,
   MODEL_CHOICES,
   STATE_LABEL,
+  needsSetup,
   useLive,
   useNow,
   type AgentRequest,
   type Board,
   type Inbox,
+  type Readiness,
   type Run,
   type Sandbox,
   type Session,
@@ -64,7 +66,7 @@ type Tone = "sig" | "good" | "warn" | "quiet" | "info";
 /** One label and colour for the header pill from session state, run state and the live flag. */
 const sessionStatus = (session: Session, run: Run | undefined, active: boolean): { label: string; tone: Tone } => {
   if (active) {
-    if (session.state === "checking") return { label: "init check in progress", tone: "sig" };
+    if (session.state === "checking") return { label: "setting up the environment", tone: "sig" };
     if (session.state === "planning") return { label: "planning", tone: "sig" };
     if (run?.state === "paused") return { label: `pausing · ${PAUSE_REASON[run.pauseReason ?? ""] ?? run.pauseReason ?? ""}`, tone: "sig" };
     return { label: run?.currentTicket ? `working on ${run.currentTicket}` : "running", tone: "sig" };
@@ -75,7 +77,9 @@ const sessionStatus = (session: Session, run: Run | undefined, active: boolean):
     case "finished":
       return { label: "finished", tone: "good" };
     case "halted":
-      return { label: session.preflight && !session.preflight.ok ? "init check failed" : "halted by the agent", tone: "warn" };
+      return { label: needsSetup(session) ? "setup needs attention" : "halted by the agent", tone: "warn" };
+    case "setup":
+      return session.readiness?.verdict === "ready" ? { label: "environment ready · confirm to start", tone: "warn" } : { label: "setup phase", tone: "sig" };
     case "waiting":
       return { label: "waiting for you", tone: "warn" };
     case "paused":
@@ -233,7 +237,9 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
           <h1>{session.name}</h1>
           <span className={`pill ${status.tone}`}>{active ? <span className="dot run" /> : null}{status.label}</span>
           <div className="actions">
-            {!active && <button className="pri" onClick={() => runAction("start")} disabled={Boolean(busy)} title="Work through the ready tickets">Start run</button>}
+            {!active && needsSetup(session) && session.readiness?.verdict === "ready" && <button className="pri" onClick={() => tryAct("confirming", () => api("POST", `${base}/setup/confirm`, { start: true }))} disabled={Boolean(busy)} title="You checked the setup worker's report; tickets may run from now on">Confirm and start work</button>}
+            {!active && needsSetup(session) && <button className={session.readiness?.verdict === "ready" ? "" : "pri"} onClick={() => runAction("setup")} disabled={Boolean(busy)} title="A setup worker makes the box meet the session requirements and reports">{session.readiness ? "Set up again" : "Set up environment"}</button>}
+            {!active && !needsSetup(session) && <button className="pri" onClick={() => runAction("start")} disabled={Boolean(busy)} title="Work through the ready tickets">Start run</button>}
             {!active && <button onClick={() => runAction("plan")} disabled={Boolean(busy)} title="A planner worker reads the goal and adds tickets to the backlog">Plan tickets</button>}
             {active && <button onClick={() => runAction("pause")} disabled={Boolean(busy)} title="Finish the current ticket, then stop">Pause after ticket</button>}
             {active && <button className="warn" onClick={() => runAction("stop")} disabled={Boolean(busy)} title="Stop the worker now; its ticket goes back to ready">Stop now</button>}
@@ -436,25 +442,28 @@ const WorkPanel = ({ session, base, active, done, onExport }: { session: Session
 
 // --- setup and init check -------------------------------------------------------
 
+type SetupInfo = { requirements: string; readiness: Readiness | null; env: string; recipe: string; recipeLog: string; logs: Record<string, string> };
+
 const SetupPanel = ({ session, base, active, onDone }: { session: Session; base: string; active: boolean; onDone: () => Promise<void> }) => {
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
   const [openLog, setOpenLog] = useState<string | null>(null);
-  const [logs, setLogs] = useState<Record<string, string>>({});
+  const [info, setInfo] = useState<SetupInfo | null>(null);
   const [brief, setBrief] = useState<{ text: string; updatedAt: string | null; words: number } | null>(null);
-  const [showBrief, setShowBrief] = useState(false);
+  const [show, setShow] = useState<"" | "brief" | "env" | "recipe" | "sudo">("");
   const [sudo, setSudo] = useState<{ count: number; commands: string[] } | null>(null);
-  const [showSudo, setShowSudo] = useState(false);
+  const [editing, setEditing] = useState<string | null>(null);
   useEffect(() => {
+    api<SetupInfo>("GET", `${base}/setup`).then(setInfo).catch(() => setInfo(null));
     api<{ text: string; updatedAt: string | null; words: number }>("GET", `${base}/brief`).then(setBrief).catch(() => setBrief(null));
     api<{ count: number; commands: string[] }>("GET", `${base}/sudo-log`).then(setSudo).catch(() => setSudo(null));
-  }, [base, session.preflight?.at, active]);
-  const refreshBrief = async () => {
+  }, [base, session.readiness?.at, session.readiness?.confirmedAt, session.requirements, active]);
+  const act = async (fn: () => Promise<unknown>, done?: string) => {
     setBusy(true);
     setMsg("");
     try {
-      await api("POST", `${base}/run`, { action: "brief" });
-      setMsg("Orientation worker started; the brief appears when it finishes.");
+      await fn();
+      if (done) setMsg(done);
     } catch (e) {
       setMsg((e as Error).message);
     } finally {
@@ -462,78 +471,96 @@ const SetupPanel = ({ session, base, active, onDone }: { session: Session; base:
       await onDone();
     }
   };
-  const rerun = async () => {
-    setBusy(true);
-    setMsg("");
-    try {
-      await api("POST", `${base}/setup/rerun`);
-      setMsg("Setup scripts ran again.");
-    } catch (e) {
-      setMsg((e as Error).message);
-    } finally {
-      setBusy(false);
-      await onDone();
-    }
-  };
-  const showLog = async (name: string) => {
-    if (openLog === name) return setOpenLog(null);
-    const r = await api<{ logs: Record<string, string> }>("GET", `${base}/setup`);
-    setLogs(r.logs);
-    setOpenLog(name);
-  };
-  const resetPreflight = async () => {
-    await api("POST", `${base}/preflight/reset`);
-    await onDone();
-  };
+  const saveRequirements = () =>
+    act(async () => {
+      await api("PUT", `${base}/requirements`, { requirements: editing ?? "" });
+      setEditing(null);
+    }, "Requirements saved. A change reopens the setup phase.");
+  const toggle = (k: typeof show) => setShow(show === k ? "" : k);
   const copyContext = async () => {
     const md = await fetch(`/api/context?tail=free&session=${encodeURIComponent(session.id)}`).then((r) => r.text());
     await copyText(md);
     setMsg("Session context copied for an assistant.");
   };
+  const r = session.readiness;
+  const gated = needsSetup(session);
   return (
     <section className="card stack" style={{ gap: 8 }}>
       <div className="row" style={{ justifyContent: "space-between" }}>
-        <h3>Setup</h3>
+        <h3>Environment</h3>
         <button className="quiet sm" onClick={copyContext} title="Markdown describing this box and session, to paste into any assistant">Copy context for an LLM</button>
       </div>
-      {session.setupScripts.map((sc) => {
-        const r = session.setup.find((x) => x.name === sc.name);
-        return (
-          <div key={sc.name} className="small">
-            <span className={`dot ${!r ? "" : r.ok ? "good" : "bad"}`} /> <strong>{sc.name}</strong>{" "}
-            <span className="muted">{!r ? "not run yet (runs when the container is created)" : r.ok ? `ok · ${fmtAgo(r.at)}` : `failed, exit ${r.code} · ${fmtAgo(r.at)}`}</span>{" "}
-            {r && <button className="quiet sm" onClick={() => showLog(sc.name)}>{openLog === sc.name ? "hide log" : "log"}</button>}
-            {openLog === sc.name && <pre className="mono" style={{ whiteSpace: "pre-wrap", maxHeight: 240, overflow: "auto", marginTop: 6 }}>{logs[sc.name] || r?.tail || "(empty)"}</pre>}
+
+      <div className="small">
+        <strong>Requirements</strong>{" "}
+        <span className="muted">{!session.requirements.trim() ? "none: no setup phase, tickets start right away" : !r ? "not checked yet" : r.confirmedAt ? `confirmed ${fmtAgo(r.confirmedAt)}` : r.verdict === "ready" ? `reported ready ${fmtAgo(r.at)}; confirm to start work` : `not met yet · ${fmtAgo(r.at)}`}</span>{" "}
+        {editing === null && <button className="quiet sm" onClick={() => setEditing(session.requirements)} disabled={active}>{session.requirements.trim() ? "edit" : "add"}</button>}
+        {editing !== null ? (
+          <div className="stack" style={{ gap: 6, marginTop: 6 }}>
+            <textarea value={editing} onChange={(e) => setEditing(e.target.value)} placeholder={"Postgres 17 reachable, migrations applied\nThe e2e suite runs"} style={{ minHeight: 80 }} />
+            <div className="row">
+              <button className="pri sm" onClick={saveRequirements} disabled={busy}>Save</button>
+              <button className="sm" onClick={() => setEditing(null)}>Cancel</button>
+              <span className="muted small">Empty means no setup phase.</span>
+            </div>
           </div>
-        );
-      })}
-      {session.setupScripts.length > 0 && (
-        <div className="row">
-          <button className="sm" onClick={rerun} disabled={busy || active} title={active ? "Pause or stop the run first" : "Run every setup script again as root"}>Re-run setup</button>
-          <span className="muted small">{msg}</span>
-        </div>
-      )}
-      <div className="small" style={{ borderTop: "1px solid var(--line)", paddingTop: 8 }}>
-        <span className={`dot ${brief?.text ? "good" : ""}`} /> <strong>Project brief</strong>{" "}
-        <span className="muted">{brief?.text ? `${brief.words} words · ${brief.updatedAt ? fmtAgo(brief.updatedAt) : ""} · every worker reads it first` : "none yet; the orientation worker writes notes/brief.md"}</span>{" "}
-        {brief?.text && <button className="quiet sm" onClick={() => setShowBrief(!showBrief)}>{showBrief ? "hide" : "view"}</button>}{" "}
-        <button className="quiet sm" onClick={refreshBrief} disabled={busy || active} title={active ? "Pause or stop the run first" : "Run an orientation worker that writes or refreshes the brief"}>{brief?.text ? "Refresh brief" : "Write brief"}</button>
-        {showBrief && brief?.text && <pre className="mono" style={{ whiteSpace: "pre-wrap", maxHeight: 360, overflow: "auto", marginTop: 6 }}>{brief.text}</pre>}
+        ) : r?.checks.length ? (
+          <ul className="checks">{r.checks.map((c, i) => <li key={i} className={c.ok ? "ok" : "err"}>{c.ok ? "✓" : "✗"} {c.text}</li>)}</ul>
+        ) : session.requirements.trim() ? (
+          <pre className="mono" style={{ whiteSpace: "pre-wrap", marginTop: 6 }}>{session.requirements}</pre>
+        ) : null}
+        {r?.summary && editing === null && <div className="muted" style={{ marginTop: 4, whiteSpace: "pre-wrap" }}>{r.summary}</div>}
+        {gated && editing === null && (
+          <div className="row" style={{ marginTop: 6 }}>
+            {r?.verdict === "ready" && <button className="pri sm" onClick={() => act(() => api("POST", `${base}/setup/confirm`, { start: false }), "Confirmed. Start a run when you are ready.")} disabled={busy || active}>Confirm environment</button>}
+            <button className="sm" onClick={() => act(() => api("POST", `${base}/run`, { action: "setup" }), "Setup worker started.")} disabled={busy || active}>{r ? "Set up again" : "Set up environment"}</button>
+          </div>
+        )}
+        {!gated && r?.confirmedAt && <button className="quiet sm" style={{ marginTop: 4 }} onClick={() => act(() => api("POST", `${base}/run`, { action: "setup" }), "Setup worker started.")} disabled={busy || active}>Check the environment again</button>}
       </div>
+
       <div className="small" style={{ borderTop: "1px solid var(--line)", paddingTop: 8 }}>
+        <span className={`dot ${info?.env ? "good" : ""}`} /> <strong>env.md</strong> <span className="muted">{info?.env ? "what is installed and how to run it; every worker reads it" : "written by the setup worker"}</span>{" "}
+        {info?.env && <button className="quiet sm" onClick={() => toggle("env")}>{show === "env" ? "hide" : "view"}</button>}
+        {show === "env" && <pre className="mono" style={{ whiteSpace: "pre-wrap", maxHeight: 360, overflow: "auto", marginTop: 6 }}>{info?.env}</pre>}
+      </div>
+      <div className="small">
+        <span className={`dot ${info?.recipe ? "good" : ""}`} /> <strong>setup.sh</strong> <span className="muted">{info?.recipe ? "the recipe that rebuilds the box after a recreate" : "written by the setup worker"}</span>{" "}
+        {info?.recipe && <button className="quiet sm" onClick={() => toggle("recipe")}>{show === "recipe" ? "hide" : "view"}</button>}
+        {show === "recipe" && <pre className="mono" style={{ whiteSpace: "pre-wrap", maxHeight: 360, overflow: "auto", marginTop: 6 }}>{info?.recipe}{info?.recipeLog ? `\n\n--- last replay ---\n${info.recipeLog.slice(-3000)}` : ""}</pre>}
+      </div>
+      <div className="small">
+        <span className={`dot ${brief?.text ? "good" : ""}`} /> <strong>Project brief</strong>{" "}
+        <span className="muted">{brief?.text ? `${brief.words} words · ${brief.updatedAt ? fmtAgo(brief.updatedAt) : ""} · every worker reads it first` : "none yet; the setup worker writes notes/brief.md"}</span>{" "}
+        {brief?.text && <button className="quiet sm" onClick={() => toggle("brief")}>{show === "brief" ? "hide" : "view"}</button>}{" "}
+        <button className="quiet sm" onClick={() => act(() => api("POST", `${base}/run`, { action: "brief" }), "Setup worker started; the brief appears when it finishes.")} disabled={busy || active} title={active ? "Pause or stop the run first" : "Run a setup worker that writes or refreshes the brief"}>{brief?.text ? "Refresh brief" : "Write brief"}</button>
+        {show === "brief" && brief?.text && <pre className="mono" style={{ whiteSpace: "pre-wrap", maxHeight: 360, overflow: "auto", marginTop: 6 }}>{brief.text}</pre>}
+      </div>
+      <div className="small">
         <span className="dot" /> <strong>Run as root</strong>{" "}
         <span className="muted">{sudo?.count ? `${sudo.count} sudo command${sudo.count === 1 ? "" : "s"} by the agent` : "nothing yet"}</span>{" "}
-        {Boolean(sudo?.count) && <button className="quiet sm" onClick={() => setShowSudo(!showSudo)}>{showSudo ? "hide" : "view"}</button>}
-        {showSudo && sudo && <pre className="mono" style={{ whiteSpace: "pre-wrap", maxHeight: 240, overflow: "auto", marginTop: 6 }}>{sudo.commands.join("\n")}</pre>}
+        {Boolean(sudo?.count) && <button className="quiet sm" onClick={() => toggle("sudo")}>{show === "sudo" ? "hide" : "view"}</button>}
+        {show === "sudo" && sudo && <pre className="mono" style={{ whiteSpace: "pre-wrap", maxHeight: 240, overflow: "auto", marginTop: 6 }}>{sudo.commands.join("\n")}</pre>}
       </div>
-      {(session.caps.preflight || session.preflight) && (
+
+      {session.setupScripts.length > 0 && (
         <div className="small" style={{ borderTop: "1px solid var(--line)", paddingTop: 8 }}>
-          <span className={`dot ${!session.preflight ? "" : session.preflight.ok ? "good" : "bad"}`} /> <strong>Init check</strong>{" "}
-          <span className="muted">{!session.caps.preflight ? "off" : !session.preflight ? "runs at the start of the next run" : session.preflight.ok ? `passed · ${fmtAgo(session.preflight.at)}` : `not passed · ${fmtAgo(session.preflight.at)}`}</span>
-          {session.preflight && <div className="muted" style={{ marginTop: 4, whiteSpace: "pre-wrap" }}>{session.preflight.summary}</div>}
-          {session.preflight?.ok && <button className="quiet sm" style={{ marginTop: 4 }} onClick={resetPreflight} disabled={active}>Check again on the next run</button>}
+          <strong>Setup scripts</strong> <span className="muted">from the library, run as root when the container is created</span>
+          {session.setupScripts.map((sc) => {
+            const res = session.setup.find((x) => x.name === sc.name);
+            return (
+              <div key={sc.name}>
+                <span className={`dot ${!res ? "" : res.ok ? "good" : "bad"}`} /> {sc.name}{" "}
+                <span className="muted">{!res ? "not run yet" : res.ok ? `ok · ${fmtAgo(res.at)}` : `failed, exit ${res.code} · ${fmtAgo(res.at)}`}</span>{" "}
+                {res && <button className="quiet sm" onClick={() => setOpenLog(openLog === sc.name ? null : sc.name)}>{openLog === sc.name ? "hide log" : "log"}</button>}
+                {openLog === sc.name && <pre className="mono" style={{ whiteSpace: "pre-wrap", maxHeight: 240, overflow: "auto", marginTop: 6 }}>{info?.logs[sc.name] || res?.tail || "(empty)"}</pre>}
+              </div>
+            );
+          })}
+          <button className="sm" style={{ marginTop: 4 }} onClick={() => act(() => api("POST", `${base}/setup/rerun`), "Setup scripts ran again.")} disabled={busy || active} title={active ? "Pause or stop the run first" : "Run every setup script again as root"}>Re-run setup scripts</button>
         </div>
       )}
+      {msg && <div className="muted small">{msg}</div>}
     </section>
   );
 };

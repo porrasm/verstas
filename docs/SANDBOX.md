@@ -234,6 +234,13 @@ Boundary 2 and the Residual risks), and it owns the container: a
 malicious install could replace `node`, `git` or `claude` for every later
 worker in that session. The session is the unit you throw away.
 
+**The setup recipe**, `notes/setup.sh`, is written by the setup worker and
+replayed when the container is recreated, as the agent user with sudo
+available, logged to `<session>/setup/recipe.log`. It is agent-written text
+that reaches a root-capable shell without a person reading it first; that
+gives the agent nothing it did not already have through sudo, and it never
+runs outside the session container.
+
 **Setup scripts** are the other root path: bash you wrote in the library,
 copied into the session at creation, run once as root with `bash -e` when
 the container is created (and again on recreate or re-run), output logged
