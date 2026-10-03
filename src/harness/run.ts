@@ -2,7 +2,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
 import { eventSchema, now, runSchema, type Board, type Run, type Session, type Ticket, type TicketState, type VerstasEvent } from "../core/types.js";
-import { addNote, getTicket, hasOpenWork, nextReady, replaceTicket, transition } from "../board/board.js";
+import { addNote, getTicket, hasOpenWork, nextReady, replaceTicket, transition, validateRepos } from "../board/board.js";
 import { writeJsonAtomic } from "../board/store.js";
 import type { SessionHandle, SessionHub } from "../sessions/hub.js";
 import type { RunTokens } from "../agent-api/agent-api.js";
@@ -70,6 +70,8 @@ export class RunManager {
   async start(sessionId: string, opts: { plan?: boolean } = {}): Promise<RunControl> {
     if (this.active.has(sessionId)) throw new Error("A run is already active for this session");
     const h = await this.deps.hub.get(sessionId);
+    // Refuse up front rather than discover it ticket by ticket.
+    validateRepos(h.board.tickets, h.session.repos.map((r) => r.name), { ignoreDone: true });
     const id = (await nextRunId(h.paths.runs)) ?? 1;
     const run: Run = runSchema.parse({ id, sessionId, startedAt: (this.deps.now ?? now)(), state: "running" });
     let pauseRequested = false;

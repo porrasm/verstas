@@ -21,7 +21,7 @@ import {
   type Session,
   type Ticket,
 } from "../core/types.js";
-import { addNote, BoardError, exportBoard, getTicket, importBoard, parseBoardPaste, replaceTicket, transition, validateDeps, canTransition } from "../board/board.js";
+import { emptyBoard, addNote, BoardError, exportBoard, getTicket, importBoard, parseBoardPaste, replaceTicket, transition, validateDeps, validateRepos, canTransition } from "../board/board.js";
 import { configSchema, loadConfig, loadSecrets, saveConfig, saveSecrets, verstasHome, workTargetSchema, type Config } from "../config.js";
 import type { SessionHub } from "../sessions/hub.js";
 import { createSession, deleteSessionDir, listSessions, sessionPaths } from "../sessions/sessions.js";
@@ -224,14 +224,21 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
         return { target, branch: r.branch, name: r.name };
       });
       const zips = input.uploads.map((u) => ({ name: u.name, file: path.join(uploadsDir, `${u.id}.zip`) }));
+      // Validate the pasted board against the chosen repositories BEFORE cloning anything.
+      const repoNames = repos.map((r) => r.name ?? r.target.name);
+      const pasted = input.board?.trim() ? parseBoardPaste(input.board) : undefined;
+      if (pasted) {
+        const preview = importBoard(emptyBoard(), pasted, { by: "user", defaultState: "ready" });
+        validateRepos(preview.board.tickets, repoNames);
+      }
       await fs.mkdir(cfg.sessionsRoot, { recursive: true });
       const created = await createSession(cfg.sessionsRoot, { ...input, repos, zips, image: cfg.devboxImage });
       for (const z of zips) await fs.rm(z.file, { force: true });
       let imported: { created: string[]; skipped: { title: string; reason: string }[] } | undefined;
-      if (input.board?.trim()) {
+      if (pasted) {
         const h = await d.hub.get(created.session.id);
         imported = await h.mutate((docs) => {
-          const r = importBoard(docs.board, parseBoardPaste(input.board!), { by: "user", defaultState: "ready" });
+          const r = importBoard(docs.board, pasted, { by: "user", defaultState: "ready" });
           return { next: { board: r.board }, result: { created: r.created, skipped: r.skipped } };
         });
       }
@@ -378,6 +385,7 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
       const parsed = parseBoardPaste(text);
       const result = await h.mutate((docs) => {
         const r = importBoard(docs.board, parsed, { by: "user", defaultState: state });
+        validateRepos(r.board.tickets, docs.session.repos.map((x) => x.name), { ignoreDone: true });
         return { next: { board: r.board }, result: { created: r.created, updated: r.updated, skipped: r.skipped } };
       });
       res.json(result);
@@ -403,6 +411,7 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
       const h = await d.hub.get(param(req, "id"));
       const id = await h.mutate((docs) => {
         const r = importBoard(docs.board, { tickets: [input] }, { by: "user", defaultState: "backlog" });
+        validateRepos(r.board.tickets, docs.session.repos.map((x) => x.name), { ignoreDone: true });
         return { next: { board: r.board }, result: r.created[0] };
       });
       res.status(201).json({ id });
@@ -420,6 +429,7 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
         const next: Ticket = { ...t, ...Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined)), repo: patch.repo === null ? undefined : (patch.repo ?? t.repo), updatedAt: now() } as Ticket;
         const board = replaceTicket(docs.board, next);
         validateDeps(board.tickets);
+        validateRepos([next], docs.session.repos.map((x) => x.name));
         return { next: { board }, result: next };
       });
       res.json(ticket);

@@ -13,7 +13,7 @@ import {
   type Inbox,
   type Ticket,
 } from "../core/types.js";
-import { addNote, agentAddDep, agentSetPriority, BoardError, getTicket, importBoard, replaceTicket } from "../board/board.js";
+import { addNote, agentAddDep, agentSetPriority, BoardError, getTicket, importBoard, replaceTicket, validateRepos } from "../board/board.js";
 import type { SessionHub } from "../sessions/hub.js";
 
 /**
@@ -89,7 +89,7 @@ export const createAgentApi = (hub: SessionHub, tokens: RunTokens): express.Expr
     (req: Request, res: Response) => {
       fn(req as AgentRequestWithRun, res).catch((e: unknown) => {
         if (e instanceof z.ZodError) res.status(400).json({ error: `Invalid input: ${e.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}` });
-        else if (e instanceof BoardError) res.status(e.code === "unknown_ticket" ? 404 : 403).json({ error: e.message });
+        else if (e instanceof BoardError) res.status(e.code === "unknown_ticket" ? 404 : e.code === "unknown_repo" ? 400 : 403).json({ error: e.message });
         else {
           console.error(`[agent] 500 ${req.method} ${req.originalUrl}:`, e);
           res.status(500).json({ error: (e as Error).message });
@@ -124,6 +124,7 @@ export const createAgentApi = (hub: SessionHub, tokens: RunTokens): express.Expr
       const result = await h.mutate((d) => {
         const r = importBoard(d.board, { tickets: [input] }, { by: "agent", role: req.run.role, defaultState: "backlog" });
         if (r.skipped.length) throw new BoardError(r.skipped[0]!.reason, "forbidden_kind");
+        validateRepos(r.board.tickets, d.session.repos.map((x) => x.name), { ignoreDone: true });
         let board = r.board;
         const id = r.created[0]!;
         board = addNote(board, id, "harness", `Created by the ${req.run.role}${req.run.currentTicket ? ` while on ${req.run.currentTicket}` : ""}`);

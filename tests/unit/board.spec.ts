@@ -12,6 +12,7 @@ import {
   parseMarkdownBoard,
   transition,
   validateDeps,
+  validateRepos,
 } from "../../src/board/board.js";
 import { boardSchema, type Board } from "../../src/core/types.js";
 
@@ -143,4 +144,14 @@ test("paste detection accepts JSON objects, JSON arrays and markdown", () => {
   expect(parseBoardPaste('{"tickets":[{"title":"A"}]}').tickets[0]!.title).toBe("A");
   expect(parseBoardPaste('[{"title":"B"}]').tickets[0]!.title).toBe("B");
   expect(parseBoardPaste("## C\nspec").tickets[0]).toMatchObject({ title: "C", spec: "spec" });
+});
+
+test("validateRepos names the offending tickets and the repos the session has", () => {
+  const b = seeded();
+  const withRepos = { ...b, tickets: b.tickets.map((t, i) => ({ ...t, repo: i === 0 ? "app" : "capability" })) };
+  expect(() => validateRepos(withRepos.tickets, ["app"])).toThrow(/T-2, T-3 name repo "capability", but the session's repositories are: app/);
+  expect(() => validateRepos(withRepos.tickets, ["app", "capability"])).not.toThrow();
+  expect(() => validateRepos(b.tickets, [])).not.toThrow(); // no repo field: fine
+  const done = withRepos.tickets.map((t) => ({ ...t, state: "done" as const }));
+  expect(() => validateRepos(done, ["app"], { ignoreDone: true })).not.toThrow();
 });

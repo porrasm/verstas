@@ -293,20 +293,15 @@ test("parseVerdict reads the first verdict line and a short reason", () => {
   expect(parseVerdict("no verdict here")).toBeNull();
 });
 
-test("a ticket naming a repo the session lacks is blocked with an explanation, without a worker", async () => {
+test("a run refuses to start while a live ticket names a repo the session lacks", async () => {
   const s = await makeSession({ reviewer: false });
   try {
     const h = await s.hub.get(s.id);
     await h.mutate((d) => ({ next: { board: { ...d.board, tickets: d.board.tickets.map((t) => (t.id === "T-1" ? { ...t, repo: "capability" } : t)) } } }));
     const shell = fakeShell();
     const worker = fakeWorker(s.hub, s.id, async () => ({}));
-    const run = await (await manager(s, shell, worker).start(s.id)).done;
-    const t1 = (await s.hub.get(s.id)).board.tickets[0]!;
-    expect(t1.state).toBe("blocked");
-    expect(t1.notes.at(-1)?.text).toContain('names repo "capability" but this session has: app');
+    await expect(manager(s, shell, worker).start(s.id)).rejects.toThrow(/T-1 names repo "capability", but the session's repositories are: app/);
     expect(worker.jobs).toHaveLength(0);
-    expect(run.state).toBe("paused");
-    expect(run.pauseReason).toBe("T-2 wait on T-1 (blocked)");
   } finally {
     await fs.rm(s.root, { recursive: true, force: true });
   }

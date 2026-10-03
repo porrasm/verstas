@@ -27,7 +27,8 @@ export class BoardError extends Error {
       | "dep_cycle"
       | "pinned"
       | "forbidden_kind"
-      | "forbidden_move",
+      | "forbidden_move"
+      | "unknown_repo",
   ) {
     super(message);
   }
@@ -144,6 +145,21 @@ export const validateDeps = (tickets: readonly Ticket[]): void => {
     state.set(id, 2);
   };
   for (const t of tickets) visit(t.id, []);
+};
+
+/**
+ * Every ticket that names a repo must name one of the session's. Checked at
+ * session creation, on import, on create and edit, and before a run starts,
+ * so a board can never reference a clone that is not in the workspace.
+ */
+export const validateRepos = (tickets: readonly Pick<Ticket, "id" | "repo" | "state">[], repoNames: readonly string[], opts: { ignoreDone?: boolean } = {}): void => {
+  const bad = tickets.filter((t) => t.repo && !repoNames.includes(t.repo) && !(opts.ignoreDone && t.state === "done"));
+  if (!bad.length) return;
+  const names = [...new Set(bad.map((t) => t.repo))].map((r) => `"${r}"`).join(", ");
+  throw new BoardError(
+    `${bad.map((t) => t.id).join(", ")} name${bad.length === 1 ? "s" : ""} repo ${names}, but the session's repositories are: ${repoNames.join(", ") || "none"}`,
+    "unknown_repo",
+  );
 };
 
 // --- The agent's limited powers --------------------------------------------
