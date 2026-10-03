@@ -45,6 +45,7 @@ export const SessionsPage = ({ status }: { status: Status | null }) => {
                 <a href={`#/s/${encodeURIComponent(s.session.id)}`}><strong>{s.session.name}</strong></a>
                 <div className="muted small">{s.session.goal.slice(0, 120)}</div>
                 <div className="mono muted">{s.session.id}</div>
+                {s.error ? <div className="err small">{s.error}</div> : null}
               </td>
               <td className="mono">{s.session.repos.map((r) => r.name).join(" · ") || "—"}</td>
               <td className="mono small">

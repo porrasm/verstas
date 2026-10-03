@@ -171,9 +171,32 @@ export const saveSession = async (root: string, session: Session): Promise<void>
   await writeJsonAtomic(sessionPaths(root, session.id).session, sessionSchema.parse(session));
 };
 
+/**
+ * Request kinds that existed before the four-kind model (2026-10-03):
+ * install -> root_command, decision/secret -> ask. Applied on load so old
+ * session files keep working; saved back in the new shape on the next write.
+ */
+export const migrateInbox = (raw: unknown): unknown => {
+  if (!raw || typeof raw !== "object") return raw;
+  const r = raw as { requests?: Record<string, unknown>[] };
+  if (!Array.isArray(r.requests)) return raw;
+  const requests = r.requests.map((req) => {
+    const detail = (req.detail ?? {}) as Record<string, unknown>;
+    if (detail.kind === "install") {
+      const packages = Array.isArray(detail.packages) ? detail.packages.map(String).join(" ") : "";
+      const cmd = detail.manager === "apt" ? `apt-get update && apt-get install -y --no-install-recommends ${packages}` : detail.manager === "npm" ? `npm install -g ${packages}` : `pip install --break-system-packages ${packages}`;
+      return { ...req, detail: { kind: "root_command", command: cmd } };
+    }
+    if (detail.kind === "decision") return { ...req, detail: { kind: "ask", what: String(detail.question ?? "") } };
+    if (detail.kind === "secret") return { ...req, detail: { kind: "ask", what: `Place the secret ${String(detail.name ?? "")} in a file under /workspace`, how: String(detail.purpose ?? "") } };
+    return req;
+  });
+  return { ...r, requests };
+};
+
 export const loadInbox = async (root: string, id: string): Promise<Inbox> => {
   try {
-    return inboxSchema.parse(JSON.parse(await fs.readFile(sessionPaths(root, id).inbox, "utf8")));
+    return inboxSchema.parse(migrateInbox(JSON.parse(await fs.readFile(sessionPaths(root, id).inbox, "utf8"))));
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code === "ENOENT") return inboxSchema.parse({});
     throw e;

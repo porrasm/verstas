@@ -46,7 +46,7 @@ export type Session = {
 };
 export type Run = { id: number; state: string; startedAt: string; endedAt?: string; currentTicket?: string; ticketsDone: number; cost: { usd?: number }; pauseReason?: string; resumeAt?: string };
 export type VEvent = { kind: string; t: string; ticket?: string; [k: string]: unknown };
-export type SessionSummary = { session: Session; counts: Record<string, number>; run?: Run; openRequests: number; ideas: number };
+export type SessionSummary = { session: Session; counts: Record<string, number>; run?: Run; openRequests: number; ideas: number; error?: string };
 export type SessionDetail = { session: Session; board: Board; inbox: Inbox; run?: Run; sandbox: { network: boolean; proxy: string; container: string } | null; active: boolean };
 export type Status = { version: string; docker: { ok: boolean; detail: string }; image: boolean; imageName: string; sessionsRoot: string; hasClaudeToken: boolean };
 export type Config = { sessionsRoot: string; workTargets: { name: string; path: string }[]; uiPort: number; agentApiPort: number; devboxImage: string; linuxHost: boolean };

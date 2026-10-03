@@ -15,6 +15,8 @@ import {
   sessionPaths,
 } from "../../src/sessions/sessions.js";
 import { entryProblem, extractZip } from "../../src/sessions/workspace.js";
+import { migrateInbox } from "../../src/sessions/sessions.js";
+import { inboxSchema } from "../../src/core/types.js";
 import { DEFAULT_ALLOWLIST } from "../../src/core/types.js";
 
 const execFileP = promisify(execFile);
@@ -182,4 +184,18 @@ test("entryProblem names each rejection", () => {
 test("sessionPaths validates the id", () => {
   expect(() => sessionPaths("/root", "../x")).toThrow(/Bad session id/);
   expect(sessionPaths("/root", "2026-10-03-a").workspace).toBe("/root/2026-10-03-a/workspace");
+});
+
+test("old request kinds are migrated on load", () => {
+  const old = {
+    requests: [
+      { id: "R-1", detail: { kind: "install", manager: "apt", packages: ["tree", "jq"] }, why: "x", state: "open", createdAt: "2026-10-03T00:00:00.000Z" },
+      { id: "R-2", detail: { kind: "decision", question: "which cc?" }, why: "x", state: "approved", answer: "11", createdAt: "2026-10-03T00:00:00.000Z" },
+      { id: "R-3", detail: { kind: "network", host: "example.com" }, why: "x", state: "open", createdAt: "2026-10-03T00:00:00.000Z" },
+    ],
+  };
+  const inbox = inboxSchema.parse(migrateInbox(old));
+  expect(inbox.requests.map((r) => r.detail.kind)).toEqual(["root_command", "ask", "network"]);
+  expect(inbox.requests[0]!.detail).toMatchObject({ command: "apt-get update && apt-get install -y --no-install-recommends tree jq" });
+  expect(inbox.requests[1]!.detail).toMatchObject({ what: "which cc?" });
 });

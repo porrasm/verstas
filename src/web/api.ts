@@ -197,7 +197,18 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
     "/sessions",
     wrap(async (_req, res) => {
       const sessions = await listSessions(d.getConfig().sessionsRoot);
-      res.json(await Promise.all(sessions.map(summarize)));
+      // One unreadable session must not hide the others: report it as a row with an error.
+      const rows = await Promise.all(
+        sessions.map(async (s) => {
+          try {
+            return await summarize(s);
+          } catch (e) {
+            console.warn(`[ui] session ${s.id} could not be summarised: ${(e as Error).message}`);
+            return { session: s, counts: {}, run: undefined, openRequests: 0, ideas: 0, error: (e as Error).message };
+          }
+        }),
+      );
+      res.json(rows);
     }),
   );
 
