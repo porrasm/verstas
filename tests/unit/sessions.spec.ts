@@ -199,3 +199,27 @@ test("old request kinds are migrated on load", () => {
   expect(inbox.requests[0]!.detail).toMatchObject({ command: "apt-get update && apt-get install -y --no-install-recommends tree jq" });
   expect(inbox.requests[1]!.detail).toMatchObject({ what: "which cc?" });
 });
+
+test("setup scripts are copied into the session and their hosts join the allowlist", async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "verstas-sessions-"));
+  const src = path.join(tmp, "src-repo");
+  await makeSourceRepo(src);
+  const root = path.join(tmp, "sessions");
+  try {
+    const { session, paths } = await createSession(root, {
+      name: "with scripts",
+      goal: "",
+      repos: [{ target: { name: "app", path: src } }],
+      zips: [],
+      image: "i",
+      setupScripts: [{ name: "postgres", description: "", hosts: ["deb.debian.org"], note: "pg at /usr/lib/postgresql", script: "apt-get install -y postgresql\n" }],
+    });
+    expect(session.allowlist).toContain("deb.debian.org");
+    expect(session.allowlist).toContain("api.anthropic.com");
+    expect(session.setupScripts[0]!.name).toBe("postgres");
+    expect(await fs.readFile(path.join(paths.setup, "postgres.sh"), "utf8")).toBe("apt-get install -y postgresql\n");
+    expect(session.setup).toEqual([]);
+  } finally {
+    await fs.rm(tmp, { recursive: true, force: true });
+  }
+});

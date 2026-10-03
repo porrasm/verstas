@@ -18,6 +18,7 @@ import {
   rmNetworkArgs,
   rootCommandArgs,
   runProxyArgs,
+  setupScriptArgs,
   runSessionArgs,
   stopArgs,
   type SandboxSpec,
@@ -166,6 +167,12 @@ export const runInSandbox = (cfg: SandboxConfig, sessionId: string, cmd: readonl
 export const runRootCommand = async (cfg: SandboxConfig, sessionId: string, command: string, cwd?: string): Promise<{ ok: boolean; code: number; output: string }> => {
   const r = await cfg.docker.run(rootCommandArgs(sessionId, command, cwd), { allowFailure: true, timeoutMs: 15 * 60_000 });
   return { ok: r.code === 0, code: r.code, output: (r.stdout + r.stderr).slice(-6000) };
+};
+
+/** Runs one setup script as root (docs/SANDBOX.md Boundary 7); the script is yours, not the agent's. */
+export const runSetupScript = async (cfg: SandboxConfig, sessionId: string, script: string): Promise<{ ok: boolean; code: number; output: string }> => {
+  const r = await cfg.docker.run(setupScriptArgs(sessionId), { input: script, allowFailure: true, timeoutMs: 30 * 60_000 });
+  return { ok: r.code === 0, code: r.code, output: r.stdout + r.stderr };
 };
 
 /** Proxy log lines since a timestamp; the loop turns "denied" lines into events. */

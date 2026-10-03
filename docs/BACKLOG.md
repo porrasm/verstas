@@ -66,6 +66,14 @@ back"; SANDBOX.md Boundary 5 (host git touches only a bundle and your repo).
 
 ## V-03 · Setup scripts  (S)
 
+**Status: done 2026-10-03.** Library under `~/.verstas/scripts/`, "Setup
+scripts" tab, tick at creation, copied into `<session>/setup/`, run as root
+on container creation, logs and results on the session page, re-run
+button, hosts merged into the allowlist, note in VERSTAS.md. Also shipped:
+**agentic initialization** (`caps.preflight`): a preflight worker checks
+the box against goal and board before any ticket, files requests, and the
+run proceeds only after `PREFLIGHT: ok`.
+
 **Why.** Optional and custom dependencies (Chromium, Postgres, Godot, an SDK
 from a zip) without baking everything into the image.
 
@@ -113,6 +121,10 @@ commit and block the ticket if found.
 **Docs.** SANDBOX.md Boundary 6 rewritten.
 
 ## V-05 · "Copy context for an LLM"  (S)
+
+**Status: done 2026-10-03.** `GET /api/context?tail=script|board|free`
+with image facts probed once per image id; buttons on the Setup scripts
+page, the New session board box, and the session's Setup panel.
 
 **Why.** Let any assistant write setup scripts and boards with the facts
 of this box, with no model calls from Verstas.

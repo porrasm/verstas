@@ -3,7 +3,9 @@ import path from "node:path";
 import type { Session } from "../core/types.js";
 import type { SessionHub } from "../sessions/hub.js";
 import type { RunTokens } from "../agent-api/agent-api.js";
-import { buildSpec, ensureSandboxUp, execInSandbox, healSandbox, proxyLogsSince, runInSandbox, runRootCommand, writeEnvFile, type SandboxConfig } from "../sandbox/lifecycle.js";
+import { promises as fs } from "node:fs";
+import { buildSpec, ensureSandboxUp, execInSandbox, healSandbox, proxyLogsSince, runInSandbox, runRootCommand, runSetupScript, writeEnvFile, type SandboxConfig } from "../sandbox/lifecycle.js";
+import { now, type SetupResult } from "../core/types.js";
 import { readWorkerStream, RunManager, type Shell, type WorkerDone, type WorkerRunner } from "./run.js";
 import type { Job } from "../worker/worker.js";
 
@@ -108,12 +110,39 @@ export const ensureSessionSandbox = async (c: RunManagerConfig, session: Session
   await writeEnvFile(envFile, env);
   const h = await c.hub.get(session.id);
   const { recreated } = await ensureSandboxUp(c.sandbox, buildSpec(c.sandbox, session, h.paths, envFile));
+  // Setup scripts run on a fresh container, and also when a previous setup never completed.
+  const setupPending = session.setupScripts.length > 0 && (recreated || session.setup.length === 0 || session.setup.some((r) => !r.ok));
+  if (setupPending) await runSetup(c, session.id);
   if (recreated) {
     for (const rc of session.rootCommands) {
       const r = await runRootCommand(c.sandbox, session.id, rc.command, rc.cwd);
       if (!r.ok) console.warn(`[sandbox ${session.id}] replaying approved root command failed (${r.code}): ${rc.command.slice(0, 120)}`);
     }
   }
+};
+
+/**
+ * Runs the session's setup scripts in order as root, logging each to
+ * <session>/setup/<name>.log and recording the results on the session.
+ * Stops at the first failure and throws, so a run never starts on a
+ * half-set-up box; the UI shows the log.
+ */
+export const runSetup = async (c: RunManagerConfig, sessionId: string): Promise<SetupResult[]> => {
+  const h = await c.hub.get(sessionId);
+  const results: SetupResult[] = [];
+  await h.mutate((d) => ({ next: { session: { ...d.session, setup: [] } } }));
+  for (const sc of h.session.setupScripts) {
+    const t0 = Date.now();
+    const r = await runSetupScript(c.sandbox, sessionId, sc.script);
+    const logFile = `${h.paths.setup}/${sc.name}.log`;
+    await fs.writeFile(logFile, `# ${sc.name} · ${now()} · exit ${r.code} · ${Math.round((Date.now() - t0) / 1000)}s
+${r.output}`);
+    const result: SetupResult = { name: sc.name, ok: r.ok, code: r.code, at: now(), tail: r.output.trim().split("\n").slice(-25).join("\n").slice(-4000) };
+    results.push(result);
+    await h.mutate((d) => ({ next: { session: { ...d.session, setup: [...results] } } }));
+    if (!r.ok) throw new Error(`Setup script "${sc.name}" failed with exit ${r.code}; see setup/${sc.name}.log in the session directory. Fix the script in the library or re-run setup from the session page.`);
+  }
+  return results;
 };
 
 export const createDockerRunManager = (c: RunManagerConfig): RunManager =>

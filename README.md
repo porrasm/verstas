@@ -47,10 +47,18 @@ Then, in the web app:
 3. **Session page**: approve tickets by moving them from backlog to ready,
    start the run, watch the live log, answer requests in the inbox, pause
    or stop at any time.
-4. **Export bundles** when you want the work: one `git fetch` line per
+4. **Setup scripts** (own tab): bash that runs once as root when a
+   session's container is created, for Chromium, Postgres, Godot, an SDK
+   from a zip. Tick them on the New session form. "Copy context for an LLM"
+   gives any assistant the facts of the box so it can write the script, or
+   a board.
+5. **Agentic initialization** (a tick on the New session form): before any
+   ticket, a worker checks the box against the goal and the board, asks for
+   what is missing, and work starts only after it reports ok.
+6. **Export bundles** when you want the work: one `git fetch` line per
    repository is shown. Bundles are pure data; nothing from the repository
    runs on your machine.
-5. **Delete** the session when done. Its containers, network and directory
+7. **Delete** the session when done. Its containers, network and directory
    go with it.
 
 Run `npm run dev` in a terminal that stays open; the host app stops its

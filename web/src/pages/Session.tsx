@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   api,
+  copyText,
   fmtAgo,
   fmtDateTime,
   fmtDuration,
@@ -60,6 +61,7 @@ type Tone = "sig" | "good" | "warn" | "quiet" | "info";
 /** One label and colour for the header pill from session state, run state and the live flag. */
 const sessionStatus = (session: Session, run: Run | undefined, active: boolean): { label: string; tone: Tone } => {
   if (active) {
+    if (session.state === "checking") return { label: "init check in progress", tone: "sig" };
     if (session.state === "planning") return { label: "planning", tone: "sig" };
     if (run?.state === "paused") return { label: `pausing · ${PAUSE_REASON[run.pauseReason ?? ""] ?? run.pauseReason ?? ""}`, tone: "sig" };
     return { label: run?.currentTicket ? `working on ${run.currentTicket}` : "running", tone: "sig" };
@@ -70,7 +72,7 @@ const sessionStatus = (session: Session, run: Run | undefined, active: boolean):
     case "finished":
       return { label: "finished", tone: "good" };
     case "halted":
-      return { label: "halted by the agent", tone: "warn" };
+      return { label: session.preflight && !session.preflight.ok ? "init check failed" : "halted by the agent", tone: "warn" };
     case "waiting":
       return { label: "waiting for you", tone: "warn" };
     case "paused":
@@ -321,6 +323,7 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
           />
         </div>
         <aside className="side">
+          <SetupPanel session={session} base={base} active={active} onDone={refreshRun} />
           <InboxPanel inbox={inbox} onRead={(mid) => tryAct("read", () => api("POST", `${base}/messages/${mid}/read`))} onPromote={(iid) => tryAct("promote", () => api("POST", `${base}/ideas/${iid}/promote`))} onOpenTicket={openTicket} />
           <SessionSettings
             session={session}
@@ -350,6 +353,77 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
         />
       )}
     </div>
+  );
+};
+
+// --- setup and init check -------------------------------------------------------
+
+const SetupPanel = ({ session, base, active, onDone }: { session: Session; base: string; active: boolean; onDone: () => Promise<void> }) => {
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+  const [openLog, setOpenLog] = useState<string | null>(null);
+  const [logs, setLogs] = useState<Record<string, string>>({});
+  if (!session.setupScripts.length && !session.caps.preflight && !session.preflight) return null;
+  const rerun = async () => {
+    setBusy(true);
+    setMsg("");
+    try {
+      await api("POST", `${base}/setup/rerun`);
+      setMsg("Setup scripts ran again.");
+    } catch (e) {
+      setMsg((e as Error).message);
+    } finally {
+      setBusy(false);
+      await onDone();
+    }
+  };
+  const showLog = async (name: string) => {
+    if (openLog === name) return setOpenLog(null);
+    const r = await api<{ logs: Record<string, string> }>("GET", `${base}/setup`);
+    setLogs(r.logs);
+    setOpenLog(name);
+  };
+  const resetPreflight = async () => {
+    await api("POST", `${base}/preflight/reset`);
+    await onDone();
+  };
+  const copyContext = async () => {
+    const md = await fetch(`/api/context?tail=free&session=${encodeURIComponent(session.id)}`).then((r) => r.text());
+    await copyText(md);
+    setMsg("Session context copied for an assistant.");
+  };
+  return (
+    <section className="card stack" style={{ gap: 8 }}>
+      <div className="row" style={{ justifyContent: "space-between" }}>
+        <h3>Setup</h3>
+        <button className="quiet sm" onClick={copyContext} title="Markdown describing this box and session, to paste into any assistant">Copy context for an LLM</button>
+      </div>
+      {session.setupScripts.map((sc) => {
+        const r = session.setup.find((x) => x.name === sc.name);
+        return (
+          <div key={sc.name} className="small">
+            <span className={`dot ${!r ? "" : r.ok ? "good" : "bad"}`} /> <strong>{sc.name}</strong>{" "}
+            <span className="muted">{!r ? "not run yet (runs when the container is created)" : r.ok ? `ok · ${fmtAgo(r.at)}` : `failed, exit ${r.code} · ${fmtAgo(r.at)}`}</span>{" "}
+            {r && <button className="quiet sm" onClick={() => showLog(sc.name)}>{openLog === sc.name ? "hide log" : "log"}</button>}
+            {openLog === sc.name && <pre className="mono" style={{ whiteSpace: "pre-wrap", maxHeight: 240, overflow: "auto", marginTop: 6 }}>{logs[sc.name] || r?.tail || "(empty)"}</pre>}
+          </div>
+        );
+      })}
+      {session.setupScripts.length > 0 && (
+        <div className="row">
+          <button className="sm" onClick={rerun} disabled={busy || active} title={active ? "Pause or stop the run first" : "Run every setup script again as root"}>Re-run setup</button>
+          <span className="muted small">{msg}</span>
+        </div>
+      )}
+      {(session.caps.preflight || session.preflight) && (
+        <div className="small" style={{ borderTop: "1px solid var(--line)", paddingTop: 8 }}>
+          <span className={`dot ${!session.preflight ? "" : session.preflight.ok ? "good" : "bad"}`} /> <strong>Init check</strong>{" "}
+          <span className="muted">{!session.caps.preflight ? "off" : !session.preflight ? "runs at the start of the next run" : session.preflight.ok ? `passed · ${fmtAgo(session.preflight.at)}` : `not passed · ${fmtAgo(session.preflight.at)}`}</span>
+          {session.preflight && <div className="muted" style={{ marginTop: 4, whiteSpace: "pre-wrap" }}>{session.preflight.summary}</div>}
+          {session.preflight?.ok && <button className="quiet sm" style={{ marginTop: 4 }} onClick={resetPreflight} disabled={active}>Check again on the next run</button>}
+        </div>
+      )}
+    </section>
   );
 };
 

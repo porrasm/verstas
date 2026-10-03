@@ -24,21 +24,25 @@ ${session.repos.map((r) => `  - \`/workspace/${r.name}\` (from \`${r.branch}\`)`
 - Network: only these hosts, over HTTPS, through the proxy already set in
   \`HTTPS_PROXY\`: ${session.allowlist.join(", ") || "(none)"}. Anything else
   is refused with 403. Ask with \`request\` kind \`network\` if you need more.
+- Setup scripts the user chose ran once as root when this container was created:
+${session.setupScripts.length ? session.setupScripts.map((x) => `  - ${x.name}: ${x.note || x.description || "(no note)"}`).join("\n") : "  - (none)"}
 - There is no sudo and no Docker. The user is a person with hands: they can
   run a command as root in this container for you (\`request\` kind
   \`root_command\`, e.g. apt-get install), open websites and accounts, place
   a file or a credential in the workspace, or decide something (\`request\`
   kind \`ask\`: say what you need, what they should do, how you will verify).
-  Services you need (a database, a dev server, a Kapula server)
-  you start as ordinary processes in this container; they die with the
-  worker, so start them in your job and do not rely on them across tickets.
+  Services you need (a database, a dev server, a Kapula server) you start
+  as ordinary processes in this container. Background processes outlive
+  the worker that started them and stay up for the whole session, so check
+  with \`ps\` before starting a second copy, and free a port with
+  \`pkill\` or \`fuser -k\` if an earlier worker left a server on it.
 - Caps per worker: ${session.caps.workerMinutes} minutes, ${session.caps.workerTurns} turns, ${session.caps.budgetUsd} USD.
   The harness stops you at a cap; file your report early rather than late.
 - Commits are made by the harness after you finish, one per ticket. Do not
   commit, do not rewrite history, do not create branches.
 `;
 
-export const systemMd = (role: "implementer" | "reviewer" | "planner"): string => {
+export const systemMd = (role: "implementer" | "reviewer" | "planner" | "preflight"): string => {
   const common = `You are one worker in a long-running Verstas session. Read /workspace/VERSTAS.md first.
 
 Rules that apply to every role:
@@ -62,6 +66,11 @@ VERDICT: ok
 VERDICT: fixable
 VERDICT: blocked
 followed by your reasons in a few lines. "fixable" means another implementer attempt with your notes would likely finish it; "blocked" means the ticket as written cannot be done or the change is harmful. Add specific notes with \`board_add_note\`. Do not fix the code yourself.`,
+    preflight: `
+Role: preflight (initialization check). No ticket work. Your job is to find out, before anyone starts, whether this box can do what the goal and the board ask: read /workspace/VERSTAS.md, the goal, the tickets, and enough of each repository to know how it is built, tested and run. Check concretely, by running commands: required tools and versions, services the project needs (databases, browsers, SDKs) and whether they can be started here as processes, network hosts the build or tests will reach, disk and memory headroom, and anything the tickets assume that the sandbox forbids (Docker, root, GUI). For every gap, file ONE request of the right kind (root_command for a package, network for a host, ask for something only the user can do), and write your findings to /workspace/notes/preflight.md. Do not install anything yourself beyond what the agent user may. Your reply must start with exactly one of:
+PREFLIGHT: ok
+PREFLIGHT: blocked
+followed by a short summary: what was checked, what is missing, which requests you filed. "ok" means work can start now with nothing missing; "blocked" means wait for the requests or for the user to change the plan.`,
     planner: `
 Role: planner. Turn the session goal into tickets with \`board_create_ticket\`: small (S) or medium (M) where possible, each with a clear spec, acceptance criteria that a reviewer can check, the repository it touches, and dependencies by id when order matters. You may create feature tickets; keep them within the goal. Prefer ten good tickets over thirty vague ones. When the board already has tickets, add only what is missing and do not duplicate. Reply with a short summary of the plan and stop.`,
   };
@@ -113,6 +122,17 @@ ${diff.length > 60_000 ? diff.slice(0, 60_000) + "\n… (truncated; read the fil
 \`\`\`
 
 Run the tests yourself if the gates did not. Reply starting with VERDICT: ok | fixable | blocked.`;
+
+export const preflightPrompt = (session: Session, board: Board, answers: string[]): string => `# Session goal
+${session.goal || "(no goal given)"}
+
+# Repositories
+${session.repos.map((r) => `- /workspace/${r.name} (branch ${r.branch})`).join("\n") || "- none"}
+
+# Board
+${board.tickets.length ? board.tickets.map((t) => `- ${t.id} [${t.state}] ${t.title} (${t.kind}, ${t.size}${t.repo ? `, ${t.repo}` : ""})${t.spec ? `: ${t.spec.replace(/\s+/g, " ").slice(0, 300)}` : ""}`).join("\n") : "- empty (the planner will draft tickets from the goal after you)"}
+${answers.length ? `\n# Your earlier requests were answered\n${answers.map((a) => `- ${a}`).join("\n")}\n` : ""}
+Check the box against this. Reply starting with PREFLIGHT: ok or PREFLIGHT: blocked.`;
 
 export const plannerPrompt = (session: Session, board: Board): string => `# Session goal
 ${session.goal || "(no goal given; ask with a decision request)"}

@@ -8,6 +8,7 @@ import {
   SESSION_ID_PATTERN,
   type Inbox,
   type Session,
+  type SessionSetupScript,
 } from "../core/types.js";
 import { writeJsonAtomic, saveBoard } from "../board/store.js";
 import { emptyBoard } from "../board/board.js";
@@ -45,6 +46,7 @@ export type SessionPaths = {
   notes: string;
   runs: string;
   exportDir: string;
+  setup: string;
 };
 
 export const sessionPaths = (root: string, id: string): SessionPaths => {
@@ -61,6 +63,7 @@ export const sessionPaths = (root: string, id: string): SessionPaths => {
     notes: path.join(dir, "workspace", "notes"),
     runs: path.join(dir, "runs"),
     exportDir: path.join(dir, "export"),
+    setup: path.join(dir, "setup"),
   };
 };
 
@@ -92,6 +95,7 @@ export type CreateSessionInput = {
   allowlist?: string[];
   image: string;
   model?: string;
+  setupScripts?: SessionSetupScript[];
   caps?: Partial<Session["caps"]>;
   limits?: Partial<Session["limits"]>;
 };
@@ -111,6 +115,7 @@ export const createSession = async (root: string, input: CreateSessionInput): Pr
   await fs.mkdir(paths.notes, { recursive: true });
   await fs.mkdir(paths.runs, { recursive: true });
   await fs.mkdir(paths.exportDir, { recursive: true });
+  await fs.mkdir(paths.setup, { recursive: true });
   // The agent's HOME lives in the workspace so dotfiles it writes stay in the box.
   await fs.mkdir(path.join(paths.workspace, ".home"), { recursive: true });
 
@@ -123,7 +128,9 @@ export const createSession = async (root: string, input: CreateSessionInput): Pr
     createdAt: now(),
     image: input.image,
     model: input.model?.trim() || undefined,
-    allowlist: input.allowlist ?? [...DEFAULT_ALLOWLIST],
+    setupScripts: input.setupScripts ?? [],
+    // Hosts the chosen scripts download from join the allowlist.
+    allowlist: [...new Set([...(input.allowlist ?? [...DEFAULT_ALLOWLIST]), ...(input.setupScripts ?? []).flatMap((x) => x.hosts)])],
     caps: input.caps ?? {},
     limits: input.limits ?? {},
   });
@@ -144,6 +151,8 @@ export const createSession = async (root: string, input: CreateSessionInput): Pr
       extracts.push(ex);
       session.attachments.push({ name: z.name, dir: dirName, bytes: ex.bytes, skipped: ex.skipped });
     }
+    // A copy of each script, readable in the session directory; the container runs the copy.
+    for (const sc of session.setupScripts) await fs.writeFile(path.join(paths.setup, `${sc.name}.sh`), sc.script, { mode: 0o600 });
     await writeJsonAtomic(paths.session, session);
     await saveBoard(paths.dir, emptyBoard(input.goal));
     await writeJsonAtomic(paths.inbox, inboxSchema.parse({}));

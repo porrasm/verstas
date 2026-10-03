@@ -39,11 +39,15 @@ export type Session = {
   repos: { name: string; sourcePath: string; branch: string; runBranch: string }[];
   attachments: { name: string; dir: string; bytes: number; skipped: string[] }[];
   allowlist: string[];
-  caps: { workerMinutes: number; workerTurns: number; runTickets: number; budgetUsd: number; ticketAttempts: number; reviewer: boolean };
+  caps: { preflight: boolean; workerMinutes: number; workerTurns: number; runTickets: number; budgetUsd: number; ticketAttempts: number; reviewer: boolean };
   limits: { memory: string; cpus: number; pids: number; workspaceMb: number };
   rootCommands: { command: string; cwd?: string; at: string; requestId?: string }[];
+  setupScripts: { name: string; description: string; hosts: string[]; note: string; script: string }[];
+  setup: { name: string; ok: boolean; code: number; at: string; tail: string }[];
+  preflight?: { ok: boolean; at: string; summary: string };
   state: string;
 };
+export type SetupScript = { name: string; description: string; hosts: string[]; note: string; script: string };
 export type Run = { id: number; state: string; startedAt: string; endedAt?: string; currentTicket?: string; ticketsDone: number; cost: { usd?: number }; pauseReason?: string; resumeAt?: string };
 export type VEvent = { kind: string; t: string; ticket?: string; [k: string]: unknown };
 export type Totals = { usd: number; runs: number; lastActivityAt: string };
@@ -175,3 +179,17 @@ export const fmtBytes = (n: number): string => (n > 1e9 ? `${(n / 1e9).toFixed(1
 
 /** Models offered in the UI; any other id or alias can be typed. */
 export const MODEL_CHOICES = ["claude-sonnet-5-5", "claude-opus-5-5", "claude-fable-5-1", "claude-haiku-4-5-20251001", "sonnet", "opus", "haiku"];
+
+/** Clipboard write with a fallback for views that refuse it. */
+export const copyText = async (text: string): Promise<void> => {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand("copy");
+    ta.remove();
+  }
+};

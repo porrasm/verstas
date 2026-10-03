@@ -190,6 +190,13 @@ Boundary 2 and the Residual risks), but it does own the container: a
 malicious install script could replace `node`, `git` or `claude` for every
 later worker in that session. Read the command, not just the package name.
 
+**Setup scripts** are the other root path: bash you wrote in the library,
+copied into the session at creation, run once as root with `bash -e` when
+the container is created (and again on recreate or re-run), output logged
+to `<session>/setup/<name>.log`. The agent never writes or edits them; it
+can read the copies. The hosts a script declares join the session
+allowlist, which is the one place a script widens the boundary, visibly.
+
 Everything else a worker needs from a person goes through the plain `ask`
 request: a website to configure, a decision, a credential placed in a file
 under the workspace. Those run nothing; you act, you answer, the ticket

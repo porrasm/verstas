@@ -6,7 +6,7 @@ import { RunTokens } from "../../src/agent-api/agent-api.js";
 import { importBoard, emptyBoard, getTicket, replaceTicket } from "../../src/board/board.js";
 import { saveBoard, writeJsonAtomic } from "../../src/board/store.js";
 import { inboxSchema, now, requestSchema, sessionSchema, type VerstasEvent } from "../../src/core/types.js";
-import { describeBlockers, parseVerdict, RunManager, type Shell, type WorkerDone, type WorkerRunner } from "../../src/harness/run.js";
+import { describeBlockers, parsePreflight, parseVerdict, RunManager, type Shell, type WorkerDone, type WorkerRunner } from "../../src/harness/run.js";
 import { SessionHub } from "../../src/sessions/hub.js";
 import { sessionPaths } from "../../src/sessions/sessions.js";
 import type { Job } from "../../src/worker/worker.js";
@@ -17,7 +17,7 @@ import type { Job } from "../../src/worker/worker.js";
  * loop's decisions: board moves, commit messages, run state.
  */
 
-const makeSession = async (opts: { reviewer?: boolean; attempts?: number } = {}) => {
+const makeSession = async (opts: { reviewer?: boolean; attempts?: number; preflight?: boolean } = {}) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "verstas-run-"));
   const id = "2026-10-03-run";
   const paths = sessionPaths(root, id);
@@ -31,7 +31,7 @@ const makeSession = async (opts: { reviewer?: boolean; attempts?: number } = {})
       goal: "g",
       createdAt: now(),
       repos: [{ name: "app", sourcePath: "/x", branch: "main", runBranch: `verstas/${id}` }],
-      caps: { reviewer: opts.reviewer ?? true, ticketAttempts: opts.attempts ?? 2, runTickets: 10 },
+      caps: { reviewer: opts.reviewer ?? true, ticketAttempts: opts.attempts ?? 2, runTickets: 10, preflight: opts.preflight ?? false },
     }),
   );
   await saveBoard(paths.dir, importBoard(emptyBoard("g"), { tickets: [{ id: "T-1", title: "Schema", state: "ready", repo: "app" }, { id: "T-2", title: "Engine", state: "ready", deps: ["T-1"] }] }).board);
@@ -339,4 +339,55 @@ test("describeBlockers groups waiting tickets by what they wait on", () => {
     ],
   }).board;
   expect(describeBlockers(b)).toBe("T-2, T-3, T-4 wait on T-1 (backlog); T-4 wait on T-2 (ready)");
+});
+
+test("preflight: a blocked verdict with a request parks the run before any ticket; an ok verdict lets work start", async () => {
+  const s = await makeSession({ reviewer: false, preflight: true });
+  try {
+    const shell = fakeShell();
+    let calls = 0;
+    const worker = fakeWorker(s.hub, s.id, async (job, hub, id) => {
+      calls++;
+      if (job.role === "preflight" && calls === 1) {
+        const h = await hub.get(id);
+        await h.mutate((d) => ({ next: { inbox: { ...d.inbox, requests: [...d.inbox.requests, requestSchema.parse({ id: "R-1", detail: { kind: "root_command", command: "apt-get install -y postgresql" }, why: "the tests need a database", createdAt: now() })] } } }));
+        return { text: "PREFLIGHT: blocked\nPostgres is missing; filed R-1." };
+      }
+      if (job.role === "preflight") return { text: "PREFLIGHT: ok\nEverything the board needs is present." };
+      await fileReport(hub, id, job.ticket!, "done");
+      return {};
+    });
+    const mgr = manager(s, shell, worker);
+    const run1 = await (await mgr.start(s.id)).done;
+    expect(run1.state).toBe("paused");
+    expect(run1.pauseReason).toBe("requests");
+    let h = await s.hub.get(s.id);
+    expect(h.session.preflight).toMatchObject({ ok: false });
+    expect(h.session.state).toBe("waiting");
+    expect(h.board.tickets.every((t) => t.state === "ready")).toBe(true); // nothing touched
+    expect(worker.jobs.map((j) => j.role)).toEqual(["preflight"]);
+
+    // The user approves; the next run checks again and then works.
+    await h.mutate((d) => ({ next: { inbox: { ...d.inbox, requests: d.inbox.requests.map((r) => ({ ...r, state: "approved" as const, answer: "installed", decidedAt: now() })) } } }));
+    const run2 = await (await mgr.start(s.id)).done;
+    expect(run2.state).toBe("finished");
+    h = await s.hub.get(s.id);
+    expect(h.session.preflight).toMatchObject({ ok: true });
+    expect(worker.jobs.map((j) => j.role)).toEqual(["preflight", "preflight", "implementer", "implementer"]);
+    expect(worker.jobs[1]!.role).toBe("preflight");
+    const prompt = await fs.readFile(path.join(s.paths.workspace, ".verstas", "prompt.md"), "utf8").catch(() => "");
+    expect(prompt).toBeTruthy();
+    // A third run does not check again.
+    await h.mutate((d) => ({ next: { board: { ...d.board, tickets: d.board.tickets.map((t) => ({ ...t, state: "ready" as const, deps: [] })) } } }));
+    await (await mgr.start(s.id)).done;
+    expect(worker.jobs.filter((j) => j.role === "preflight")).toHaveLength(2);
+  } finally {
+    await fs.rm(s.root, { recursive: true, force: true });
+  }
+});
+
+test("parsePreflight reads the verdict line", () => {
+  expect(parsePreflight("PREFLIGHT: ok\nall good\nreally")).toEqual({ ok: true, summary: "all good really" });
+  expect(parsePreflight("Some text\nPREFLIGHT: blocked because x")).toEqual({ ok: false, summary: "because x" });
+  expect(parsePreflight("nothing")).toBeNull();
 });

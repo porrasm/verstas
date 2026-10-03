@@ -7,7 +7,7 @@ import { writeJsonAtomic } from "../board/store.js";
 import type { SessionHandle, SessionHub } from "../sessions/hub.js";
 import type { RunTokens } from "../agent-api/agent-api.js";
 import { workspaceSizeMb } from "../sessions/sessions.js";
-import { implementerPrompt, mcpConfig, notesIndexMd, plannerPrompt, reviewerPrompt, systemMd, verstasMd } from "./prompts.js";
+import { implementerPrompt, mcpConfig, notesIndexMd, plannerPrompt, preflightPrompt, reviewerPrompt, systemMd, verstasMd } from "./prompts.js";
 import type { Job } from "../worker/worker.js";
 
 /**
@@ -140,8 +140,33 @@ export class RunManager {
       await d.ensureSandbox(h.session, envFile, token);
       await this.writeWorkspaceFiles(h, token);
 
+      // Initialization check (caps.preflight): nothing starts until the box is known to fit the job.
+      let proceed = true;
+      if (h.session.caps.preflight && !h.session.preflight?.ok) {
+        await setSessionState("checking");
+        await status("init check: evaluating the sandbox against the goal and the board");
+        const answers = h.inbox.requests.filter((r) => r.state !== "open" && !r.ticketId).map((r) => `${r.id} (${r.detail.kind}) ${r.state}${r.answer ? `: ${r.answer}` : ""}`);
+        const done = await this.runJob(h, run, { role: "preflight", promptText: preflightPrompt(h.session, h.board, answers) }, log, ctl.signal, token);
+        addCost(run, done.costUsd);
+        await saveRun();
+        const verdict = parsePreflight(done.text);
+        const open = h.inbox.requests.some((r) => r.state === "open");
+        const okNow = Boolean(verdict?.ok) && !open && done.ok;
+        const summary = verdict?.summary || (done.ok ? "no PREFLIGHT line in the reply" : `worker ended with ${done.stopReason}`);
+        await h.mutate((docs) => ({ next: { session: { ...docs.session, preflight: { ok: okNow, at: clock(), summary } } } }));
+        if (okNow) {
+          await status(`init check passed: ${summary.slice(0, 300)}`);
+          await setSessionState("running");
+        } else {
+          proceed = false;
+          run.state = open ? "paused" : "halted";
+          run.pauseReason = open ? "requests" : `init check failed: ${summary.slice(0, 300)}`;
+          await status(open ? `init check needs you: ${summary.slice(0, 300)}` : `init check failed: ${summary.slice(0, 300)}`);
+        }
+      }
+
       // Plan when asked, or when the board is empty.
-      if (opts.plan || h.board.tickets.length === 0) {
+      if (proceed && (opts.plan || h.board.tickets.length === 0)) {
         await setSessionState("planning");
         d.tokens.update(token, { role: "planner", currentTicket: undefined });
         await status("planner: turning the goal into tickets");
@@ -154,7 +179,7 @@ export class RunManager {
       }
 
       let lastDenialCheck = clock();
-      while (!ctl.isStop()) {
+      while (proceed && !ctl.isStop()) {
         if (ctl.isPause()) {
           run.state = "paused";
           run.pauseReason = "user";
@@ -519,6 +544,13 @@ const latestAnswer = (h: SessionHandle, ticketId: string): string | undefined =>
   const r = decided[0];
   if (!r) return undefined;
   return `${r.id} (${r.detail.kind}) was ${r.state}${r.answer ? `: ${r.answer}` : ""}.`;
+};
+
+export const parsePreflight = (text: string): { ok: boolean; summary: string } | null => {
+  const m = /PREFLIGHT:\s*(ok|blocked)\b/i.exec(text);
+  if (!m) return null;
+  const summary = text.slice((m.index ?? 0) + m[0].length).trim().split("\n").filter(Boolean).slice(0, 12).join(" ").slice(0, 2000);
+  return { ok: m[1]!.toLowerCase() === "ok", summary };
 };
 
 export const parseVerdict = (text: string): { verdict: "ok" | "fixable" | "blocked"; reason: string } | null => {

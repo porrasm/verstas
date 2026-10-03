@@ -4,8 +4,9 @@ import { SessionsPage } from "./pages/Sessions";
 import { NewSessionPage } from "./pages/NewSession";
 import { SessionPage } from "./pages/Session";
 import { SettingsPage } from "./pages/Settings";
+import { ScriptsPage } from "./pages/Scripts";
 
-/** Hash routing: #/ sessions, #/new, #/s/<id>, #/s/<id>/t/<ticket>, #/settings. */
+/** Hash routing: #/ sessions, #/new, #/s/<id>, #/s/<id>/t/<ticket>, #/scripts, #/settings. */
 const useRoute = (): string => {
   const [hash, setHash] = useState(location.hash || "#/");
   useEffect(() => {
@@ -30,6 +31,7 @@ export const App = () => {
   const m = /^#\/s\/([^/]+)(?:\/t\/([^/]+))?/.exec(route);
   if (m) page = <SessionPage id={decodeURIComponent(m[1]!)} ticketId={m[2] ? decodeURIComponent(m[2]) : null} />;
   else if (route.startsWith("#/new")) page = <NewSessionPage />;
+  else if (route.startsWith("#/scripts")) page = <ScriptsPage />;
   else if (route.startsWith("#/settings")) page = <SettingsPage status={status} />;
   else page = <SessionsPage status={status} />;
 
@@ -41,6 +43,7 @@ export const App = () => {
         <nav>
           <a href="#/" className={onSessions ? "on" : ""}>Sessions</a>
           <a href="#/new" className={route.startsWith("#/new") ? "on" : ""}>New session</a>
+          <a href="#/scripts" className={route.startsWith("#/scripts") ? "on" : ""}>Setup scripts</a>
           <a href="#/settings" className={route.startsWith("#/settings") ? "on" : ""}>Settings</a>
         </nav>
         <div className="right">

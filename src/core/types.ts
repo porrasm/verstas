@@ -230,6 +230,14 @@ export const attachmentSchema = z.object({
 });
 
 export const capsSchema = z.object({
+  /**
+   * "Agentic initialization": before any ticket, a preflight worker checks
+   * the box against the goal and the board (tools, services, network,
+   * permissions), files requests for what is missing, and the run proceeds
+   * only once it reports PREFLIGHT: ok. Surprises happen at the start, not
+   * on ticket seven.
+   */
+  preflight: z.boolean().default(false),
   workerMinutes: z.number().int().min(1).max(600).default(25),
   workerTurns: z.number().int().min(1).max(500).default(60),
   runTickets: z.number().int().min(1).max(1000).default(40),
@@ -248,6 +256,26 @@ export const limitsSchema = z.object({
 });
 export type Limits = z.infer<typeof limitsSchema>;
 
+/** A setup script copied into the session at creation; runs once as root when the container is created. */
+export const sessionSetupScriptSchema = z.object({
+  name: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/),
+  description: z.string().max(500).default(""),
+  hosts: z.array(z.string()).default([]),
+  note: z.string().max(2000).default(""),
+  script: z.string().min(1).max(200_000),
+});
+export type SessionSetupScript = z.infer<typeof sessionSetupScriptSchema>;
+
+export const setupResultSchema = z.object({
+  name: z.string(),
+  ok: z.boolean(),
+  code: z.number().int(),
+  at: z.string(),
+  /** Last lines of the output, for the UI; the full log is setup/<name>.log. */
+  tail: z.string().max(4000).default(""),
+});
+export type SetupResult = z.infer<typeof setupResultSchema>;
+
 /** A root command the user approved; replayed when the container is recreated. */
 export const rootCommandRecordSchema = z.object({
   command: z.string().min(1).max(4000),
@@ -258,6 +286,7 @@ export const rootCommandRecordSchema = z.object({
 
 export const sessionStateSchema = z.enum([
   "created", // workspace built, no run yet
+  "checking", // preflight worker running (caps.preflight)
   "planning", // planner worker running
   "running",
   "paused", // by you, or by a rate limit / size check
@@ -281,6 +310,11 @@ export const sessionSchema = z.object({
   caps: capsSchema.prefault({}),
   limits: limitsSchema.prefault({}),
   rootCommands: z.array(rootCommandRecordSchema).default([]),
+  setupScripts: z.array(sessionSetupScriptSchema).default([]),
+  /** Results of the last setup run, one per script, in order. Empty until the container was first created. */
+  setup: z.array(setupResultSchema).default([]),
+  /** Outcome of the last preflight check (caps.preflight). */
+  preflight: z.object({ ok: z.boolean(), at: z.string(), summary: z.string().max(4000) }).optional(),
   /** Per-session auto-approval rules (P2); present in the schema so files stay forward-compatible. */
   preapprove: z
     .object({
@@ -327,7 +361,7 @@ export type Run = z.infer<typeof runSchema>;
  * one vendor's format.
  */
 export const eventSchema = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("text"), t: z.string(), ticket: ticketIdSchema.optional(), role: z.enum(["implementer", "reviewer", "planner"]).optional(), text: z.string() }),
+  z.object({ kind: z.literal("text"), t: z.string(), ticket: ticketIdSchema.optional(), role: z.enum(["implementer", "reviewer", "planner", "preflight"]).optional(), text: z.string() }),
   z.object({ kind: z.literal("tool_use"), t: z.string(), ticket: ticketIdSchema.optional(), tool: z.string(), summary: z.string() }),
   z.object({ kind: z.literal("tool_result"), t: z.string(), ticket: ticketIdSchema.optional(), tool: z.string(), ok: z.boolean(), summary: z.string() }),
   z.object({ kind: z.literal("status"), t: z.string(), ticket: ticketIdSchema.optional(), text: z.string() }),
@@ -343,7 +377,7 @@ export const eventSchema = z.discriminatedUnion("kind", [
     kind: z.literal("worker_done"),
     t: z.string(),
     ticket: ticketIdSchema.optional(),
-    role: z.enum(["implementer", "reviewer", "planner"]),
+    role: z.enum(["implementer", "reviewer", "planner", "preflight"]),
     ok: z.boolean(),
     stopReason: z.string(),
     rateLimited: z.boolean(),

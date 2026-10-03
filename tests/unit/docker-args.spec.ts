@@ -5,6 +5,7 @@ import {
   execArgs,
   rootCommandArgs,
   runProxyArgs,
+  setupScriptArgs,
   runSessionArgs,
   type SandboxSpec,
 } from "../../src/sandbox/docker-args.js";
@@ -106,4 +107,8 @@ test("a root command runs as root through sh -c in the given directory", () => {
 test("the spec fingerprint label is written when given", () => {
   const args = runSessionArgs({ ...spec, fingerprint: "abc" });
   expect(args).toContain("verstas.spec=abc");
+});
+
+test("a setup script is fed on stdin to bash -e as root, non-interactive", () => {
+  expect(setupScriptArgs("nuppi-mvp")).toEqual(["exec", "-i", "-u", "root", "-w", "/workspace", "-e", "DEBIAN_FRONTEND=noninteractive", "verstas-nuppi-mvp", "bash", "-e", "-s"]);
 });

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, fmtBytes, MODEL_CHOICES, upload, type Config } from "../api";
+import { api, copyText, fmtBytes, MODEL_CHOICES, upload, type Config, type SetupScript } from "../api";
 
 type RepoPick = { target: string; branch: string; branches: string[]; on: boolean };
 
@@ -11,7 +11,10 @@ export const NewSessionPage = () => {
   const [uploads, setUploads] = useState<{ id: string; name: string; bytes: number }[]>([]);
   const [board, setBoard] = useState("");
   const [allowlist, setAllowlist] = useState("api.anthropic.com\nregistry.npmjs.org\npypi.org\nfiles.pythonhosted.org\ngithub.com\nobjects.githubusercontent.com");
-  const [caps, setCaps] = useState({ workerMinutes: 25, workerTurns: 60, runTickets: 40, budgetUsd: 50, ticketAttempts: 2, reviewer: true });
+  const [caps, setCaps] = useState({ preflight: false, workerMinutes: 25, workerTurns: 60, runTickets: 40, budgetUsd: 50, ticketAttempts: 2, reviewer: true });
+  const [scripts, setScripts] = useState<SetupScript[]>([]);
+  const [picked, setPicked] = useState<string[]>([]);
+  const [copied, setCopied] = useState("");
   const [limits, setLimits] = useState({ memory: "4g", cpus: 2, workspaceMb: 20000 });
   const [plan, setPlan] = useState(false);
   const [model, setModel] = useState("claude-sonnet-5-5");
@@ -30,7 +33,16 @@ export const NewSessionPage = () => {
         setRepos(picks);
       })
       .catch((e: Error) => setErr(e.message));
+    api<SetupScript[]>("GET", "/scripts").then(setScripts).catch(() => setScripts([]));
   }, []);
+
+  const copyBoardContext = async () => {
+    const names = repos.filter((r) => r.on).map((r) => r.target).join(",");
+    const md = await fetch(`/api/context?tail=board&repos=${encodeURIComponent(names)}`).then((r) => r.text());
+    await copyText(md);
+    setCopied("Context copied. Paste it into any assistant with your feature description; paste the JSON it returns into the board box.");
+    setTimeout(() => setCopied(""), 6000);
+  };
 
   const addFiles = async (files: FileList | null) => {
     if (!files) return;
@@ -59,6 +71,7 @@ export const NewSessionPage = () => {
         caps,
         limits,
         model: model.trim() || undefined,
+        setupScripts: picked,
         board: board.trim() || undefined,
         plan,
       });
@@ -120,7 +133,27 @@ export const NewSessionPage = () => {
       </section>
 
       <section className="card">
-        <h3>Board</h3>
+        <h3>Setup scripts</h3>
+        <p className="lead">Run once as root when the container is created, in this order. Their download hosts join the allowlist. Manage them under <a href="#/scripts">Setup scripts</a>.</p>
+        {scripts.length === 0 && <div className="muted small">The library is empty.</div>}
+        {scripts.map((sc) => (
+          <label className="chk" key={sc.name}>
+            <input type="checkbox" checked={picked.includes(sc.name)} onChange={(e) => setPicked(e.target.checked ? [...picked, sc.name] : picked.filter((n) => n !== sc.name))} />
+            <strong>{sc.name}</strong> <span className="muted">{sc.description}</span>
+          </label>
+        ))}
+        <label className="chk" style={{ marginTop: 8 }}>
+          <input type="checkbox" checked={caps.preflight} onChange={(e) => setCaps({ ...caps, preflight: e.target.checked })} />
+          Agentic initialization <span className="muted">(before any ticket, a worker checks the box against the goal and the board, asks for what is missing, and work starts only after it reports ok)</span>
+        </label>
+      </section>
+
+      <section className="card">
+        <div className="row" style={{ justifyContent: "space-between" }}>
+          <h3>Board</h3>
+          <button className="quiet sm" onClick={copyBoardContext} title="Markdown describing this sandbox and the board format, for an assistant to write the tickets">Copy context for an LLM</button>
+        </div>
+        {copied && <div className="small ok">{copied}</div>}
         <p className="lead">Optional. Paste tickets as JSON or markdown (see <code>docs/BOARD.md</code>); they start as ready. Leave empty to let the planner draft them from the goal.</p>
         <textarea id="board" className="mono" value={board} onChange={(e) => setBoard(e.target.value)} placeholder={'{ "tickets": [ { "title": "…", "spec": "…", "acceptance": ["…"] } ] }'} style={{ minHeight: 120 }} />
       </section>

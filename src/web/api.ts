@@ -28,7 +28,9 @@ import { createSession, deleteSessionDir, listSessions, sessionPaths } from "../
 import { removeSandbox, runRootCommand, sandboxStatus, stopSandbox, type SandboxConfig } from "../sandbox/lifecycle.js";
 import { dockerAvailable } from "../sandbox/docker.js";
 import type { RunManager } from "../harness/run.js";
-import { dockerShell, ensureSessionSandbox, type RunManagerConfig } from "../harness/docker-worker.js";
+import { dockerShell, ensureSessionSandbox, runSetup, type RunManagerConfig } from "../harness/docker-worker.js";
+import { deleteScript, getScript, hostsFromScript, listScripts, saveScript, setupScriptSchema } from "../scripts/library.js";
+import { buildContext, probeImage } from "../context/context.js";
 
 /**
  * The UI's API, on 127.0.0.1 only. Everything the agent API refuses lives
@@ -163,6 +165,46 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
     }),
   );
 
+  // --- setup script library ------------------------------------------------------
+
+  api.get(
+    "/scripts",
+    wrap(async (_req, res) => {
+      res.json(await listScripts());
+    }),
+  );
+
+  api.put(
+    "/scripts/:name",
+    wrap(async (req, res) => {
+      const body = setupScriptSchema.parse({ ...req.body, name: param(req, "name") });
+      // Hosts declared in the script header are merged with the ones typed in.
+      const hosts = [...new Set([...body.hosts, ...hostsFromScript(body.script)])];
+      res.json(await saveScript({ ...body, hosts }));
+    }),
+  );
+
+  api.delete(
+    "/scripts/:name",
+    wrap(async (req, res) => {
+      await deleteScript(param(req, "name"));
+      res.json({ ok: true });
+    }),
+  );
+
+  /** Markdown to paste into any assistant. tail = script | board | free; session optional. */
+  api.get(
+    "/context",
+    wrap(async (req, res) => {
+      const tail = z.enum(["script", "board", "free"]).catch("free").parse(req.query.tail);
+      const cfg = d.getConfig();
+      const session = typeof req.query.session === "string" && req.query.session ? (await d.hub.get(req.query.session)).session : null;
+      const repoNames = typeof req.query.repos === "string" ? req.query.repos.split(",").filter(Boolean) : cfg.workTargets.map((w) => w.name);
+      const facts = await probeImage(d.sandbox.docker, session?.image ?? cfg.devboxImage).catch(() => null);
+      res.type("text/markdown").send(buildContext({ tail, config: cfg, facts, scripts: await listScripts(), session, repoNames }));
+    }),
+  );
+
   // --- uploads (zip attachments for a session being created) -----------------
 
   const uploadsDir = path.join(verstasHome(), "uploads");
@@ -228,6 +270,7 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
     uploads: z.array(z.object({ id: z.string().regex(/^[a-f0-9]{16}$/), name: z.string() })).default([]),
     allowlist: z.array(z.string()).optional(),
     model: z.string().max(100).optional(),
+    setupScripts: z.array(z.string()).default([]),
     caps: capsSchema.partial().optional(),
     limits: limitsSchema.partial().optional(),
     board: z.string().optional(),
@@ -252,8 +295,10 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
         const preview = importBoard(emptyBoard(), pasted, { by: "user", defaultState: "ready" });
         validateRepos(preview.board.tickets, repoNames);
       }
+      const setupScripts = [];
+      for (const name of input.setupScripts) setupScripts.push(await getScript(name));
       await fs.mkdir(cfg.sessionsRoot, { recursive: true });
-      const created = await createSession(cfg.sessionsRoot, { ...input, repos, zips, image: cfg.devboxImage });
+      const created = await createSession(cfg.sessionsRoot, { ...input, repos, zips, setupScripts, image: cfg.devboxImage });
       for (const z of zips) await fs.rm(z.file, { force: true });
       let imported: { created: string[]; skipped: { title: string; reason: string }[] } | undefined;
       if (pasted) {
@@ -359,6 +404,47 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
       }
       if (action === "stop") await stopSandbox(d.sandbox, param(req, "id"));
       else await removeSandbox(d.sandbox, param(req, "id"));
+      res.json({ ok: true });
+    }),
+  );
+
+  // --- setup scripts of a session ------------------------------------------------
+
+  api.get(
+    "/sessions/:id/setup",
+    wrap(async (req, res) => {
+      const h = await d.hub.get(param(req, "id"));
+      const logs: Record<string, string> = {};
+      for (const sc of h.session.setupScripts) logs[sc.name] = await fs.readFile(path.join(h.paths.setup, `${sc.name}.log`), "utf8").catch(() => "");
+      res.json({ scripts: h.session.setupScripts.map(({ script, ...meta }) => ({ ...meta, lines: script.split("\n").length })), results: h.session.setup, logs, preflight: h.session.preflight ?? null });
+    }),
+  );
+
+  /** Re-runs every setup script now (container is brought up if needed). */
+  api.post(
+    "/sessions/:id/setup/rerun",
+    wrap(async (req, res) => {
+      const h = await d.hub.get(param(req, "id"));
+      if (d.runs.status(h.id)) {
+        res.status(409).json({ error: "Pause or stop the run first" });
+        return;
+      }
+      await ensureSessionSandbox(d.runConfig, h.session, path.join(h.paths.dir, "sandbox.env"), undefined).catch(() => undefined);
+      try {
+        const results = await runSetup(d.runConfig, h.id);
+        res.json({ ok: true, results });
+      } catch (e) {
+        res.status(500).json({ error: (e as Error).message, results: (await d.hub.get(h.id)).session.setup });
+      }
+    }),
+  );
+
+  /** Forget the last preflight verdict so the next run checks again. */
+  api.post(
+    "/sessions/:id/preflight/reset",
+    wrap(async (req, res) => {
+      const h = await d.hub.get(param(req, "id"));
+      await h.mutate((docs) => ({ next: { session: { ...docs.session, preflight: undefined } } }));
       res.json({ ok: true });
     }),
   );

@@ -214,3 +214,7 @@ export const duArgs = (sessionId: string): string[] => execArgs(sessionId, ["du"
  */
 export const rootCommandArgs = (sessionId: string, command: string, cwd = "/workspace"): string[] =>
   execArgs(sessionId, ["sh", "-c", command], { user: "root", workdir: cwd });
+
+/** A setup script, fed on stdin: `bash -e -s` as root in /workspace. */
+export const setupScriptArgs = (sessionId: string): string[] =>
+  execArgs(sessionId, ["bash", "-e", "-s"], { user: "root", workdir: "/workspace", stdin: true, env: { DEBIAN_FRONTEND: "noninteractive" } });
