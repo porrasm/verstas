@@ -497,3 +497,5 @@ details[open] > summary::before { transform: rotate(90deg); }
 @media (max-width: 900px) { .scripts-layout { grid-template-columns: 1fr; } }
 .script-item { display: grid; gap: 2px; text-align: left; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); }
 .script-item.on { border-color: var(--accent); }
+
+textarea.invalid { border-color: var(--warn); }

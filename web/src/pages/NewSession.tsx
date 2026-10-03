@@ -16,7 +16,7 @@ export const NewSessionPage = () => {
   const [picked, setPicked] = useState<string[]>([]);
   const [copied, setCopied] = useState("");
   const [limits, setLimits] = useState({ memory: "4g", cpus: 2, workspaceMb: 20000 });
-  const [plan, setPlan] = useState(false);
+  const [preview, setPreview] = useState<{ ok: boolean; error?: string; tickets?: { id: string; title: string; repo?: string; state: string }[] } | null>(null);
   const [model, setModel] = useState("claude-sonnet-5-5");
   const [busy, setBusy] = useState("");
   const [err, setErr] = useState("");
@@ -35,6 +35,20 @@ export const NewSessionPage = () => {
       .catch((e: Error) => setErr(e.message));
     api<SetupScript[]>("GET", "/scripts").then(setScripts).catch(() => setScripts([]));
   }, []);
+
+  const validateBoard = async (text: string) => {
+    if (!text.trim()) return setPreview(null);
+    try {
+      setPreview(await api("POST", "/board/preview", { text, repos: repos.filter((r) => r.on).map((r) => r.target) }));
+    } catch (e) {
+      setPreview({ ok: false, error: (e as Error).message });
+    }
+  };
+  useEffect(() => {
+    const t = setTimeout(() => void validateBoard(board), 400);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [board, repos.map((r) => `${r.target}:${r.on}`).join(",")]);
 
   const copyBoardContext = async () => {
     const names = repos.filter((r) => r.on).map((r) => r.target).join(",");
@@ -73,7 +87,6 @@ export const NewSessionPage = () => {
         model: model.trim() || undefined,
         setupScripts: picked,
         board: board.trim() || undefined,
-        plan,
       });
       location.hash = `#/s/${encodeURIComponent(r.session.id)}`;
     } catch (e) {
@@ -84,7 +97,7 @@ export const NewSessionPage = () => {
   };
 
   if (!cfg) return <div className={err ? "banner warn" : "loading"}>{err || "Loading…"}</div>;
-  const needsPlan = !board.trim() && !goal.trim();
+  const boardInvalid = Boolean(board.trim()) && preview !== null && !preview.ok;
   return (
     <div className="form">
       <div>
@@ -107,7 +120,6 @@ export const NewSessionPage = () => {
           Goal <span className="help">The planner turns this into tickets. Workers read it on every ticket, so say what done looks like.</span>
           <textarea id="goal" value={goal} onChange={(e) => setGoal(e.target.value)} placeholder="Build the Nuppi desktop app MVP: layout editor, mapping engine, mock MIDI output…" style={{ minHeight: 110 }} />
         </label>
-        <label className="chk"><input type="checkbox" checked={plan} onChange={(e) => setPlan(e.target.checked)} /> Start the planner right away <span className="muted">(needs Docker, the image and a token)</span></label>
       </section>
 
       <section className="card">
@@ -154,8 +166,14 @@ export const NewSessionPage = () => {
           <button className="quiet sm" onClick={copyBoardContext} title="Markdown describing this sandbox and the board format, for an assistant to write the tickets">Copy context for an LLM</button>
         </div>
         {copied && <div className="small ok">{copied}</div>}
-        <p className="lead">Optional. Paste tickets as JSON or markdown (see <code>docs/BOARD.md</code>); they start as ready. Leave empty to let the planner draft them from the goal.</p>
-        <textarea id="board" className="mono" value={board} onChange={(e) => setBoard(e.target.value)} placeholder={'{ "tickets": [ { "title": "…", "spec": "…", "acceptance": ["…"] } ] }'} style={{ minHeight: 120 }} />
+        <p className="lead">Optional. Paste tickets as JSON or markdown (see <code>docs/BOARD.md</code>); they start as ready. You can also add tickets by hand on the session page, or run the planner there.</p>
+        <textarea id="board" className={`mono ${preview && !preview.ok ? "invalid" : ""}`} value={board} onChange={(e) => setBoard(e.target.value)} placeholder={'{ "tickets": [ { "title": "…", "spec": "…", "acceptance": ["…"] } ] }'} style={{ minHeight: 120 }} />
+        {preview && !preview.ok && <div className="banner warn"><span>{preview.error}</span></div>}
+        {preview?.ok && preview.tickets && (
+          <div className="small ok">
+            {preview.tickets.length} ticket{preview.tickets.length === 1 ? "" : "s"} will be imported as ready: {preview.tickets.map((t) => `${t.id} ${t.title}`).join(" · ").slice(0, 300)}
+          </div>
+        )}
       </section>
 
       <section className="card">
@@ -184,9 +202,9 @@ export const NewSessionPage = () => {
       </section>
 
       <div className="foot">
-        <span className="muted small grow">{busy || (needsPlan ? "Write a goal or paste a board; a session needs one of them to do anything." : plan ? "The planner starts as soon as the session exists." : "")}</span>
+        <span className="muted small grow">{busy || (boardInvalid ? "Fix the board before creating the session." : !board.trim() && !goal.trim() ? "Tip: a goal lets the planner draft tickets later; a pasted board starts you with ready tickets." : "")}</span>
         <a className="btn" href="#/">Cancel</a>
-        <button className="pri" onClick={create} disabled={!name.trim() || Boolean(busy)}>Create session</button>
+        <button className="pri" onClick={create} disabled={!name.trim() || Boolean(busy) || boardInvalid}>Create session</button>
       </div>
     </div>
   );

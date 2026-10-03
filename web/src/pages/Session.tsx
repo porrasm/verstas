@@ -107,6 +107,7 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
   const [notice, setNotice] = useState("");
   const [importText, setImportText] = useState<string | null>(null);
   const [exportInfo, setExportInfo] = useState<string[] | null>(null);
+  const [newTicket, setNewTicket] = useState(false);
   const [busy, setBusy] = useState("");
   const [logTicket, setLogTicket] = useState("");
   const [lastEventAt, setLastEventAt] = useState<string | null>(null);
@@ -234,6 +235,7 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
             {!active && <button onClick={() => runAction("plan")} disabled={Boolean(busy)} title="A planner worker reads the goal and adds tickets to the backlog">Plan tickets</button>}
             {active && <button onClick={() => runAction("pause")} disabled={Boolean(busy)} title="Finish the current ticket, then stop">Pause after ticket</button>}
             {active && <button className="warn" onClick={() => runAction("stop")} disabled={Boolean(busy)} title="Stop the worker now; its ticket goes back to ready">Stop now</button>}
+            <button onClick={() => setNewTicket(true)} disabled={Boolean(busy)} title="Write a ticket by hand">New ticket</button>
             <MoreMenu
               items={[
                 { label: "Import board…", onClick: () => setImportText("") },
@@ -297,6 +299,25 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
         </section>
       )}
 
+      {!active && (counts.backlog ?? 0) > 0 && (
+        <div className="banner signal">
+          <span><b>{counts.backlog}</b> ticket{counts.backlog === 1 ? "" : "s"} in the backlog wait for your approval. The run only takes ready tickets.</span>
+          <button className="pri sm end" onClick={() => tryAct("approving", () => api("POST", `${base}/tickets/approve-all`))} disabled={Boolean(busy)}>Approve all</button>
+        </div>
+      )}
+
+      {newTicket && (
+        <NewTicketForm
+          session={session}
+          board={board}
+          onCancel={() => setNewTicket(false)}
+          onCreate={async (body) => {
+            await act("creating ticket", () => api("POST", `${base}/tickets`, body));
+            setNewTicket(false);
+          }}
+        />
+      )}
+
       <div className="sess-body">
         <div className="main">
           {board.tickets.length === 0 ? (
@@ -309,7 +330,7 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
               </div>
             </div>
           ) : (
-            <BoardView board={board} inbox={inbox} run={run} active={active} openId={ticketId} onOpen={openTicket} onRetry={(tid) => tryAct("retrying", () => api("POST", `${base}/tickets/${tid}/state`, { state: "ready" }))} onShowLog={setLogTicket} />
+            <BoardView board={board} inbox={inbox} run={run} active={active} openId={ticketId} onOpen={openTicket} onRetry={(tid) => tryAct("retrying", () => api("POST", `${base}/tickets/${tid}/state`, { state: "ready" }))} onApprove={(tid) => tryAct("approving", () => api("POST", `${base}/tickets/${tid}/state`, { state: "ready", note: "Approved" }))} onShowLog={setLogTicket} />
           )}
           <LogPanel
             events={events}
@@ -735,7 +756,7 @@ const RequestItem = ({ r, onDecide, onOpenTicket }: { r: AgentRequest; onDecide:
 
 // --- board ------------------------------------------------------------------
 
-const BoardView = ({ board, inbox, run, active, openId, onOpen, onRetry, onShowLog }: { board: Board; inbox: Inbox; run?: Run; active: boolean; openId: string | null; onOpen: (tid: string) => void; onRetry: (tid: string) => void; onShowLog: (tid: string) => void }) => {
+const BoardView = ({ board, inbox, run, active, openId, onOpen, onRetry, onApprove, onShowLog }: { board: Board; inbox: Inbox; run?: Run; active: boolean; openId: string | null; onOpen: (tid: string) => void; onRetry: (tid: string) => void; onApprove: (tid: string) => void; onShowLog: (tid: string) => void }) => {
   const doneIds = new Set(board.tickets.filter((t) => t.state === "done").map((t) => t.id));
   return (
     <div className="board-wrap">
@@ -750,7 +771,7 @@ const BoardView = ({ board, inbox, run, active, openId, onOpen, onRetry, onShowL
               <div className="items">
                 {items.length === 0 && <div className="empty">—</div>}
                 {items.map((t) => (
-                  <TicketCard key={t.id} t={t} doneIds={doneIds} request={t.state === "waiting" ? inbox.requests.find((r) => r.ticketId === t.id && r.state === "open") : undefined} active={Boolean(active && run?.currentTicket === t.id)} open={openId === t.id} onOpen={() => onOpen(t.id)} onRetry={() => onRetry(t.id)} onShowLog={() => onShowLog(t.id)} />
+                  <TicketCard key={t.id} t={t} doneIds={doneIds} request={t.state === "waiting" ? inbox.requests.find((r) => r.ticketId === t.id && r.state === "open") : undefined} active={Boolean(active && run?.currentTicket === t.id)} open={openId === t.id} onOpen={() => onOpen(t.id)} onRetry={() => onRetry(t.id)} onApprove={() => onApprove(t.id)} onShowLog={() => onShowLog(t.id)} />
                 ))}
               </div>
             </div>
@@ -761,7 +782,7 @@ const BoardView = ({ board, inbox, run, active, openId, onOpen, onRetry, onShowL
   );
 };
 
-const TicketCard = ({ t, doneIds, request, active, open, onOpen, onRetry, onShowLog }: { t: Ticket; doneIds: Set<string>; request?: AgentRequest; active: boolean; open: boolean; onOpen: () => void; onRetry: () => void; onShowLog: () => void }) => {
+const TicketCard = ({ t, doneIds, request, active, open, onOpen, onRetry, onApprove, onShowLog }: { t: Ticket; doneIds: Set<string>; request?: AgentRequest; active: boolean; open: boolean; onOpen: () => void; onRetry: () => void; onApprove: () => void; onShowLog: () => void }) => {
   const depsDone = t.deps.filter((d) => doneIds.has(d)).length;
   const depsOk = depsDone === t.deps.length;
   const lastNote = t.notes[t.notes.length - 1];
@@ -791,7 +812,63 @@ const TicketCard = ({ t, doneIds, request, active, open, onOpen, onRetry, onShow
           <button className="quiet sm" onClick={onShowLog}>Log</button>
         </div>
       )}
+      {t.state === "backlog" && (
+        <div className="act" onClick={(e) => e.stopPropagation()}>
+          <button className="sm" onClick={onApprove} title="Move to ready so the run can take it">Approve</button>
+        </div>
+      )}
     </button>
+  );
+};
+
+// --- manual ticket ------------------------------------------------------------
+
+const NewTicketForm = ({ session, board, onCancel, onCreate }: { session: Session; board: Board; onCancel: () => void; onCreate: (body: Record<string, unknown>) => Promise<void> }) => {
+  const [f, setF] = useState({ title: "", kind: "feature", repo: session.repos[0]?.name ?? "", size: "S", priority: "100", deps: "", state: "ready", spec: "", acceptance: "" });
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+  const submit = async () => {
+    setErr("");
+    setBusy(true);
+    try {
+      await onCreate({
+        title: f.title.trim(),
+        kind: f.kind,
+        repo: f.repo || undefined,
+        size: f.size,
+        priority: Number(f.priority) || 100,
+        deps: f.deps.split(/[,\s]+/).filter(Boolean),
+        state: f.state,
+        spec: f.spec,
+        acceptance: f.acceptance.split(/\n/).map((x) => x.trim()).filter(Boolean),
+      });
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const ids = board.tickets.map((t) => t.id);
+  return (
+    <section className="card stack" style={{ gap: 10 }}>
+      <div className="row" style={{ justifyContent: "space-between" }}><h3>New ticket</h3><button className="quiet sm" onClick={onCancel}>Cancel</button></div>
+      {err && <div className="banner warn"><span>{err}</span></div>}
+      <div className="three">
+        <label>Title<input id="nt-title" value={f.title} onChange={(e) => setF({ ...f, title: e.target.value })} autoFocus placeholder="Mapping engine: 14-bit CC pairs" /></label>
+        <label>Kind<select value={f.kind} onChange={(e) => setF({ ...f, kind: e.target.value })}><option>feature</option><option>bug</option><option>followup</option><option>chore</option></select></label>
+        <label>Repository<select value={f.repo} onChange={(e) => setF({ ...f, repo: e.target.value })}><option value="">(none)</option>{session.repos.map((r) => <option key={r.name} value={r.name}>{r.name}</option>)}</select></label>
+        <label>Size<select value={f.size} onChange={(e) => setF({ ...f, size: e.target.value })}><option>S</option><option>M</option><option>L</option></select></label>
+        <label>Priority <span className="help">lower runs first</span><input type="number" min={0} max={1000} value={f.priority} onChange={(e) => setF({ ...f, priority: e.target.value })} /></label>
+        <label>Depends on <span className="help">ids, e.g. {ids.slice(-2).join(", ") || "T-1"}</span><input className="mono" value={f.deps} onChange={(e) => setF({ ...f, deps: e.target.value })} /></label>
+      </div>
+      <label>Spec <span className="help">What to do and where; a fresh agent reads only this, the acceptance criteria and the brief</span><textarea value={f.spec} onChange={(e) => setF({ ...f, spec: e.target.value })} style={{ minHeight: 120 }} /></label>
+      <label>Acceptance criteria <span className="help">one per line, checkable by a reviewer</span><textarea value={f.acceptance} onChange={(e) => setF({ ...f, acceptance: e.target.value })} style={{ minHeight: 70 }} /></label>
+      <div className="row">
+        <label className="chk"><input type="radio" name="nt-state" checked={f.state === "ready"} onChange={() => setF({ ...f, state: "ready" })} /> Ready to run</label>
+        <label className="chk"><input type="radio" name="nt-state" checked={f.state === "backlog"} onChange={() => setF({ ...f, state: "backlog" })} /> Backlog (approve later)</label>
+        <button className="pri end" onClick={submit} disabled={busy || !f.title.trim()}>Create ticket</button>
+      </div>
+    </section>
   );
 };
 

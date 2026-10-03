@@ -207,6 +207,27 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
     }),
   );
 
+  /** Parses a pasted board without saving it: what would be imported, or why it is invalid. */
+  api.post(
+    "/board/preview",
+    wrap(async (req, res) => {
+      const { text, repos } = z.object({ text: z.string().max(2_000_000), repos: z.array(z.string()).optional() }).parse(req.body);
+      try {
+        const parsed = parseBoardPaste(text);
+        const r = importBoard(emptyBoard(), parsed, { by: "user", defaultState: "ready" });
+        if (repos) validateRepos(r.board.tickets, repos);
+        res.json({
+          ok: true,
+          goal: r.board.goal,
+          tickets: r.board.tickets.map((t) => ({ id: t.id, title: t.title, kind: t.kind, repo: t.repo, size: t.size, state: t.state, deps: t.deps, acceptance: t.acceptance.length })),
+        });
+      } catch (e) {
+        const msg = e instanceof z.ZodError ? `Invalid board: ${e.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}` : e instanceof SyntaxError ? `Not valid JSON: ${e.message}` : (e as Error).message;
+        res.json({ ok: false, error: msg });
+      }
+    }),
+  );
+
   // --- uploads (zip attachments for a session being created) -----------------
 
   const uploadsDir = path.join(verstasHome(), "uploads");
@@ -630,6 +651,25 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
         return { next: { board }, result: getTicket(board, tid) };
       });
       res.json(t);
+    }),
+  );
+
+  /** Backlog -> ready for every backlog ticket: the approval step after a plan or an import. */
+  api.post(
+    "/sessions/:id/tickets/approve-all",
+    wrap(async (req, res) => {
+      const h = await d.hub.get(param(req, "id"));
+      const ids = await h.mutate((docs) => {
+        let board = docs.board;
+        const moved: string[] = [];
+        for (const t of docs.board.tickets) {
+          if (t.state !== "backlog") continue;
+          board = transition(board, t.id, "ready", { by: "user", text: "Approved" });
+          moved.push(t.id);
+        }
+        return { next: { board }, result: moved };
+      });
+      res.json({ ok: true, approved: ids });
     }),
   );
 
