@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
 import { api, fmtAgo, fmtDateTime, fmtUsd, STATE_LABEL, useLive, useNow, type DraftRow, type SessionSummary, type Status } from "../api";
-import { ConnectAssistant } from "./ConnectAssistant";
 
 const ORDER = ["done", "review", "in_progress", "waiting", "blocked", "ready", "backlog"];
 
@@ -38,6 +37,43 @@ export const SessionsPage = ({ status }: { status: Status | null }) => {
     if (m.type === "change") load();
     if (m.type === "event" && (m.event.kind === "run" || m.event.kind === "ticket")) load();
   });
+  const [note, setNote] = useState("");
+  const [quitArm, setQuitArm] = useState(false);
+  const [busy, setBusy] = useState("");
+  const hostAct = async (label: string, fn: () => Promise<string>) => {
+    setBusy(label);
+    setErr("");
+    try {
+      setNote(await fn());
+      load();
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy("");
+    }
+  };
+  const pauseAll = () =>
+    hostAct("pausing", async () => {
+      const r = await api<{ sessions: string[] }>("POST", "/host/runs", { action: "pause" });
+      return r.sessions.length ? `${r.sessions.length} run${r.sessions.length > 1 ? "s" : ""} will pause after the current ticket.` : "No run is active.";
+    });
+  const stopContainers = () =>
+    hostAct("stopping containers", async () => {
+      const r = await api<{ stopped: string[]; skipped: string[] }>("POST", "/host/sandboxes", { action: "stop" });
+      const skipped = r.skipped.length ? ` ${r.skipped.length} with an active run kept running; pause or stop those runs first.` : "";
+      return `${r.stopped.length ? `Stopped ${r.stopped.length} container${r.stopped.length > 1 ? "s" : ""}.` : "No idle container was running."}${skipped} A stopped box starts again with its next run.`;
+    });
+  const stopOne = (id: string) =>
+    hostAct("stopping container", async () => {
+      await api("POST", `/sessions/${encodeURIComponent(id)}/sandbox`, { action: "stop" });
+      return `Container of ${id} stopped. It starts again with the next run.`;
+    });
+  const quit = () =>
+    hostAct("quitting", async () => {
+      setQuitArm(false);
+      await api("POST", "/host/quit");
+      return "Verstas is shutting down: runs stop and requeue their tickets, containers stop.";
+    });
   const del = async (id: string) => {
     setArm(null);
     try {
@@ -53,9 +89,22 @@ export const SessionsPage = ({ status }: { status: Status | null }) => {
       <div className="row">
         <h1>Sessions</h1>
         <span className="muted small" title="Every session is a directory under this path">root <code>{status?.sessionsRoot ?? "…"}</code></span>
-        <a className="btn pri end" href="#/new">New session</a>
+        <span className="end row" style={{ gap: 6 }}>
+          <button className="quiet sm" onClick={pauseAll} disabled={Boolean(busy) || !rows?.some((r) => r.run?.state === "running")} title="Every active run finishes its current ticket, then stops">Pause all runs</button>
+          <button className="quiet sm" onClick={stopContainers} disabled={Boolean(busy) || !rows?.some((r) => r.sandbox === "running")} title="Stops every idle session container and proxy; a stopped box starts again with its next run">Stop all containers</button>
+          {quitArm ? (
+            <span className="confirm">
+              <button className="warn solid sm" onClick={quit}>Quit: stop runs, requeue tickets, stop containers</button>
+              <button className="quiet sm" onClick={() => setQuitArm(false)}>Cancel</button>
+            </span>
+          ) : (
+            <button className="quiet sm" onClick={() => setQuitArm(true)} disabled={Boolean(busy)} title="Shut Verstas down: active runs stop and requeue their tickets, containers stop, the app exits">Quit Verstas</button>
+          )}
+          <a className="btn pri" href="#/new">New session</a>
+        </span>
       </div>
       {err && <div className="banner warn"><span>{err}</span><button className="quiet sm end" onClick={() => setErr("")}>Dismiss</button></div>}
+      {note && <div className="banner good" role="status"><span>{note}</span><button className="quiet sm end" onClick={() => setNote("")}>Dismiss</button></div>}
       {status && !status.docker.ok && <div className="banner warn">Docker is not reachable. Sessions can be created and edited, but not run.</div>}
       {status && !status.image && status.docker.ok && <div className="banner signal"><span>The dev-box image <code>{status.imageName}</code> is missing. Build it with <code>npm run image:build</code>.</span></div>}
       {status && !Object.values(status.credentials ?? {}).some(Boolean) && <div className="banner signal"><span>No agent credential yet. Run <code>claude setup-token</code> and paste it in <a href="#/settings">Settings</a>, or add a Codex login or a Cursor key there.</span></div>}
@@ -102,6 +151,13 @@ export const SessionsPage = ({ status }: { status: Status | null }) => {
                     <td>
                       <span className={`pill ${st.tone}`}>{st.dot ? <span className={`dot ${st.dot}`} /> : null}{st.label}</span>
                       {s.run?.pauseReason && s.run.state !== "running" ? <div className="muted small">{s.run.pauseReason}</div> : null}
+                      {s.sandbox === "running" && (
+                        <div className="small muted" style={{ marginTop: 4 }}>
+                          container running
+                          {s.run?.state !== "running" && <> · <button className="quiet sm" style={{ padding: "0 4px" }} onClick={() => stopOne(s.session.id)} disabled={Boolean(busy)} title="Stop this session's container and proxy; they start again with the next run">stop</button></>}
+                        </div>
+                      )}
+                      {s.sandbox === "stopped" && <div className="small faint" style={{ marginTop: 4 }}>container stopped</div>}
                     </td>
                     <td className="mono">{s.totals ? fmtUsd(s.totals.usd) : "—"}{s.totals && s.totals.runs > 1 ? <div className="faint small">{s.totals.runs} runs</div> : null}</td>
                     <td title={fmtDateTime(last)}>{fmtAgo(last, now)}</td>
@@ -157,6 +213,5 @@ const Drafts = ({ rows, now }: { rows: DraftRow[]; now: number }) => (
         </table>
       </div>
     )}
-    <ConnectAssistant />
   </div>
 );

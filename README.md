@@ -47,9 +47,11 @@ are optional: add their credentials in Settings and pick them per session
 under "Agent options" (`docs/DRIVERS.md`); without them everything runs on
 Claude Code as before.
 
-`npm start` runs the host app inside the desktop window's process. On
-macOS, closing the window keeps the loop running (the Dock icon brings it
-back); quitting stops active runs and puts their tickets back to ready.
+`npm start` runs the host app inside the desktop window's process. Closing
+the window quits Verstas: active runs stop and put their tickets back to
+ready, session containers stop, and nothing keeps running out of sight. The
+Sessions page has the same controls for the whole host: pause every run,
+stop every container, quit.
 Without a window: `npm run serve`, then open http://127.0.0.1:4700.
 
 Then, in the web app:

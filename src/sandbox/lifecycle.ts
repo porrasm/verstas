@@ -1,5 +1,6 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { LABEL_KEY as SESSION_LABEL } from "./docker-args.js";
 import type { ChildProcess } from "node:child_process";
 import type { Session } from "../core/types.js";
 import type { SessionPaths } from "../sessions/sessions.js";
@@ -60,6 +61,30 @@ export const sandboxStatus = async (cfg: SandboxConfig, sessionId: string): Prom
     proxy: await state(cfg.docker, proxyName(sessionId)),
     container: await state(cfg.docker, containerName(sessionId)),
   };
+};
+
+/**
+ * Every session container Docker knows about, by session id, in one call:
+ * running or stopped. Proxies and snapshots carry the same label and are
+ * skipped by name. For the sessions list and for "stop all containers".
+ */
+export const listSandboxes = async (cfg: SandboxConfig): Promise<Map<string, "running" | "stopped">> => {
+  const out = new Map<string, "running" | "stopped">();
+  const r = await cfg.docker.run(["ps", "-a", "--filter", `label=${SESSION_LABEL}`, "--format", `{{.Label "${SESSION_LABEL}"}}\t{{.Names}}\t{{.State}}`], { allowFailure: true, timeoutMs: 15_000 });
+  if (r.code !== 0) return out;
+  for (const line of r.stdout.split("\n")) {
+    const [id, name, state] = line.split("\t");
+    if (!id || name !== containerName(id)) continue;
+    out.set(id, state === "running" ? "running" : "stopped");
+  }
+  return out;
+};
+
+/** Stops every running session container and proxy, in parallel; returns the session ids stopped. */
+export const stopAllSandboxes = async (cfg: SandboxConfig, skip: ReadonlySet<string> = new Set()): Promise<string[]> => {
+  const running = [...(await listSandboxes(cfg))].filter(([id, st]) => st === "running" && !skip.has(id)).map(([id]) => id);
+  await Promise.all(running.map((id) => stopSandbox(cfg, id)));
+  return running;
 };
 
 /** Writes the 0600 env file the session container reads its secrets from. */

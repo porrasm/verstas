@@ -152,7 +152,9 @@ test("cursor driver: the board server goes into the user-level mcp.json for the 
     expect(sp.args.at(-1)).toBe("rules\n\n---\n\ntask");
     const written = JSON.parse(await fs.readFile(userFile, "utf8")) as { mcpServers: Record<string, { env: Record<string, string> }> };
     expect(Object.keys(written.mcpServers)).toEqual(["board"]);
-    expect(written.mcpServers.board!.env).toEqual({ VERSTAS_AGENT_API: "http://host.docker.internal:4701/agent", VERSTAS_RUN_TOKEN: "run-9" });
+    // Proxy variables of the host running the tests may ride along; nothing else does.
+    expect(written.mcpServers.board!.env).toMatchObject({ VERSTAS_AGENT_API: "http://host.docker.internal:4701/agent", VERSTAS_RUN_TOKEN: "run-9" });
+    expect(Object.keys(written.mcpServers.board!.env).every((k) => /^(VERSTAS_AGENT_API|VERSTAS_RUN_TOKEN|https?_proxy|HTTPS?_PROXY|no_proxy|NO_PROXY)$/.test(k))).toBe(true);
     await cursorDriver.finish!(job);
     expect(await fs.readFile(userFile, "utf8")).toBe('{"mcpServers":{"mine":{"command":"x"}}}');
     // No previous file: it is removed again.

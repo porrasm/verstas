@@ -126,6 +126,18 @@ export class RunManager {
     return true;
   }
 
+  /** Sessions with an active run. */
+  activeSessions(): string[] {
+    return [...this.active.keys()];
+  }
+
+  /** Every active run finishes its current ticket, then stops. */
+  pauseAll(): string[] {
+    const ids = this.activeSessions();
+    for (const id of ids) this.pauseAfterTicket(id);
+    return ids;
+  }
+
   /** Stops every active run and waits for each loop to requeue its ticket; used on shutdown. */
   async stopAll(timeoutMs = 20_000): Promise<void> {
     const done = [...this.active.values()].map((c) => {

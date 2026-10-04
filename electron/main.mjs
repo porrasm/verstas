@@ -2,7 +2,8 @@
 //
 //   npm start      the host app runs inside this process (built code in
 //                  dist/ and web/dist from `npm run setup`); the window
-//                  shows it. Quitting stops runs and requeues their tickets.
+//                  shows it. Closing the window quits: runs stop and requeue
+//                  their tickets, session containers stop.
 //   npm run dev    scripts/dev.mjs runs the host app (tsx watch, debug logs)
 //                  and the UI (Vite, hot reload) as their own processes;
 //                  this window only shows the Vite UI, with DevTools.
@@ -116,12 +117,10 @@ if (!app.requestSingleInstanceLock()) {
     createWindow();
   });
 
-  // macOS keeps apps alive without windows: the loop keeps running and the
-  // Dock icon brings the window back. Elsewhere, closing the window quits.
-  // In dev, closing the window ends the session (scripts/dev.mjs stops the rest).
-  app.on("window-all-closed", () => {
-    if (dev || process.platform !== "darwin") app.quit();
-  });
+  // Closing the window quits, on every platform: runs stop and requeue their
+  // tickets, session containers stop, then the process ends (before-quit below).
+  // Nothing of Verstas keeps running out of sight.
+  app.on("window-all-closed", () => app.quit());
   app.on("activate", () => {
     if (!win && url) createWindow();
   });

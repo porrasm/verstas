@@ -7,6 +7,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import { createAgentApi, RunTokens } from "./agent-api/agent-api.js";
 import { loadConfig, loadSecrets, saveConfig, saveSecrets, type Config } from "./config.js";
 import { DRIVERS } from "./harness/drivers.js";
+import { stopAllSandboxes } from "./sandbox/lifecycle.js";
 import { createDockerRunManager, proxyDistPath, workerDistPath, type RunManagerConfig } from "./harness/docker-worker.js";
 import { createDockerRunner } from "./sandbox/docker.js";
 import type { SandboxConfig } from "./sandbox/lifecycle.js";
@@ -242,6 +243,9 @@ export const startVerstas = async (): Promise<Verstas> => {
       // Tell the dashboard first: it shows "not running" at once instead of in 45 s.
       await remote.stop().catch(() => undefined);
       await runs.stopAll();
+      // Idle boxes do not outlive the app: their services stop with it, and the next run brings them back.
+      const stoppedBoxes = await stopAllSandboxes(sandbox).catch(() => [] as string[]);
+      if (stoppedBoxes.length) console.log(`stopped ${stoppedBoxes.length} session container${stoppedBoxes.length > 1 ? "s" : ""}`);
       for (const c of wss.clients) c.terminate();
       await Promise.all([closeServer(server), closeServer(agentServer)]);
     })());

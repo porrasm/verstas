@@ -202,6 +202,8 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
   };
   const tryAct = (label: string, fn: () => Promise<unknown>) => act(label, fn).catch(() => undefined);
   const runAction = (action: string) => tryAct(action, () => api("POST", `${base}/run`, { action }));
+  /** Stop or remove this session's container and proxy; either comes back on the next run. */
+  const runSandbox = (action: "stop" | "remove") => tryAct(action === "stop" ? "stopping container" : "removing sandbox", () => api("POST", `${base}/sandbox`, { action }));
   const doExport = () =>
     tryAct("exporting", async () => {
       const r = await api<{ howTo: string[] }>("POST", `${base}/export`);
@@ -251,6 +253,8 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
                 { label: "Import board…", onClick: () => setImportText("") },
                 { label: "Export board (JSON)", href: `/api${base}/board/export` },
                 { label: active ? "Export bundles (stop the run first)" : "Export bundles…", onClick: doExport, disabled: active },
+                { label: sandbox?.container === "running" ? "Stop container" : "Stop container (not running)", onClick: () => runSandbox("stop"), disabled: active || sandbox?.container !== "running" },
+                { label: "Remove sandbox (keeps the home volume)", onClick: () => runSandbox("remove"), disabled: active || !sandbox || sandbox.container === "absent" },
               ]}
             />
           </div>

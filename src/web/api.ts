@@ -35,7 +35,7 @@ import type { SessionHub } from "../sessions/hub.js";
 import { createSession, deleteSessionDir, listSessions, sessionPaths, withAgentPacks } from "../sessions/sessions.js";
 import { applyBundle, ApplyError } from "../sessions/apply.js";
 import type { SessionHandle } from "../sessions/hub.js";
-import { removeSandbox, sandboxStatus, snapshotSandbox, stopSandbox, type SandboxConfig } from "../sandbox/lifecycle.js";
+import { listSandboxes, removeSandbox, sandboxStatus, snapshotSandbox, stopAllSandboxes, stopSandbox, type SandboxConfig } from "../sandbox/lifecycle.js";
 import { dockerAvailable } from "../sandbox/docker.js";
 import type { RunManager } from "../harness/run.js";
 import { dockerShell, ensureSessionSandbox, runSetup, type RunManagerConfig } from "../harness/docker-worker.js";
@@ -171,6 +171,41 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
       res.json({ ok: true });
     }),
   );
+
+  // --- the host as a whole ---------------------------------------------------------
+
+  /** Every active run: pause after its current ticket, or stop now (tickets go back to ready). */
+  api.post(
+    "/host/runs",
+    wrap(async (req, res) => {
+      const { action } = z.object({ action: z.enum(["pause", "stop"]) }).parse(req.body);
+      const ids = d.runs.activeSessions();
+      if (action === "pause") d.runs.pauseAll();
+      else await d.runs.stopAll();
+      res.json({ ok: true, sessions: ids });
+    }),
+  );
+
+  /** Stops every session container and proxy that is not in the middle of a run; a stopped box restarts on the next run. */
+  api.post(
+    "/host/sandboxes",
+    wrap(async (req, res) => {
+      z.object({ action: z.literal("stop") }).parse(req.body);
+      const active = new Set(d.runs.activeSessions());
+      const stopped = await stopAllSandboxes(d.sandbox, active);
+      res.json({ ok: true, stopped, skipped: [...active] });
+    }),
+  );
+
+  /**
+   * Quit Verstas from the UI. The process gets the same signal Ctrl-C sends,
+   * so the terminal app and the desktop app take their normal shutdown path:
+   * runs stop and requeue their tickets, containers stop, then the process ends.
+   */
+  api.post("/host/quit", (_req, res) => {
+    res.json({ ok: true });
+    setTimeout(() => process.kill(process.pid, "SIGTERM"), 200).unref();
+  });
 
   api.get("/config", (_req, res) => res.json(d.getConfig()));
 
@@ -473,14 +508,17 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
     "/sessions",
     wrap(async (_req, res) => {
       const sessions = await listSessions(d.getConfig().sessionsRoot);
+      // One docker call tells which sessions still have a container, running or stopped.
+      const boxes = await listSandboxes(d.sandbox).catch(() => new Map<string, "running" | "stopped">());
       // One unreadable session must not hide the others: report it as a row with an error.
       const rows = await Promise.all(
         sessions.map(async (s) => {
+          const sandbox = boxes.get(s.id) ?? "absent";
           try {
-            return await summarize(s);
+            return { ...(await summarize(s)), sandbox };
           } catch (e) {
             console.warn(`[ui] session ${s.id} could not be summarised: ${(e as Error).message}`);
-            return { session: s, counts: {}, run: undefined, openRequests: 0, ideas: 0, error: (e as Error).message };
+            return { session: s, counts: {}, run: undefined, openRequests: 0, ideas: 0, sandbox, error: (e as Error).message };
           }
         }),
       );
