@@ -352,6 +352,15 @@ project needs it, with its resource cost accepted then.
 
 ## Done
 
+- 2026-10-04 · Session lifetime: a session is created as a plan (name and
+  board only) and initialized by hand. Repositories, attachments, recipes,
+  packs, agents and caps are set on the session page; nothing is cloned and
+  no container exists until Initialize (or Initialize and start). Setup has
+  two modes, a setup worker (reads the repositories and the board; the old
+  requirements are its instructions) or skip; "ready" completes
+  initialization without a confirm step. The goal left the setup; Plan
+  tickets takes a request and runs the planner in an initialized session.
+  Reset environment makes a session a plan again.
 - 2026-10-04 · Draft sessions over MCP (docs/DRAFTS.md): an assistant builds
   a draft step by step through `/mcp` (Streamable HTTP on the UI port, plus a
   stdio bridge); drafts are files under `~/.verstas/drafts`; a review page

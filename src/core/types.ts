@@ -326,12 +326,21 @@ export const readinessSchema = z.object({
 });
 export type Readiness = z.infer<typeof readinessSchema>;
 
-/** Tickets wait for the environment: requirements are set and nobody confirmed the box meets them. */
-export const needsSetup = (s: { requirements: string; readiness?: Readiness }): boolean => Boolean(s.requirements.trim()) && !s.readiness?.confirmedAt;
+/**
+ * A session is initialized once its environment exists: the repositories
+ * are cloned, the container was created, and the setup step ran (or was
+ * skipped). Until then it is a plan: a name, a board and settings, and
+ * nothing can run in it.
+ */
+export const isInitialized = (s: { initializedAt?: string | null }): boolean => Boolean(s.initializedAt);
+
+/** How the environment is set up at initialization: a setup worker, or nothing beyond the container and the recipes. */
+export const setupModeSchema = z.enum(["agentic", "skip"]);
+export type SetupMode = z.infer<typeof setupModeSchema>;
 
 export const sessionStateSchema = z.enum([
-  "created", // workspace built, no run yet
-  "setup", // requirements are set and the environment is not confirmed ready; tickets cannot run
+  "created", // initialized, no run yet
+  "setup", // not initialized: a plan, or an initialization that needs you
   "checking", // the setup worker is running
   "planning", // planner worker running
   "running",
@@ -390,8 +399,11 @@ export const sessionDrivers = (s: { model?: string; agents?: SessionAgents; caps
 export const sessionSchema = z.object({
   id: sessionIdSchema,
   name: z.string().min(1).max(200),
-  goal: z.string().max(20_000),
+  /** Legacy, and a draft's goal: no longer part of the setup. The Plan tickets box starts from it when the board is empty. */
+  goal: z.string().max(20_000).default(""),
   createdAt: z.string(),
+  /** When the environment came to exist (see `isInitialized`); null while the session is a plan. */
+  initializedAt: z.string().nullable().default(null),
   image: z.string().min(1).default("verstas-devbox:local"),
   /** Legacy: the worker's Claude model, from before `agents` existed. Read through `agentFor`; new sessions set `agents` instead. */
   model: z.string().max(100).optional(),
@@ -409,15 +421,16 @@ export const sessionSchema = z.object({
   /** Results of the last setup run, one per script, in order. Empty until the container was first created. */
   setup: z.array(setupResultSchema).default([]),
   /**
-   * Session requirements: what the box must be able to do before any ticket
-   * runs ("Postgres 17 reachable with the schema migrated; the e2e suite
-   * runs"). Empty means no setup phase. When set, a setup worker makes the
-   * box meet them and reports; tickets run only after you confirm.
+   * Setup instructions for the setup worker, on top of what it works out
+   * itself from the repositories and the board ("Postgres 17 reachable with
+   * the schema migrated; the e2e suite runs"). Used when `setupMode` is
+   * agentic; empty is fine.
    */
   requirements: z.string().max(20_000).default(""),
-  /** Prompts you ran from the session page (one worker, no ticket) and their replies; newest last, at most 20. */
+  setupMode: setupModeSchema.default("agentic"),
+  /** Prompts you ran from the session page (one worker, no ticket) and planning requests, with their replies; newest last, at most 20. */
   prompts: z
-    .array(z.object({ at: z.string(), runId: z.number().int(), text: z.string().max(20_000), reply: z.string().max(8000).default(""), stopReason: z.string().default("") }))
+    .array(z.object({ at: z.string(), runId: z.number().int(), kind: z.enum(["prompt", "plan"]).default("prompt"), text: z.string().max(20_000), reply: z.string().max(8000).default(""), stopReason: z.string().default("") }))
     .default([]),
   /**
    * The box as it was when you confirmed the environment, committed to an
@@ -425,7 +438,7 @@ export const sessionSchema = z.object({
    * setup, as long as the base image has not changed since.
    */
   snapshot: z.object({ image: z.string(), at: z.string(), baseImageId: z.string() }).optional(),
-  /** The setup worker's last verdict on the requirements, and whether you confirmed it. */
+  /** The setup worker's last verdict, and when it was accepted (at initialization, or by you). */
   readiness: readinessSchema.optional(),
   /** Per-session auto-approval rules (P2); present in the schema so files stay forward-compatible. */
   preapprove: z

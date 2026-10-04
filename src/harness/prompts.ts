@@ -27,7 +27,7 @@ ${session.repos.map((r) => `  - \`/workspace/${r.name}\` (from \`${r.branch}\`)`
   is recreated. When you install something system-wide (sudo apt-get, sudo
   npm -g, a binary under /usr/local), append the command to setup.sh
   (idempotent) and a line to env.md, or the next box will not have it.${session.requirements.trim() ? `
-- Session requirements the box was set up to meet:
+- Setup instructions the box was set up with:
 ${session.requirements.trim().split("\n").map((l) => `  ${l}`).join("\n")}` : ""}
 - The board (tickets) is reachable only through the \`board_*\`, \`request\`,
   \`message\` and \`idea\` tools (MCP server "board"). The plain HTTP API behind
@@ -91,7 +91,7 @@ Role: setup (the environment and the project brief). No ticket work.
 
 This is the one phase where the user expects to be asked things. After it, workers run unattended, so anything you do not settle now costs a night later.
 
-1. Make the box meet the session requirements (and, beyond them, what the goal and the board obviously need). You have passwordless sudo. Install toolchains and system packages yourself (sudo apt-get install -y …, sudo npm install -g …), install project dependencies (npm ci, pip install …), start services with svc (svc start <name> --port N -- <command>), create local config with dummy values where the project needs it (never real secrets), and run the project's own build, test and dev commands until they work. Verify every requirement by running something, not by reading.
+1. Make the box ready to develop the repositories: what they need to build, test and run today, plus the setup instructions the user gave. Nothing speculative: a package only one later ticket would need is that ticket's job. You have passwordless sudo. Install toolchains and system packages yourself (sudo apt-get install -y …, sudo npm install -g …), install project dependencies (npm ci, pip install …), start services with svc (svc start <name> --port N -- <command>), create local config with dummy values where the project needs it (never real secrets), and run the project's own build, test and dev commands until they work. Verify every requirement by running something, not by reading.
 2. Record what you did, for the next box and the next worker:
    - /workspace/notes/setup.sh: an idempotent bash recipe of the system-level steps (the sudo installs, binaries under /usr/local), in order, safe to run twice, with \`# needs-hosts: …\` on its second line. It runs as the agent user (use sudo inside it) when the container is recreated. Project dependencies under /workspace and services under svc survive a recreate on their own; leave them out.
    - /workspace/notes/env.md: what is installed and where; each service, its svc name, port and how to start it; env files you created and what is dummy in them; the exact commands that build, test and run the project here, and how long they take.
@@ -113,7 +113,7 @@ then a short summary. "ready" means every requirement is checked and work can st
     prompt: `
 Role: the user's direct request. The user typed the task below on the session page; do exactly that. There is no ticket and no reviewer. You may install and configure (with sudo), start services, investigate, and update the notes (env.md, setup.sh, brief.md, learnings.md) when what you do changes what they say. Change repository files only if the request asks for it; the harness commits any repository change as one commit after you. Do not work on board tickets. End with a reply for the user, a few lines: what you did, what you found, anything they should decide.`,
     planner: `
-Role: planner. Turn the session goal into tickets with \`board_create_ticket\`: small (S) or medium (M) where possible, each with a clear spec, acceptance criteria that a reviewer can check, the repository it touches, and dependencies by id when order matters. You may create feature tickets; keep them within the goal. Prefer ten good tickets over thirty vague ones. When the board already has tickets, add only what is missing and do not duplicate. Reply with a short summary of the plan and stop.`,
+Role: planner. Turn the user's planning request into tickets with \`board_create_ticket\`: small (S) or medium (M) where possible, each with a clear spec, acceptance criteria that a reviewer can check, the repository it touches, and dependencies by id when order matters. You may create feature tickets; keep them within the request. Prefer ten good tickets over thirty vague ones. When the board already has tickets, add only what is missing and do not duplicate. Reply with a short summary of the plan and stop.`,
   };
   return common + "\n" + byRole[role];
 };
@@ -181,11 +181,11 @@ ${diff.length > 60_000 ? diff.slice(0, 60_000) + "\n… (truncated; read the fil
 
 Run the tests yourself if the gates did not. Reply starting with VERDICT: ok | fixable | blocked.`;
 
-export const setupPrompt = (session: Session, board: Board, answers: string[], mode: "setup" | "brief"): string => `${mode === "brief" ? "# Brief only\nRefresh /workspace/notes/brief.md (and env.md if it is out of date) against the repositories and the board as they are today. Install nothing unless a command you need to verify is missing. Still reply with a SETUP line.\n\n" : ""}# Session requirements
-${session.requirements.trim() || "(none given: verify what the goal and the board need)"}
+export const setupPrompt = (session: Session, board: Board, answers: string[], mode: "setup" | "brief"): string => `${mode === "brief" ? "# Brief only\nRefresh /workspace/notes/brief.md (and env.md if it is out of date) against the repositories and the board as they are today. Install nothing unless a command you need to verify is missing. Still reply with a SETUP line.\n\n" : ""}# Set up the environment
+Make this box a sensible place to develop the repositories below: their toolchains at the versions they pin, their dependencies installed from their lockfiles, the services their tests need, their own build and test commands verified by running them, and env.md written for the workers. Work out what is needed from the repositories and the board; do not implement any ticket, and do not install things only one later ticket would need.
 
-# Session goal
-${session.goal || "(no goal given)"}
+# Setup instructions from the user
+${session.requirements.trim() || "(none)"}
 
 # Repositories
 ${session.repos.map((r) => `- /workspace/${r.name} (branch ${r.branch})`).join("\n") || "- none"}
@@ -201,8 +201,8 @@ ${text.trim()}
 
 Read /workspace/VERSTAS.md first if you have not. Reply with what you did and found.`;
 
-export const plannerPrompt = (session: Session, board: Board): string => `# Session goal
-${session.goal || "(no goal given; ask with a decision request)"}
+export const plannerPrompt = (session: Session, board: Board, goal: string): string => `# What to plan
+${goal.trim() || "(nothing given; ask with a decision request)"}
 
 # Repositories
 ${session.repos.map((r) => `- /workspace/${r.name}`).join("\n") || "- none"}

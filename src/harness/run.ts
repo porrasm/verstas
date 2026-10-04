@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
-import { agentFor, DRIVER_NAMES, eventSchema, needsSetup, now, requestOutcome, runSchema, type Board, type DriverName, type Readiness, type Run, type Session, type Ticket, type TicketState, type VerstasEvent } from "../core/types.js";
+import { agentFor, DRIVER_NAMES, eventSchema, isInitialized, now, requestOutcome, runSchema, type Board, type DriverName, type Readiness, type Run, type Session, type Ticket, type TicketState, type VerstasEvent } from "../core/types.js";
 import { addNote, getTicket, hasOpenWork, nextReady, replaceTicket, transition, validateRepos } from "../board/board.js";
 import { writeJsonAtomic } from "../board/store.js";
 import type { SessionHandle, SessionHub } from "../sessions/hub.js";
@@ -41,6 +41,8 @@ export type RunDeps = {
   worker: (sessionId: string) => WorkerRunner;
   /** Called once before the loop; brings the sandbox up with the env file at the given path. */
   ensureSandbox: (session: Session, envFile: string, token: string) => Promise<void>;
+  /** Commits the box to an image once initialization succeeded, so a recreated container starts set up. Best effort. */
+  snapshotSandbox?: (session: Session) => Promise<{ image: string; baseImageId: string }>;
   /** Called before every ticket: starts a stopped proxy or container; never recreates. */
   healSandbox?: (sessionId: string) => Promise<string[]>;
   agentApiUrl: string;
@@ -52,6 +54,18 @@ export type RunDeps = {
   now?: () => string;
   /** For tests: how long to sleep on a rate limit (ms). */
   rateLimitSleepMs?: number;
+};
+
+export type RunOptions = {
+  /** Initialize the environment; see `RunManager.start`. */
+  init?: boolean;
+  /** With init: go on to the tickets once initialization succeeds. */
+  start?: boolean;
+  /** Your planning request: the planner turns it into tickets. */
+  plan?: string;
+  brief?: boolean;
+  setup?: boolean;
+  prompt?: string;
 };
 
 export type RunControl = {
@@ -72,23 +86,21 @@ export class RunManager {
   }
 
   /**
-   * plan: run the planner first. brief: refresh the brief and stop. setup:
-   * run the setup worker against the session requirements and stop.
-   * prompt: run one worker with your text, no ticket, and stop. Without any
-   * of them this is a work run, which the setup gate refuses while
-   * requirements are set and not confirmed.
+   * init: initialize the environment (the container, the recipes, and the
+   * setup worker unless the session's setup mode skips it); with `start`,
+   * go on to the tickets when it succeeds. plan: run the planner with your
+   * request first. brief: refresh the brief and stop. setup: run the setup
+   * worker again and stop. prompt: run one worker with your text, no
+   * ticket, and stop. Without any of them this is a work run. Everything
+   * but init is refused while the session is not initialized: there is no
+   * environment to run in.
    */
-  async start(sessionId: string, opts: { plan?: boolean; brief?: boolean; setup?: boolean; prompt?: string } = {}): Promise<RunControl> {
+  async start(sessionId: string, opts: RunOptions = {}): Promise<RunControl> {
     if (this.active.has(sessionId)) throw new Error("A run is already active for this session");
     const h = await this.deps.hub.get(sessionId);
     if (opts.prompt !== undefined && !opts.prompt.trim()) throw new Error("The prompt is empty");
-    if (!opts.setup && !opts.brief && !opts.plan && opts.prompt === undefined && needsSetup(h.session)) {
-      throw new Error(
-        h.session.readiness?.verdict === "ready"
-          ? "The setup worker reported the environment ready; confirm it on the session page to start work."
-          : "This session has requirements and the environment is not set up yet. Run \"Set up environment\" first, or clear the requirements to skip the setup phase.",
-      );
-    }
+    if (opts.plan !== undefined && !opts.plan.trim()) throw new Error("Say what to plan");
+    if (!opts.init && !isInitialized(h.session)) throw new Error("This session is not initialized: press Initialize on the session page first.");
     // Refuse up front rather than discover it ticket by ticket.
     validateRepos(h.board.tickets, h.session.repos.map((r) => r.name), { ignoreDone: true });
     const id = (await nextRunId(h.paths.runs)) ?? 1;
@@ -189,7 +201,7 @@ export class RunManager {
   private async loop(
     h: SessionHandle,
     run: Run,
-    opts: { plan?: boolean; brief?: boolean; setup?: boolean; prompt?: string },
+    opts: RunOptions,
     ctl: { isPause: () => boolean; isStop: () => boolean; signal: AbortSignal },
   ): Promise<Run> {
     const d = this.deps;
@@ -219,37 +231,63 @@ export class RunManager {
 
       let proceed = true;
 
-      // The setup phase: one worker makes the box meet the requirements, asks
-      // for what it cannot do, and reports. The run stops after it either way;
-      // work starts when you confirm a "ready" verdict.
-      if (opts.setup) {
+      // Initialization and setup. init: the container and recipes are up
+      // (ensureSandbox above); a setup worker makes the box fit for the
+      // repositories unless the mode skips it. A "ready" verdict initializes
+      // the session, and with `start` the tickets follow; "needs" parks on
+      // its requests and the session stays uninitialized. setup alone (after
+      // initialization): the worker runs again and the run stops.
+      if (opts.init || opts.setup) {
         proceed = false;
-        await setSessionState("checking");
-        await status(h.session.requirements.trim() ? "setup: making the box meet the session requirements" : "setup: no requirements given; checking what the goal and the board need");
-        const answers = h.inbox.requests.filter((r) => r.state !== "open" && !r.ticketId).map(requestOutcome);
-        const done = await this.runJob(h, run, { role: "setup", promptText: setupPrompt(h.session, h.board, answers, "setup") }, log, ctl.signal, token);
-        addCost(run, done.costUsd);
-        await saveRun();
-        if (ctl.signal.aborted) {
-          run.state = "stopped";
-        } else {
-          const parsed = parseSetup(done.text);
-          const open = h.inbox.requests.some((r) => r.state === "open" && !r.ticketId);
-          const ready = Boolean(parsed?.ready) && !open && done.ok;
-          const readiness: Readiness = {
-            verdict: ready ? "ready" : "needs",
-            at: clock(),
-            summary: parsed?.summary || (done.ok ? "the setup worker gave no SETUP line" : `the setup worker ended with ${done.stopReason}`),
-            checks: parsed?.checks ?? [],
-          };
-          await h.mutate((docs) => ({ next: { session: { ...docs.session, readiness } } }));
-          if (ready) {
-            run.state = "finished";
-            await status(`setup: ready; confirm on the session page to start work. ${readiness.summary.slice(0, 300)}`);
+        const agentic = opts.setup || h.session.setupMode !== "skip";
+        if (opts.init) await status(agentic ? "init: container up; a setup worker makes the box fit for the repositories" : "init: container up; no setup worker (skipped)");
+        let ready = true;
+        if (agentic) {
+          await setSessionState("checking");
+          if (!opts.init) await status("setup: checking the environment again");
+          const answers = h.inbox.requests.filter((r) => r.state !== "open" && !r.ticketId).map(requestOutcome);
+          const done = await this.runJob(h, run, { role: "setup", promptText: setupPrompt(h.session, h.board, answers, "setup") }, log, ctl.signal, token);
+          addCost(run, done.costUsd);
+          await saveRun();
+          if (ctl.signal.aborted) {
+            run.state = "stopped";
+            ready = false;
           } else {
-            run.state = open ? "paused" : "halted";
-            run.pauseReason = open ? "requests" : `setup needs attention: ${readiness.summary.slice(0, 300)}`;
-            await status(open ? `setup needs you: ${readiness.summary.slice(0, 300)}` : `setup not ready: ${readiness.summary.slice(0, 300)}`);
+            const parsed = parseSetup(done.text);
+            const open = h.inbox.requests.some((r) => r.state === "open" && !r.ticketId);
+            ready = Boolean(parsed?.ready) && !open && done.ok;
+            const readiness: Readiness = {
+              verdict: ready ? "ready" : "needs",
+              at: clock(),
+              summary: parsed?.summary || (done.ok ? "the setup worker gave no SETUP line" : `the setup worker ended with ${done.stopReason}`),
+              checks: parsed?.checks ?? [],
+              confirmedAt: ready ? clock() : undefined,
+            };
+            await h.mutate((docs) => ({ next: { session: { ...docs.session, readiness } } }));
+            if (!ready) {
+              run.state = open ? "paused" : "halted";
+              run.pauseReason = open ? "requests" : `setup needs attention: ${readiness.summary.slice(0, 300)}`;
+              await status(open ? `setup needs you: ${readiness.summary.slice(0, 300)}` : `setup not ready: ${readiness.summary.slice(0, 300)}`);
+            } else await status(`setup: ready. ${readiness.summary.slice(0, 300)}`);
+          }
+        }
+        if (ready) {
+          if (opts.init) {
+            await h.mutate((docs) => ({ next: { session: { ...docs.session, initializedAt: docs.session.initializedAt ?? clock() } } }));
+            await status("init: done; the session is initialized");
+          }
+          // The box as it is now, committed: a recreated container starts from it instead of replaying the setup.
+          if (d.snapshotSandbox) {
+            const snap = await d.snapshotSandbox(h.session).catch((e: Error) => {
+              void status(`snapshot skipped: ${e.message.slice(0, 200)}`);
+              return undefined;
+            });
+            if (snap) await h.mutate((docs) => ({ next: { session: { ...docs.session, snapshot: { ...snap, at: clock() } } } }));
+          }
+          run.state = "finished";
+          if (opts.init && opts.start) {
+            proceed = true;
+            await setSessionState("running");
           }
         }
       }
@@ -264,7 +302,7 @@ export class RunManager {
         addCost(run, done.costUsd);
         const leaked = await this.commitInContainer(h, `Prompt: ${text.trim().split("\n")[0]!.slice(0, 72)}`);
         if (leaked.length) await log({ kind: "error", t: clock(), text: `The Claude token appears in the changes to ${leaked.join(", ")}; nothing was committed there. Remove it from the files.` });
-        const entry = { at: clock(), runId: run.id, text: text.slice(0, 20_000), reply: done.text.slice(0, 8000), stopReason: done.stopReason };
+        const entry = { at: clock(), runId: run.id, kind: "prompt" as const, text: text.slice(0, 20_000), reply: done.text.slice(0, 8000), stopReason: done.stopReason };
         await h.mutate((docs) => ({ next: { session: { ...docs.session, prompts: [...docs.session.prompts, entry].slice(-20) } } }));
         run.state = ctl.signal.aborted ? "stopped" : "finished";
       }
@@ -280,17 +318,22 @@ export class RunManager {
         proceed = false;
       }
 
-      // Plan when asked, or when the board is empty.
-      if (proceed && (opts.plan || h.board.tickets.length === 0)) {
+      // Planning: one planner worker turns your request into backlog tickets, then the run stops.
+      if (proceed && opts.plan !== undefined) {
+        proceed = false;
+        const request = opts.plan;
         await setSessionState("planning");
         d.tokens.update(token, { role: "planner", currentTicket: undefined });
-        await status("planner: turning the goal into tickets");
-        const done = await this.runJob(h, run, { role: "planner", promptText: await this.withNotes(h, plannerPrompt(h.session, h.board)) }, log, ctl.signal, token);
+        await status(`planner: ${request.trim().split("\n")[0]!.slice(0, 120)}`);
+        const done = await this.runJob(h, run, { role: "planner", promptText: await this.withNotes(h, plannerPrompt(h.session, h.board, request)) }, log, ctl.signal, token);
         addCost(run, done.costUsd);
         await saveRun();
         d.tokens.update(token, { role: "worker" });
-        await status(`planner finished (${done.stopReason}); ${h.board.tickets.filter((t) => t.state === "backlog").length} tickets in backlog await your approval`);
-        await setSessionState("running");
+        const backlog = h.board.tickets.filter((t) => t.state === "backlog").length;
+        await status(`planner finished (${done.stopReason}); ${backlog} tickets in backlog await your approval`);
+        const entry = { at: clock(), runId: run.id, kind: "plan" as const, text: request.slice(0, 20_000), reply: done.text.slice(0, 8000), stopReason: done.stopReason };
+        await h.mutate((docs) => ({ next: { session: { ...docs.session, prompts: [...docs.session.prompts, entry].slice(-20) } } }));
+        run.state = ctl.signal.aborted ? "stopped" : "finished";
       }
 
       let lastDenialCheck = clock();
@@ -397,8 +440,8 @@ export class RunManager {
       await saveRun();
       let sessionState: Session["state"] =
         run.state === "halted" ? "halted" : run.state === "finished" ? "finished" : run.pauseReason === "requests" ? "waiting" : "paused";
-      // Until the environment is confirmed, the session is in its setup phase.
-      if (needsSetup(h.session) && sessionState !== "waiting") sessionState = "setup";
+      // Not initialized: the session is still a plan, or its initialization needs you.
+      if (!isInitialized(h.session) && sessionState !== "waiting") sessionState = "setup";
       await setSessionState(sessionState).catch(() => undefined);
     }
     return run;

@@ -16,7 +16,7 @@ import { writeJsonAtomic, saveBoard } from "../board/store.js";
 import { emptyBoard } from "../board/board.js";
 import type { WorkTarget } from "../config.js";
 import { allowlistFor, DEFAULT_PACKS, driverPack, packHosts } from "../network/packs.js";
-import { cloneWorkTarget, extractZip, type CloneResult, type ExtractResult } from "./workspace.js";
+import { cloneWorkTarget, extractZip, listBranches, runBranchName, type CloneResult, type ExtractResult } from "./workspace.js";
 
 /**
  * A session is a directory under the sessions root:
@@ -96,7 +96,8 @@ export const makeSessionId = async (root: string, name: string, date = new Date(
 
 export type CreateSessionInput = {
   name: string;
-  goal: string;
+  /** A draft's goal, kept as the first suggestion for the Plan tickets box; nothing else reads it. */
+  goal?: string;
   repos: { target: WorkTarget; branch?: string; name?: string }[];
   zips: { name: string; file: string }[];
   /** Extra hosts beyond the packs; with no packs given, the whole allowlist (older callers). */
@@ -125,10 +126,32 @@ export const withAgentPacks = (packs: readonly string[], s: { model?: string; ag
 export type CreateSessionResult = {
   session: Session;
   paths: SessionPaths;
-  clones: CloneResult[];
   extracts: ExtractResult[];
 };
 
+/** Directory names under /workspace that a repository cannot take. */
+export const RESERVED_WORKSPACE_NAMES: readonly string[] = ["attachments", "notes", ".home", ".verstas"];
+
+/**
+ * The record of a repository pick, before the clone exists: the branch is
+ * fixed now (the one you chose, or the target's current one), the clone and
+ * its base commit come at initialization.
+ */
+export const repoPick = async (sessionId: string, pick: { target: WorkTarget; branch?: string; name?: string }): Promise<Session["repos"][number]> => {
+  const name = pick.name ?? pick.target.name;
+  const found = await listBranches(pick.target.path).catch(() => null);
+  if (!found) throw new Error(`${pick.target.path} is not a git work tree`);
+  const branch = pick.branch ?? found.current;
+  if (!branch) throw new Error(`${pick.target.name}: cannot tell the current branch (detached HEAD?); choose one`);
+  return { name, sourcePath: pick.target.path, branch, runBranch: runBranchName(sessionId) };
+};
+
+/**
+ * Creates the session directory and its files. Nothing is cloned and no
+ * container exists yet: the session is a plan until `provisionSession`
+ * runs at initialization. Attachments are extracted now; they are files of
+ * yours, not an environment.
+ */
 export const createSession = async (root: string, input: CreateSessionInput): Promise<CreateSessionResult> => {
   const id = await makeSessionId(root, input.name);
   const paths = sessionPaths(root, id);
@@ -139,13 +162,14 @@ export const createSession = async (root: string, input: CreateSessionInput): Pr
   await fs.mkdir(paths.exportDir, { recursive: true });
   await fs.mkdir(paths.setup, { recursive: true });
 
-  const clones: CloneResult[] = [];
   const extracts: ExtractResult[] = [];
   const session: Session = sessionSchema.parse({
     id,
     name: input.name,
-    goal: input.goal,
+    goal: input.goal ?? "",
     createdAt: now(),
+    initializedAt: null,
+    state: "setup",
     image: input.image,
     model: input.model?.trim() || undefined,
     agents: input.agents ?? {},
@@ -164,14 +188,12 @@ export const createSession = async (root: string, input: CreateSessionInput): Pr
   });
 
   try {
-    const used = new Set<string>(["attachments", "notes", ".home"]);
+    const used = new Set<string>(RESERVED_WORKSPACE_NAMES);
     for (const r of input.repos) {
       const name = r.name ?? r.target.name;
       if (used.has(name)) throw new Error(`Duplicate workspace directory name: ${name}`);
       used.add(name);
-      const clone = await cloneWorkTarget(r.target.path, path.join(paths.workspace, name), r.branch, id);
-      clones.push(clone);
-      session.repos.push({ name, sourcePath: r.target.path, branch: clone.branch, runBranch: clone.runBranch, baseCommit: clone.commit });
+      session.repos.push(await repoPick(id, r));
     }
     for (const z of input.zips) {
       const dirName = z.name.replace(/\.zip$/i, "").replace(/[^A-Za-z0-9._-]+/g, "-").slice(0, 100) || "attachment";
@@ -179,25 +201,76 @@ export const createSession = async (root: string, input: CreateSessionInput): Pr
       extracts.push(ex);
       session.attachments.push({ name: z.name, dir: dirName, bytes: ex.bytes, skipped: ex.skipped });
     }
-    // A copy of each script, readable in the session directory; the container runs the copy.
-    for (const sc of session.setupScripts) await fs.writeFile(path.join(paths.setup, `${sc.name}.sh`), sc.script, { mode: 0o600 });
-    // A recipe saved from another session brings its environment description; the setup worker verifies and corrects it.
-    const envs = session.setupScripts.filter((sc) => sc.env.trim());
-    if (envs.length) {
-      await fs.writeFile(
-        path.join(paths.notes, "env.md"),
-        envs.map((sc) => `<!-- from recipe ${sc.name}; true for the session it was saved from, verify here -->\n${sc.env.trim()}`).join("\n\n") + "\n",
-      );
-    }
+    await writeRecipeFiles(paths, session.setupScripts);
     await writeJsonAtomic(paths.session, session);
-    await saveBoard(paths.dir, emptyBoard(input.goal));
+    await saveBoard(paths.dir, emptyBoard(input.goal ?? ""));
     await writeJsonAtomic(paths.inbox, inboxSchema.parse({}));
     await writeAllowlist(paths, session.allowlist);
   } catch (e) {
     await fs.rm(paths.dir, { recursive: true, force: true });
     throw e;
   }
-  return { session, paths, clones, extracts };
+  return { session, paths, extracts };
+};
+
+/**
+ * A copy of each recipe, readable in the session directory (the container
+ * runs the copy), and the environment description a recipe brings along
+ * for the setup worker to verify. Stale copies of recipes no longer chosen
+ * are removed.
+ */
+export const writeRecipeFiles = async (paths: SessionPaths, scripts: readonly SessionSetupScript[]): Promise<void> => {
+  await fs.mkdir(paths.setup, { recursive: true });
+  const keep = new Set(scripts.map((sc) => `${sc.name}.sh`));
+  for (const f of await fs.readdir(paths.setup).catch(() => [] as string[])) if (f.endsWith(".sh") && !keep.has(f)) await fs.rm(path.join(paths.setup, f), { force: true });
+  for (const sc of scripts) await fs.writeFile(path.join(paths.setup, `${sc.name}.sh`), sc.script, { mode: 0o600 });
+  const envs = scripts.filter((sc) => sc.env.trim());
+  const envFile = path.join(paths.notes, "env.md");
+  const current = await fs.readFile(envFile, "utf8").catch(() => "");
+  // Only a recipe-written env.md is replaced; one the setup worker wrote is its own.
+  if (envs.length && (!current || current.startsWith("<!-- from recipe "))) {
+    await fs.mkdir(paths.notes, { recursive: true });
+    await fs.writeFile(envFile, envs.map((sc) => `<!-- from recipe ${sc.name}; true for the session it was saved from, verify here -->\n${sc.env.trim()}`).join("\n\n") + "\n");
+  } else if (!envs.length && current.startsWith("<!-- from recipe ")) await fs.rm(envFile, { force: true });
+};
+
+/** The clone of a repository exists in the workspace (a repository picked earlier, or one from before initialization existed). */
+export const cloneExists = (paths: SessionPaths, name: string): Promise<boolean> => fs.access(path.join(paths.workspace, name, ".git")).then(() => true, () => false);
+
+/**
+ * Initialization, host side: fresh clones of every picked repository at its
+ * recorded branch, taken now so they are current when the work starts. A
+ * repository already cloned (a retry after a failure, or an older session)
+ * is left alone. On a failure the clones made in this call are removed, so
+ * the session can be initialized again. Returns the updated repos.
+ */
+export const provisionSession = async (root: string, session: Session): Promise<{ repos: Session["repos"]; clones: CloneResult[] }> => {
+  const paths = sessionPaths(root, session.id);
+  const clones: CloneResult[] = [];
+  const made: string[] = [];
+  const repos: Session["repos"] = [];
+  try {
+    for (const r of session.repos) {
+      if (await cloneExists(paths, r.name)) {
+        repos.push(r);
+        continue;
+      }
+      const clone = await cloneWorkTarget(r.sourcePath, path.join(paths.workspace, r.name), r.branch, session.id);
+      made.push(clone.dest);
+      clones.push(clone);
+      repos.push({ ...r, branch: clone.branch, runBranch: clone.runBranch, baseCommit: clone.commit });
+    }
+  } catch (e) {
+    for (const dest of made) await fs.rm(dest, { recursive: true, force: true });
+    throw e;
+  }
+  return { repos, clones };
+};
+
+/** Removes the clones; the session is a plan again (the caller removes the sandbox and clears the session fields). */
+export const removeClones = async (root: string, session: Session): Promise<void> => {
+  const paths = sessionPaths(root, session.id);
+  for (const r of session.repos) await fs.rm(path.join(paths.workspace, r.name), { recursive: true, force: true });
 };
 
 /**
@@ -218,6 +291,12 @@ export const LEGACY_PREFLIGHT_REQUIREMENTS = "The goal and the board can be work
  * Sessions from before the setup phase: an "agentic initialization" tick
  * (caps.preflight) becomes generic requirements, and a passed check counts
  * as confirmed so a running session is not gated after an upgrade.
+ *
+ * Sessions from before initialization existed (no `initializedAt` field)
+ * were cloned at creation, so they count as initialized from their creation,
+ * unless they were still gated by unconfirmed requirements: those stay
+ * uninitialized and finish through the Initialize button, which skips the
+ * clones that exist.
  */
 export const migrateSession = (raw: unknown): unknown => {
   if (!raw || typeof raw !== "object") return raw;
@@ -229,6 +308,11 @@ export const migrateSession = (raw: unknown): unknown => {
     r.readiness = { verdict: pre.ok ? "ready" : "needs", at: pre.at, summary: pre.summary ?? "", checks: [], confirmedAt: pre.ok ? pre.at : undefined };
   }
   delete r.preflight;
+  if (r.initializedAt === undefined) {
+    const readiness = r.readiness as { confirmedAt?: string } | undefined;
+    const gated = Boolean(String(r.requirements ?? "").trim()) && !readiness?.confirmedAt;
+    r.initializedAt = gated ? null : (r.createdAt as string | undefined) ?? null;
+  }
   return r;
 };
 

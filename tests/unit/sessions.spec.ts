@@ -12,6 +12,8 @@ import {
   listSessions,
   loadSession,
   makeSessionId,
+  provisionSession,
+  removeClones,
   sessionPaths,
 } from "../../src/sessions/sessions.js";
 import { entryProblem, extractZip } from "../../src/sessions/workspace.js";
@@ -42,21 +44,31 @@ const makeSourceRepo = async (dir: string) => {
   await git(dir, "checkout", "-q", "main");
 };
 
-test("createSession clones fresh, without secrets, hooks, origin or other branches", async () => {
+test("createSession records the plan; provisionSession clones fresh, without secrets, hooks, origin or other branches", async () => {
   const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "verstas-sessions-"));
   const src = path.join(tmp, "src-repo");
   await makeSourceRepo(src);
   const root = path.join(tmp, "sessions");
   try {
-    const { session, paths, clones } = await createSession(root, {
+    const { session, paths } = await createSession(root, {
       name: "Nuppi MVP",
-      goal: "Build it",
       repos: [{ target: { name: "nuppi", path: src } }],
       zips: [],
       image: "verstas-devbox:local",
     });
     expect(session.id).toMatch(/^\d{4}-\d{2}-\d{2}-nuppi-mvp$/);
+    // A plan: the pick is recorded, nothing is cloned, nothing is initialized.
+    expect(session.initializedAt).toBeNull();
+    expect(session.state).toBe("setup");
+    expect(session.repos[0]).toEqual({ name: "nuppi", sourcePath: src, branch: "main", runBranch: `verstas/${session.id}` });
     const clone = path.join(paths.workspace, "nuppi");
+    await expect(fs.access(clone)).rejects.toThrow();
+
+    // Initialization clones at the recorded branch.
+    const { repos, clones } = await provisionSession(root, session);
+    expect(repos[0]!.baseCommit).toBe(await git(src, "rev-parse", "main"));
+    // A second provisioning (a retry) leaves the existing clone alone.
+    expect((await provisionSession(root, { ...session, repos })).clones).toEqual([]);
     expect(await fs.readFile(path.join(clone, "README.md"), "utf8")).toBe("hello\n");
     await expect(fs.access(path.join(clone, ".env"))).rejects.toThrow();
     await expect(fs.access(path.join(clone, ".git", "hooks", "pre-commit"))).rejects.toThrow();
@@ -75,6 +87,10 @@ test("createSession clones fresh, without secrets, hooks, origin or other branch
     const loaded = await loadSession(root, session.id);
     expect(loaded.repos[0]).toMatchObject({ name: "nuppi", branch: "main", runBranch: `verstas/${session.id}` });
     expect((await listSessions(root)).map((s) => s.id)).toEqual([session.id]);
+    // Reset: the clone goes, the plan stays.
+    await removeClones(root, { ...session, repos });
+    await expect(fs.access(clone)).rejects.toThrow();
+    await expect(fs.access(paths.session)).resolves.toBeUndefined();
     // A second session with the same name gets a suffix.
     expect(await makeSessionId(root, "Nuppi MVP")).toBe(`${session.id}-2`);
     // Delete, and refuse to delete outside the root.
@@ -91,7 +107,7 @@ test("createSession rejects a non-repo target and cleans up after itself", async
   const root = path.join(tmp, "sessions");
   try {
     await expect(
-      createSession(root, { name: "x", goal: "", repos: [{ target: { name: "nope", path: tmp } }], zips: [], image: "i" }),
+      createSession(root, { name: "x", repos: [{ target: { name: "nope", path: tmp } }], zips: [], image: "i" }),
     ).rejects.toThrow(/not a git work tree/);
     expect(await listSessions(root)).toEqual([]);
   } finally {
@@ -221,7 +237,6 @@ test("setup scripts are copied into the session and their hosts join the allowli
   try {
     const { session, paths } = await createSession(root, {
       name: "with scripts",
-      goal: "",
       repos: [{ target: { name: "app", path: src } }],
       zips: [],
       image: "i",
@@ -247,7 +262,9 @@ test("applyBundle creates and updates the feature branch in the real repo withou
   await makeSourceRepo(src);
   const root = path.join(tmp, "sessions");
   try {
-    const { session, paths } = await createSession(root, { name: "apply", goal: "", repos: [{ target: { name: "app", path: src } }], zips: [], image: "i" });
+    const created = await createSession(root, { name: "apply", repos: [{ target: { name: "app", path: src } }], zips: [], image: "i" });
+    const paths = created.paths;
+    const session = { ...created.session, repos: (await provisionSession(root, created.session)).repos };
     const clone = path.join(paths.workspace, "app");
     const branch = session.repos[0]!.runBranch;
     // The harness's work, simulated: two ticket commits in the clone, then a bundle (in production both happen inside the container).
@@ -284,18 +301,22 @@ test("applyBundle creates and updates the feature branch in the real repo withou
   }
 });
 
-test("sessions from before the setup phase migrate: the init-check tick becomes requirements, a passed check counts as confirmed", async () => {
+test("sessions from before initialization existed migrate: cloned at creation, they count as initialized unless they were still gated by setup", async () => {
   const { migrateSession, LEGACY_PREFLIGHT_REQUIREMENTS } = await import("../../src/sessions/sessions.js");
-  const { sessionSchema, needsSetup } = await import("../../src/core/types.js");
+  const { sessionSchema, isInitialized } = await import("../../src/core/types.js");
   const base = { id: "2026-10-03-old", name: "old", goal: "g", createdAt: "2026-10-03T10:00:00Z" };
   const passed = sessionSchema.parse(migrateSession({ ...base, caps: { preflight: true }, preflight: { ok: true, at: "2026-10-03T11:00:00Z", summary: "fine" } }));
   expect(passed.requirements).toBe(LEGACY_PREFLIGHT_REQUIREMENTS);
   expect(passed.readiness).toMatchObject({ verdict: "ready", confirmedAt: "2026-10-03T11:00:00Z" });
-  expect(needsSetup(passed)).toBe(false);
+  expect(passed.initializedAt).toBe("2026-10-03T10:00:00Z");
   const failed = sessionSchema.parse(migrateSession({ ...base, caps: { preflight: true }, preflight: { ok: false, at: "2026-10-03T11:00:00Z", summary: "no pg" } }));
-  expect(needsSetup(failed)).toBe(true);
+  expect(isInitialized(failed)).toBe(false);
+  const gated = sessionSchema.parse(migrateSession({ ...base, requirements: "pg runs" }));
+  expect(isInitialized(gated)).toBe(false);
   const plain = sessionSchema.parse(migrateSession({ ...base, caps: { preflight: false } }));
   expect(plain.requirements).toBe("");
-  expect(needsSetup(plain)).toBe(false);
+  expect(isInitialized(plain)).toBe(true);
+  // A session written by this version says so itself.
+  expect(sessionSchema.parse(migrateSession({ ...base, initializedAt: null })).initializedAt).toBeNull();
   expect("preflight" in plain.caps).toBe(false);
 });

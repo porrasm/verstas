@@ -39,8 +39,11 @@ export type Inbox = {
 export type Session = {
   id: string;
   name: string;
+  /** Legacy, or a draft's goal: the first suggestion in the Plan tickets box. Not part of the setup. */
   goal: string;
   createdAt: string;
+  /** When the environment came to exist; null while the session is a plan. */
+  initializedAt: string | null;
   image: string;
   /** Legacy: the worker's Claude model from before `agents`; read through agentFor. */
   model?: string;
@@ -54,9 +57,11 @@ export type Session = {
   rootScripts: { script: string; cwd?: string; at: string; requestId?: string }[];
   setupScripts: { name: string; description: string; hosts: string[]; note: string; script: string; runAs: "root" | "agent" }[];
   setup: { name: string; ok: boolean; code: number; at: string; tail: string }[];
+  /** Setup instructions for the setup worker (agentic mode). */
   requirements: string;
+  setupMode: "agentic" | "skip";
   readiness?: Readiness;
-  prompts: { at: string; runId: number; text: string; reply: string; stopReason: string }[];
+  prompts: { at: string; runId: number; kind: "prompt" | "plan"; text: string; reply: string; stopReason: string }[];
   state: string;
   /** Shown on the remote dashboard; off by default. */
   remote: boolean;
@@ -68,8 +73,8 @@ export type RemoteSettings = {
   status: { state: "off" | "unconfigured" | "connecting" | "connected" | "error"; error?: string; lastPushAt?: string; lastCommandAt?: string; shared: number };
 };
 export type Readiness = { verdict: "ready" | "needs"; at: string; summary: string; checks: { text: string; ok: boolean }[]; confirmedAt?: string };
-/** Tickets wait for the environment: requirements set and not confirmed. Mirrors src/core/types.ts. */
-export const needsSetup = (s: { requirements: string; readiness?: Readiness }): boolean => Boolean(s.requirements.trim()) && !s.readiness?.confirmedAt;
+/** The environment exists: clones, container, setup done or skipped. Mirrors src/core/types.ts. */
+export const isInitialized = (s: { initializedAt: string | null }): boolean => Boolean(s.initializedAt);
 export type NetworkPack = { name: string; title: string; hosts: string[]; /** Set on the packs that follow an agent choice instead of being ticked. */ agent?: DriverName };
 export type SetupScript = { name: string; description: string; hosts: string[]; note: string; script: string; runAs: "root" | "agent"; env: string };
 export type Run = { id: number; state: string; startedAt: string; endedAt?: string; currentTicket?: string; ticketsDone: number; cost: { usd?: number }; pauseReason?: string; resumeAt?: string };

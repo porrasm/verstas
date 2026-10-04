@@ -4,7 +4,7 @@ import type { DriverName, Session } from "../core/types.js";
 import type { SessionHub } from "../sessions/hub.js";
 import type { RunTokens } from "../agent-api/agent-api.js";
 import { promises as fs } from "node:fs";
-import { buildSpec, ensureSandboxUp, execInSandbox, healSandbox, proxyLogsSince, runInSandbox, runRootScript, runSetupScript, usableSnapshot, writeEnvFile, type SandboxConfig } from "../sandbox/lifecycle.js";
+import { buildSpec, ensureSandboxUp, execInSandbox, healSandbox, proxyLogsSince, runInSandbox, runRootScript, runSetupScript, snapshotSandbox, usableSnapshot, writeEnvFile, type SandboxConfig } from "../sandbox/lifecycle.js";
 import { now, type SetupResult } from "../core/types.js";
 import { secretValues, type Secrets } from "../config.js";
 import { writeAllowlist } from "../sessions/sessions.js";
@@ -248,6 +248,7 @@ export const createDockerRunManager = (c: RunManagerConfig): RunManager =>
     secrets: async () => secretValues(await c.credentials.secrets()),
     proxyDenials: (sessionId, since) => proxyDenials(c.sandbox, sessionId)(since),
     ensureSandbox: (session, envFile, token) => ensureSessionSandbox(c, session, envFile, token),
+    snapshotSandbox: (session) => snapshotSandbox(c.sandbox, session),
     healSandbox: async (sessionId) => {
       const did = await healSandbox(c.sandbox, sessionId);
       if (did.some((l) => l.startsWith("session container"))) {

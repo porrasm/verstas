@@ -8,8 +8,8 @@ only you create, start or run.
 
 | Field | Notes |
 | --- | --- |
-| Name, goal | The goal is what workers read on every ticket. |
-| Session requirements | One verifiable line per need; the setup worker makes the box meet them. |
+| Name, goal | The goal becomes the first planning request on the session page (Plan tickets); it is not part of the setup and workers do not read it. |
+| Session requirements | Instructions for the setup worker, on top of what it works out from the repositories and the board. |
 | Notes | For you: the assistant's assumptions and open questions. |
 | Repositories | Work targets from Settings, with a branch and an optional directory name. A draft cannot add work targets. |
 | Network | Packs and extra hosts. The Claude API is always on. |
@@ -17,7 +17,7 @@ only you create, start or run.
 | Board | Tickets in the board format (`docs/BOARD.md`). |
 
 Left out on purpose: caps, budget, model, memory limits and attachments. You
-set those on the New session form.
+set those on the session page, before you initialize.
 
 Drafts are files in `~/.verstas/drafts/<id>.json` (`$VERSTAS_HOME/drafts`),
 written only by the host app.
@@ -70,11 +70,14 @@ list.
 
 1. The draft appears on the Sessions page as it is written; its page
    (`#/d/<id>`) follows the assistant's edits live.
-2. **Continue to create session** opens the New session form filled from
-   the draft. Change anything; set caps, model and attachments.
-3. **Create** is the normal create call with the draft's id. The draft is
-   marked with the session it became and is read-only from then on, to the
-   assistant and to a second Create.
+2. **Continue to create session** opens the New session form with the
+   draft's name and board; its repositories, requirements, packs and
+   recipes come along.
+3. **Create** is the normal create call with the draft's id. The session
+   is a plan: change anything on its page (repositories, caps, agents,
+   attachments), then press Initialize. The draft is marked with the
+   session it became and is read-only from then on, to the assistant and
+   to a second Create.
 
 Errors block Continue. Delete a draft from its page.
 

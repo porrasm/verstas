@@ -4,8 +4,12 @@ import { api, fmtAgo, fmtDateTime, fmtUsd, STATE_LABEL, useLive, useNow, type Dr
 const ORDER = ["done", "review", "in_progress", "waiting", "blocked", "ready", "backlog"];
 
 const stateOf = (s: SessionSummary): { label: string; tone: string; dot: string } => {
-  if (s.run?.state === "running") return { label: s.session.state === "planning" ? "planning" : s.run.currentTicket ? `working on ${s.run.currentTicket}` : "running", tone: "sig", dot: "run" };
+  if (s.run?.state === "running") {
+    const label = s.session.state === "planning" ? "planning" : s.session.state === "checking" ? (s.session.initializedAt ? "checking the environment" : "initializing") : s.run.currentTicket ? `working on ${s.run.currentTicket}` : "running";
+    return { label, tone: "sig", dot: "run" };
+  }
   if (s.openRequests) return { label: "waiting for you", tone: "warn", dot: "bad" };
+  if (!s.session.initializedAt) return s.session.readiness?.verdict === "needs" ? { label: "initialization needs you", tone: "warn", dot: "bad" } : { label: "not initialized", tone: "quiet", dot: "" };
   switch (s.session.state) {
     case "finished":
       return { label: "finished", tone: "good", dot: "good" };
@@ -130,7 +134,6 @@ export const SessionsPage = ({ status }: { status: Status | null }) => {
                   <tr key={s.session.id}>
                     <td className="name">
                       <a href={`#/s/${encodeURIComponent(s.session.id)}`}><strong>{s.session.name}</strong></a>
-                      {s.session.goal && <div className="goal ellipsis" title={s.session.goal}>{s.session.goal}</div>}
                       <div className="mono faint small">{s.session.id}{s.session.repos.length ? ` · ${s.session.repos.map((r) => r.name).join(", ")}` : ""}</div>
                       {s.error ? <div className="err small">{s.error}</div> : null}
                     </td>

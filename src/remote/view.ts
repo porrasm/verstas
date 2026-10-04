@@ -1,5 +1,5 @@
 import type { Run, Session, Board, Inbox, VerstasEvent } from "../core/types.js";
-import { needsSetup } from "../core/types.js";
+import { isInitialized } from "../core/types.js";
 import { packHosts } from "../network/packs.js";
 
 /**
@@ -76,7 +76,8 @@ export const remoteSession = (x: RemoteSessionInput) => {
     ...(s.model ? { model: s.model } : {}),
     repos: s.repos.map((r) => r.name),
     requirements: cap(s.requirements, 4000),
-    needsSetup: needsSetup(s),
+    needsSetup: !isInitialized(s),
+    initialized: isInitialized(s),
     ...(s.readiness
       ? {
           readiness: {

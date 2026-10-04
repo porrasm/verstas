@@ -12,9 +12,10 @@ import {
   DEFAULT_ALLOWLIST,
   DRIVER_NAMES,
   driverNameSchema,
+  isInitialized,
   limitsSchema,
-  needsSetup,
   sessionAgentsSchema,
+  setupModeSchema,
   now,
   ticketIdSchema,
   ticketImportSchema,
@@ -26,13 +27,14 @@ import {
   type Inbox,
   type Run,
   type Session,
+  type SessionSetupScript,
   type Ticket,
 } from "../core/types.js";
 import { emptyBoard, addNote, BoardError, exportBoard, getTicket, importBoard, parseBoardPaste, replaceTicket, transition, validateDeps, validateRepos, canTransition } from "../board/board.js";
 import { codexAuthRefreshedAt, configSchema, loadConfig, loadSecrets, saveConfig, saveSecrets, verstasHome, workTargetSchema, type Config } from "../config.js";
 import { codexAuthAgeDays, configuredDrivers, DRIVERS } from "../harness/drivers.js";
 import type { SessionHub } from "../sessions/hub.js";
-import { createSession, deleteSessionDir, listSessions, sessionPaths, withAgentPacks } from "../sessions/sessions.js";
+import { createSession, deleteSessionDir, listSessions, provisionSession, removeClones, repoPick, RESERVED_WORKSPACE_NAMES, sessionPaths, withAgentPacks, writeRecipeFiles } from "../sessions/sessions.js";
 import { applyBundle, ApplyError } from "../sessions/apply.js";
 import type { SessionHandle } from "../sessions/hub.js";
 import { listSandboxes, removeSandbox, sandboxStatus, snapshotSandbox, stopAllSandboxes, stopSandbox, type SandboxConfig } from "../sandbox/lifecycle.js";
@@ -41,11 +43,11 @@ import type { RunManager } from "../harness/run.js";
 import { dockerShell, ensureSessionSandbox, runSetup, type RunManagerConfig } from "../harness/docker-worker.js";
 import { deleteScript, getScript, hostsFromScript, listScripts, saveScript, setupScriptSchema } from "../scripts/library.js";
 import { buildContext, probeImage } from "../context/context.js";
-import { detectPacksInRepo, NETWORK_PACKS, packHosts } from "../network/packs.js";
+import { allowlistFor, detectPacksInRepo, NETWORK_PACKS, packHosts } from "../network/packs.js";
 import { allRuns, lastRun, runTotals } from "../sessions/runs.js";
 import { RemoteClient } from "../remote/client.js";
 import { isLoopback } from "../remote/http.js";
-import { listBranches } from "../sessions/workspace.js";
+import { extractZip, listBranches } from "../sessions/workspace.js";
 import { DraftError, draftBoardText, validateDraft, type Draft } from "../drafts/draft.js";
 import type { DraftStore } from "../drafts/store.js";
 import type { McpSetup } from "../drafts/setup.js";
@@ -87,6 +89,8 @@ const wrap =
       } else if (e instanceof BoardError) {
         console.warn(`[ui] ${req.method} ${req.originalUrl}: ${e.message}`);
         res.status(e.code === "unknown_ticket" ? 404 : 409).json({ error: e.message });
+      } else if (typeof (e as { status?: unknown }).status === "number") {
+        res.status((e as { status: number }).status).json({ error: (e as Error).message });
       } else if ((e as NodeJS.ErrnoException).code === "ENOENT") {
         console.warn(`[ui] 404 ${req.method} ${req.originalUrl}: ${(e as Error).message}`);
         res.status(404).json({ error: `Not found: ${(e as NodeJS.ErrnoException).path ?? ""}` });
@@ -541,10 +545,25 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
     limits: limitsSchema.partial().optional(),
     board: z.string().optional(),
     requirements: z.string().max(20_000).optional(),
-    plan: z.boolean().default(false),
+    setupMode: setupModeSchema.optional(),
     /** The draft this form was filled from; it is marked as having become this session. */
     draftId: z.string().max(90).optional(),
   });
+
+  /** Zip uploads from /uploads become extracted attachments of the session; the uploads are removed. */
+  const attachUploads = async (h: SessionHandle, uploads: { id: string; name: string }[]) => {
+    const extracts = [];
+    for (const u of uploads) {
+      const file = path.join(uploadsDir, `${u.id}.zip`);
+      const dirName = u.name.replace(/\.zip$/i, "").replace(/[^A-Za-z0-9._-]+/g, "-").slice(0, 100) || "attachment";
+      if (h.session.attachments.some((a) => a.dir === dirName)) throw Object.assign(new Error(`An attachment named ${dirName} exists already; remove it first`), { status: 409 });
+      const ex = await extractZip(file, path.join(h.paths.attachments, dirName));
+      await fs.rm(file, { force: true });
+      extracts.push(ex);
+      await h.mutate((docs) => ({ next: { session: { ...docs.session, attachments: [...docs.session.attachments, { name: u.name, dir: dirName, bytes: ex.bytes, skipped: ex.skipped }] } } }));
+    }
+    return extracts;
+  };
 
   api.post(
     "/sessions",
@@ -561,16 +580,13 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
         return { target, branch: r.branch, name: r.name };
       });
       const zips = input.uploads.map((u) => ({ name: u.name, file: path.join(uploadsDir, `${u.id}.zip`) }));
-      // Validate the pasted board against the chosen repositories BEFORE cloning anything.
-      const repoNames = repos.map((r) => r.name ?? r.target.name);
+      // A pasted board is checked before anything is written. Tickets may name repositories picked later: only a repository the board names and the session will never have is a problem at start time, not here.
       const pasted = input.board?.trim() ? parseBoardPaste(input.board) : undefined;
-      if (pasted) {
-        const preview = importBoard(emptyBoard(), pasted, { by: "user", defaultState: "ready" });
-        validateRepos(preview.board.tickets, repoNames);
-      }
+      if (pasted && repos.length) validateRepos(importBoard(emptyBoard(), pasted, { by: "user", defaultState: "ready" }).board.tickets, repos.map((r) => r.name ?? r.target.name));
       const setupScripts = [];
       for (const name of input.setupScripts) setupScripts.push(await getScript(name));
       await fs.mkdir(cfg.sessionsRoot, { recursive: true });
+      // Nothing is cloned and no container exists: the session is a plan until you initialize it.
       const created = await createSession(cfg.sessionsRoot, { ...input, repos, zips, setupScripts, image: cfg.devboxImage });
       for (const z of zips) await fs.rm(z.file, { force: true });
       let imported: { created: string[]; skipped: { title: string; reason: string }[] } | undefined;
@@ -582,10 +598,147 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
         });
       }
       if (input.draftId) await d.drafts.markPromoted(input.draftId, created.session.id).catch((e: Error) => console.warn(`[ui] draft ${input.draftId}: ${e.message}`));
-      // With requirements, setup starts at once: it is the part that needs you, so it should happen while you are here.
-      if (created.session.requirements.trim()) await d.runs.start(created.session.id, { setup: true });
-      else if (input.plan) await d.runs.start(created.session.id, { plan: true });
-      res.status(201).json({ session: created.session, clones: created.clones, extracts: created.extracts, imported });
+      res.status(201).json({ session: created.session, extracts: created.extracts, imported });
+    }),
+  );
+
+  // --- the plan: repositories, attachments, recipes, setup mode, then Initialize ------------
+
+  const notWhileRunning = (res: Response, id: string): boolean => {
+    if (!d.runs.status(id)) return false;
+    res.status(409).json({ error: "Pause or stop the run first" });
+    return true;
+  };
+  const onlyBeforeInit = (res: Response, h: SessionHandle, what: string): boolean => {
+    if (!isInitialized(h.session)) return false;
+    res.status(409).json({ error: `${what} can change only while the session is not initialized. Reset the environment first.` });
+    return true;
+  };
+
+  /** Picks a repository; the clone is made at initialization. */
+  api.post(
+    "/sessions/:id/repos",
+    wrap(async (req, res) => {
+      const pick = z.object({ target: z.string(), branch: z.string().max(200).optional(), name: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/).optional() }).parse(req.body);
+      const h = await d.hub.get(param(req, "id"));
+      if (onlyBeforeInit(res, h, "Repositories")) return;
+      const target = d.getConfig().workTargets.find((w) => w.name === pick.target);
+      if (!target) throw Object.assign(new Error(`Unknown work target ${pick.target}`), { status: 404 });
+      const name = pick.name ?? target.name;
+      if (RESERVED_WORKSPACE_NAMES.includes(name)) throw Object.assign(new Error(`"${name}" is reserved in the workspace`), { status: 409 });
+      if (h.session.repos.some((r) => r.name === name)) throw Object.assign(new Error(`This session already has a repository named ${name}`), { status: 409 });
+      const spec = await repoPick(h.id, { target, branch: pick.branch, name: pick.name });
+      // The packs the repository's manifests imply join the allowlist, as the New session form did.
+      const found = await detectPacksInRepo(target.path).catch(() => [] as string[]);
+      await h.mutate((docs) => {
+        const packs = withAgentPacks([...new Set([...docs.session.packs, ...found])], docs.session);
+        return { next: { session: { ...docs.session, repos: [...docs.session.repos, spec], packs, allowlist: [...new Set([...docs.session.allowlist, ...packHosts(packs)])] } } };
+      });
+      res.status(201).json({ ok: true, repo: spec, packs: found });
+    }),
+  );
+
+  api.delete(
+    "/sessions/:id/repos/:name",
+    wrap(async (req, res) => {
+      const h = await d.hub.get(param(req, "id"));
+      if (onlyBeforeInit(res, h, "Repositories")) return;
+      const name = param(req, "name");
+      if (!h.session.repos.some((r) => r.name === name)) throw Object.assign(new Error(`No repository ${name} in this session`), { status: 404 });
+      // An initialization that did not complete may have cloned it already; the clone goes with the pick.
+      await fs.rm(path.join(h.paths.workspace, name), { recursive: true, force: true });
+      await h.mutate((docs) => ({ next: { session: { ...docs.session, repos: docs.session.repos.filter((r) => r.name !== name) } } }));
+      res.json({ ok: true });
+    }),
+  );
+
+  /** Uploaded zips (see /uploads) become attachments of an existing session. */
+  api.post(
+    "/sessions/:id/attachments",
+    wrap(async (req, res) => {
+      const { uploads } = z.object({ uploads: z.array(z.object({ id: z.string().regex(/^[a-f0-9]{16}$/), name: z.string() })).min(1) }).parse(req.body);
+      const h = await d.hub.get(param(req, "id"));
+      if (notWhileRunning(res, h.id)) return;
+      const extracts = await attachUploads(h, uploads);
+      res.status(201).json({ ok: true, extracts, attachments: (await d.hub.get(h.id)).session.attachments });
+    }),
+  );
+
+  api.delete(
+    "/sessions/:id/attachments/:dir",
+    wrap(async (req, res) => {
+      const h = await d.hub.get(param(req, "id"));
+      if (notWhileRunning(res, h.id)) return;
+      const dir = param(req, "dir");
+      const att = h.session.attachments.find((a) => a.dir === dir);
+      if (!att) throw Object.assign(new Error(`No attachment ${dir}`), { status: 404 });
+      const target = path.resolve(h.paths.attachments, dir);
+      if (!target.startsWith(path.resolve(h.paths.attachments) + path.sep)) throw new Error("Bad attachment directory");
+      await fs.rm(target, { recursive: true, force: true });
+      await h.mutate((docs) => ({ next: { session: { ...docs.session, attachments: docs.session.attachments.filter((a) => a.dir !== dir) } } }));
+      res.json({ ok: true });
+    }),
+  );
+
+  /** The recipes from the library this session runs when its container is created; their hosts join the allowlist. After initialization, "Re-run recipes" applies a change. */
+  api.put(
+    "/sessions/:id/recipes",
+    wrap(async (req, res) => {
+      const { names } = z.object({ names: z.array(z.string()).max(50) }).parse(req.body);
+      const h = await d.hub.get(param(req, "id"));
+      if (notWhileRunning(res, h.id)) return;
+      const scripts: SessionSetupScript[] = [];
+      for (const name of names) scripts.push(await getScript(name));
+      await writeRecipeFiles(h.paths, scripts);
+      await h.mutate((docs) => ({
+        next: { session: { ...docs.session, setupScripts: scripts, setup: [], allowlist: [...new Set([...docs.session.allowlist, ...scripts.flatMap((x) => x.hosts)])] } },
+      }));
+      res.json({ ok: true });
+    }),
+  );
+
+  /**
+   * Initialize: clone the repositories now, then a run brings the container
+   * up, runs the recipes and (unless the setup mode skips it) the setup
+   * worker. With `start`, the tickets follow when initialization succeeds.
+   */
+  api.post(
+    "/sessions/:id/init",
+    wrap(async (req, res) => {
+      const { start } = z.object({ start: z.boolean().default(false) }).parse(req.body ?? {});
+      const h = await d.hub.get(param(req, "id"));
+      if (notWhileRunning(res, h.id)) return;
+      if (isInitialized(h.session)) {
+        res.status(409).json({ error: "This session is initialized already" });
+        return;
+      }
+      const { repos, clones } = await provisionSession(d.getConfig().sessionsRoot, h.session);
+      await h.mutate((docs) => ({ next: { session: { ...docs.session, repos } } }));
+      let ctl;
+      try {
+        ctl = await d.runs.start(h.id, { init: true, start });
+      } catch (e) {
+        res.status(409).json({ error: (e as Error).message, clones });
+        return;
+      }
+      res.json({ ok: true, run: ctl.run, clones });
+    }),
+  );
+
+  /** Back to a plan: the sandbox (with its home volume and snapshot) and the clones go; the board, the notes, the settings and the run history stay. */
+  api.post(
+    "/sessions/:id/reset",
+    wrap(async (req, res) => {
+      const h = await d.hub.get(param(req, "id"));
+      if (notWhileRunning(res, h.id)) return;
+      await removeSandbox(d.sandbox, h.id, { everything: true }).catch(() => undefined);
+      await removeClones(d.getConfig().sessionsRoot, h.session);
+      await h.mutate((docs) => ({
+        next: {
+          session: { ...docs.session, initializedAt: null, readiness: undefined, snapshot: undefined, setup: [], repos: docs.session.repos.map(({ baseCommit: _b, ...r }) => r), state: "setup" },
+        },
+      }));
+      res.json({ ok: true });
     }),
   );
 
@@ -663,7 +816,7 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
       if (action === "start" || action === "plan" || action === "brief" || action === "setup" || action === "prompt") {
         let ctl;
         try {
-          ctl = await d.runs.start(id, { plan: action === "plan", brief: action === "brief", setup: action === "setup", prompt: action === "prompt" ? (prompt ?? "") : undefined });
+          ctl = await d.runs.start(id, { plan: action === "plan" ? (prompt ?? "") : undefined, brief: action === "brief", setup: action === "setup", prompt: action === "prompt" ? (prompt ?? "") : undefined });
         } catch (e) {
           res.status(409).json({ error: (e as Error).message });
           return;
@@ -717,8 +870,9 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
     "/sessions/:id/setup/rerun",
     wrap(async (req, res) => {
       const h = await d.hub.get(param(req, "id"));
-      if (d.runs.status(h.id)) {
-        res.status(409).json({ error: "Pause or stop the run first" });
+      if (notWhileRunning(res, h.id)) return;
+      if (!isInitialized(h.session)) {
+        res.status(409).json({ error: "Initialize the session first; the recipes run then" });
         return;
       }
       await ensureSessionSandbox(d.runConfig, h.session, path.join(h.paths.dir, "sandbox.env"), undefined).catch(() => undefined);
@@ -783,41 +937,39 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
     }),
   );
 
-  /**
-   * Set or clear the session requirements. A change reopens the gate: the
-   * last verdict was about the old requirements. Empty requirements mean no
-   * setup phase.
-   */
+  /** The setup mode and the instructions the setup worker gets on top of what it works out itself. */
   api.put(
     "/sessions/:id/requirements",
     wrap(async (req, res) => {
-      const { requirements } = z.object({ requirements: z.string().max(20_000) }).parse(req.body);
+      const body = z.object({ requirements: z.string().max(20_000).optional(), setupMode: setupModeSchema.optional() }).parse(req.body);
       const h = await d.hub.get(param(req, "id"));
       const session = await h.mutate((docs) => {
-        const changed = docs.session.requirements.trim() !== requirements.trim();
-        const next = { ...docs.session, requirements: requirements.trim(), readiness: changed ? undefined : docs.session.readiness };
-        const state = needsSetup(next) && !d.runs.status(h.id) ? "setup" : docs.session.state === "setup" ? "created" : docs.session.state;
-        return { next: { session: { ...next, state } }, result: next };
+        const next = { ...docs.session, requirements: body.requirements === undefined ? docs.session.requirements : body.requirements.trim(), setupMode: body.setupMode ?? docs.session.setupMode };
+        return { next: { session: next }, result: next };
       });
       res.json({ ok: true, session });
     }),
   );
 
-  /** You confirm the setup worker's "ready" verdict; tickets may run from now on. Optionally starts the work run. */
+  /**
+   * Accept the environment as it is: an initialization whose setup worker
+   * reported "needs" is completed by you, after you dealt with it by hand
+   * or decided it does not matter. Optionally starts the work run.
+   */
   api.post(
     "/sessions/:id/setup/confirm",
     wrap(async (req, res) => {
       const { start } = z.object({ start: z.boolean().default(false) }).parse(req.body ?? {});
       const h = await d.hub.get(param(req, "id"));
-      if (h.session.readiness?.verdict !== "ready") {
-        res.status(409).json({ error: "The setup worker has not reported the environment ready. Run setup again, or clear the requirements to skip the setup phase." });
+      if (notWhileRunning(res, h.id)) return;
+      if (!h.session.repos.every((r) => r.baseCommit)) {
+        res.status(409).json({ error: "The repositories are not cloned yet; press Initialize first" });
         return;
       }
       // Commit the box as it is now, so a recreate starts from a set-up environment. Best effort: a failed snapshot leaves the recipe as the fallback.
       let snapshot: { image: string; baseImageId: string } | undefined;
       let snapshotError: string | undefined;
-      if (d.runs.status(h.id)) snapshotError = "a run is active; no snapshot taken";
-      else if ((await sandboxStatus(d.sandbox, h.id).catch(() => null))?.container === "running") {
+      if ((await sandboxStatus(d.sandbox, h.id).catch(() => null))?.container === "running") {
         snapshot = await snapshotSandbox(d.sandbox, h.session).catch((e: Error) => {
           snapshotError = e.message;
           return undefined;
@@ -827,7 +979,8 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
         next: {
           session: {
             ...docs.session,
-            readiness: { ...docs.session.readiness!, confirmedAt: now() },
+            initializedAt: docs.session.initializedAt ?? now(),
+            readiness: docs.session.readiness ? { ...docs.session.readiness, confirmedAt: now() } : undefined,
             snapshot: snapshot ? { ...snapshot, at: now() } : docs.session.snapshot,
             state: docs.session.state === "setup" ? "created" : docs.session.state,
           },
@@ -843,6 +996,7 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
   /** Bundles the named repos (all when omitted) inside the container; files land in <session>/export/. */
   const bundleRepos = async (h: SessionHandle, names?: string[]) => {
     if (d.runs.status(h.id)) throw Object.assign(new Error("Pause or stop the run first"), { status: 409 });
+    if (!isInitialized(h.session)) throw Object.assign(new Error("Nothing to export: the session is not initialized"), { status: 409 });
     await ensureSessionSandbox(d.runConfig, h.session, path.join(h.paths.dir, "sandbox.env"), undefined);
     const sh = dockerShell(d.sandbox, h.id);
     await sh.exec(["mkdir", "-p", "/workspace/.verstas/export"]);
@@ -1055,16 +1209,6 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
     }),
   );
 
-  api.put(
-    "/sessions/:id/goal",
-    wrap(async (req, res) => {
-      const { goal } = z.object({ goal: z.string().max(20_000) }).parse(req.body);
-      const h = await d.hub.get(param(req, "id"));
-      await h.mutate((docs) => ({ next: { board: { ...docs.board, goal }, session: { ...docs.session, goal } } }));
-      res.json({ ok: true });
-    }),
-  );
-
   /** Show the session on the remote dashboard, or stop showing it. */
   api.put(
     "/sessions/:id/remote",
@@ -1076,12 +1220,22 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
     }),
   );
 
+  /** The hosts, or the packs: with `packs`, the hosts outside any pack are kept and the packs' hosts are rebuilt from the new choice. */
   api.put(
     "/sessions/:id/allowlist",
     wrap(async (req, res) => {
-      const { allowlist } = z.object({ allowlist: z.array(z.string().trim().min(1).max(260)).max(200) }).parse(req.body);
+      const body = z.object({ allowlist: z.array(z.string().trim().min(1).max(260)).max(200).optional(), packs: z.array(z.string()).max(50).optional() }).parse(req.body);
       const h = await d.hub.get(param(req, "id"));
-      await h.mutate((docs) => ({ next: { session: { ...docs.session, allowlist } } }));
+      await h.mutate((docs) => {
+        const s = docs.session;
+        if (body.packs) {
+          const packs = withAgentPacks(body.packs, s);
+          const old = new Set(packHosts(s.packs));
+          const extra = (body.allowlist ?? s.allowlist).filter((x) => !old.has(x));
+          return { next: { session: { ...s, packs, allowlist: allowlistFor(packs, extra) } } };
+        }
+        return { next: { session: { ...s, allowlist: body.allowlist ?? s.allowlist } } };
+      });
       res.json({ ok: true });
     }),
   );
@@ -1196,14 +1350,14 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
           board = addNote(board, t.id, "user", `${next.id} resolved${next.answer ? `: ${next.answer.slice(0, 500)}` : ""} (${actions.map((a) => `${a.id} ${a.state}`).join(", ") || "answered"})`);
           if (t.state === "waiting") board = transition(board, t.id, "ready", { by: "harness", text: "Request resolved; requeued" });
         }
-        if (resolved && (session.state === "halted" || session.state === "waiting")) session = { ...session, state: needsSetup(session) ? "setup" : "paused" };
+        if (resolved && (session.state === "halted" || session.state === "waiting")) session = { ...session, state: isInitialized(session) ? "paused" : "setup" };
         return { next: { inbox, board, session }, result: next };
       });
-      // The setup phase keeps going while you answer: once every setup
+      // Initialization keeps going while you answer: once every setup
       // request is decided, the setup worker runs again with the outcomes.
       const after = await d.hub.get(h.id);
-      if (result.state === "resolved" && !result.ticketId && needsSetup(after.session) && !after.inbox.requests.some((r) => r.state === "open" && !r.ticketId) && !d.runs.status(h.id)) {
-        await d.runs.start(h.id, { setup: true }).catch((e: Error) => console.warn(`[ui] could not restart setup for ${h.id}: ${e.message}`));
+      if (result.state === "resolved" && !result.ticketId && !isInitialized(after.session) && !after.inbox.requests.some((r) => r.state === "open" && !r.ticketId) && !d.runs.status(h.id)) {
+        await d.runs.start(h.id, { init: true }).catch((e: Error) => console.warn(`[ui] could not continue initialization for ${h.id}: ${e.message}`));
       }
       res.json({ ok: true, request: result });
     }),

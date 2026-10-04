@@ -58,14 +58,26 @@ Then, in the web app:
 
 1. **Settings**: choose the sessions root (default `~/verstas/sessions`),
    add work targets (local git repositories), paste the Claude token.
-2. **New session**: name, goal, pick repositories (fresh clones) and zip
-   attachments, edit the network allowlist and caps, optionally paste a
-   board. Tick "start the planner" to let it draft tickets from the goal.
-   Or let an assistant prepare a draft first (**Connect an assistant** on
-   the Sessions page, `docs/DRAFTS.md`); its review page fills this form.
-3. **Session page**: approve tickets by moving them from backlog to ready,
-   start the run, watch the live log, answer requests in the inbox, pause
-   or stop at any time.
+2. **New session**: a name and, if you have one, a board. That is all the
+   form asks. The session starts as a **plan**: nothing is cloned and no
+   container exists yet. Or let an assistant prepare a draft first
+   (**Connect an assistant** on the New session page, `docs/DRAFTS.md`);
+   creating from its review page brings its repositories, packs, recipes
+   and board along.
+3. **Session page, while it is a plan**: add repositories (cloned fresh at
+   initialization, at the branch you pick), attachments, recipes, network
+   packs, agents and caps, write or import tickets. Come back to it over
+   hours if you like. Then press **Initialize** (or **Initialize and
+   start**, which goes on to the ready tickets when initialization
+   succeeds). Initialization clones the repositories, creates the
+   container, runs the recipes and, unless you chose to skip it, a setup
+   worker (step 5). After that: approve tickets by moving them from backlog
+   to ready, start the run, watch the live log, answer requests in the
+   inbox, pause or stop at any time. **Plan tickets…** takes a request
+   ("build the mapping engine, done means …") and runs a planner that
+   drafts backlog tickets from it and the repositories. **Reset
+   environment** removes the container and the clones and makes the
+   session a plan again; the board and the notes stay.
 4. **Recipes** (own tab): bash that runs once when a session's container
    is created, so the box starts set up. After a session's setup worker
    built an environment, "Save as recipe" on the session page puts its
@@ -74,19 +86,23 @@ Then, in the web app:
    to paste are in `docs/examples/scripts/` (Postgres, Chromium). "Copy
    context for an LLM" gives any assistant the facts of the box so it can
    write one, or a board.
-5. **Session requirements** (optional, on the New session form): what the
-   box must be able to do before any ticket runs ("Postgres 17 reachable,
-   migrations applied; the e2e suite runs"). When set, the session has a
-   **setup phase**, the one place it expects you: a setup worker starts
-   right after creation, installs what it can with sudo, asks you in one
-   request for what it cannot, and runs again once you answer. It reports
-   each requirement as met or not. Tickets cannot run until it says
-   ready and you press **Confirm and start work**; after that the loop runs
-   alone. Left empty, there is no setup phase. The setup worker writes
-   three notes every later worker reads: `notes/brief.md` (the project
-   brief), `notes/env.md` (what is installed, services, verified
-   commands) and `notes/setup.sh` (the recipe that rebuilds the box after
-   the container is recreated).
+5. **Setup** (Environment panel on the session page): what happens at
+   initialization after the container and the recipes. Two modes. **Setup
+   worker** (the default): an agent reads the repositories and the board
+   and makes the box a sensible place to develop them: toolchains at the
+   pinned versions, dependencies from the lockfiles, the services the
+   tests need, the build and test commands verified by running them. It
+   implements nothing and installs nothing only a later ticket would need.
+   Your **instructions** ("Postgres 17 reachable, migrations applied; the
+   e2e suite runs") go on top of that. It asks you in one request for
+   what it cannot do and runs again once you answer; a "ready" verdict
+   completes initialization (and starts the tickets, with Initialize and
+   start). "Needs" leaves the session uninitialized with the report;
+   **Accept as is** completes it by hand. **Skip**: the container and the
+   recipes only. The setup worker writes three notes every later worker
+   reads: `notes/brief.md` (the project brief), `notes/env.md` (what is
+   installed, services, verified commands) and `notes/setup.sh` (the
+   recipe that rebuilds the box after the container is recreated).
 6. **Ask the box** (on the session page): one worker with your text, the
    brief and env.md, outside any ticket. "Make sure you can run the e2e
    suite", "why is the dev server slow?". It can install and configure; a

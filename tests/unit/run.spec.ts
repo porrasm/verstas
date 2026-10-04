@@ -17,7 +17,17 @@ import type { Job } from "../../src/worker/worker.js";
  * loop's decisions: board moves, commit messages, run state.
  */
 
-const makeSession = async (opts: { reviewer?: boolean; attempts?: number; requirements?: string; agents?: { worker?: { driver: "claude" | "codex" | "cursor"; model?: string }; reviewer?: { driver: "claude" | "codex" | "cursor"; model?: string } } } = {}) => {
+const makeSession = async (
+  opts: {
+    reviewer?: boolean;
+    attempts?: number;
+    requirements?: string;
+    /** false: a plan that still needs Initialize (the default is an initialized session). */
+    initialized?: boolean;
+    setupMode?: "agentic" | "skip";
+    agents?: { worker?: { driver: "claude" | "codex" | "cursor"; model?: string }; reviewer?: { driver: "claude" | "codex" | "cursor"; model?: string } };
+  } = {},
+) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "verstas-run-"));
   const id = "2026-10-03-run";
   const paths = sessionPaths(root, id);
@@ -28,10 +38,11 @@ const makeSession = async (opts: { reviewer?: boolean; attempts?: number; requir
     sessionSchema.parse({
       id,
       name: "run",
-      goal: "g",
       createdAt: now(),
+      initializedAt: opts.initialized === false ? null : now(),
       repos: [{ name: "app", sourcePath: "/x", branch: "main", runBranch: `verstas/${id}` }],
       requirements: opts.requirements ?? "",
+      setupMode: opts.setupMode ?? "agentic",
       agents: opts.agents ?? {},
       caps: { reviewer: opts.reviewer ?? true, ticketAttempts: opts.attempts ?? 2, runTickets: 10 },
     }),
@@ -288,23 +299,34 @@ test("stop now aborts the worker and requeues the ticket", async () => {
   }
 });
 
-test("planner runs on an empty board and leaves the backlog for approval", async () => {
+test("the planner runs your request and leaves the backlog for approval; a work run on an empty board plans nothing", async () => {
   const s = await makeSession({ reviewer: false });
   try {
-    await saveBoard(s.paths.dir, emptyBoard("g"));
+    await saveBoard(s.paths.dir, emptyBoard());
     s.hub.forget(s.id);
     const shell = fakeShell();
+    let promptText = "";
     const worker = fakeWorker(s.hub, s.id, async (job, hub, id) => {
       expect(job.role).toBe("planner");
+      promptText = await fs.readFile(job.promptFile.replace("/workspace", s.paths.workspace), "utf8");
       const h = await hub.get(id);
       await h.mutate((d) => ({ next: { board: importBoard(d.board, { tickets: [{ title: "Planned A" }, { title: "Planned B" }] }, { by: "agent", role: "planner" }).board } }));
-      return {};
+      return { text: "Two tickets: schema, then engine." };
     });
-    const run = await (await manager(s, shell, worker).start(s.id)).done;
+    const mgr = manager(s, shell, worker);
+    // Nothing to work on and no request: the run ends without a planner.
+    const idle = await (await mgr.start(s.id)).done;
+    expect(idle.state).toBe("finished");
+    expect(worker.jobs).toHaveLength(0);
+    await expect(mgr.start(s.id, { plan: "  " })).rejects.toThrow(/what to plan/);
+
+    const run = await (await mgr.start(s.id, { plan: "Build the mapping engine with a mock MIDI output" })).done;
     expect(run.state).toBe("finished");
     const h = await s.hub.get(s.id);
     expect(h.board.tickets.map((t) => t.state)).toEqual(["backlog", "backlog"]);
     expect(worker.jobs).toHaveLength(1);
+    expect(promptText).toContain("# What to plan\nBuild the mapping engine with a mock MIDI output");
+    expect(h.session.prompts).toEqual([expect.objectContaining({ kind: "plan", text: "Build the mapping engine with a mock MIDI output", reply: "Two tickets: schema, then engine." })]);
   } finally {
     await fs.rm(s.root, { recursive: true, force: true });
   }
@@ -364,12 +386,13 @@ test("describeBlockers groups waiting tickets by what they wait on", () => {
   expect(describeBlockers(b)).toBe("T-2, T-3, T-4 wait on T-1 (backlog); T-4 wait on T-2 (ready)");
 });
 
-test("setup phase: work is refused until the box is confirmed; needs parks on its request, ready waits for you", async () => {
-  const s = await makeSession({ reviewer: false, requirements: "Postgres 17 reachable\nthe e2e suite runs" });
+test("initialization: nothing runs before it; needs parks on its request and stays uninitialized; ready initializes and, with start, the tickets follow", async () => {
+  const s = await makeSession({ reviewer: false, initialized: false, requirements: "Postgres 17 reachable\nthe e2e suite runs" });
   try {
     const shell = fakeShell();
     let calls = 0;
     const prompts: string[] = [];
+    const snapshots: string[] = [];
     const worker = fakeWorker(s.hub, s.id, async (job, hub, id) => {
       calls++;
       if (job.role === "setup") prompts.push(await fs.readFile(job.promptFile.replace("/workspace", s.paths.workspace), "utf8"));
@@ -382,52 +405,94 @@ test("setup phase: work is refused until the box is confirmed; needs parks on it
       await fileReport(hub, id, job.ticket!, "done");
       return {};
     });
-    const mgr = manager(s, shell, worker);
-    await expect(mgr.start(s.id)).rejects.toThrow(/Set up environment/);
+    const mgr = new RunManager({
+      hub: s.hub,
+      tokens: new RunTokens(),
+      shell: () => shell,
+      worker: () => worker,
+      ensureSandbox: async () => undefined,
+      snapshotSandbox: async (session) => {
+        snapshots.push(session.id);
+        return { image: "verstas-snap-x", baseImageId: "sha256:base" };
+      },
+      agentApiUrl: "http://host.docker.internal:4701/agent",
+      rateLimitSleepMs: 20,
+    });
+    // A plan: no work, no planner, no prompt until it is initialized.
+    await expect(mgr.start(s.id)).rejects.toThrow(/not initialized/);
+    await expect(mgr.start(s.id, { plan: "x" })).rejects.toThrow(/not initialized/);
+    await expect(mgr.start(s.id, { prompt: "x" })).rejects.toThrow(/not initialized/);
 
-    const run1 = await (await mgr.start(s.id, { setup: true })).done;
+    const run1 = await (await mgr.start(s.id, { init: true, start: true })).done;
     expect(run1.state).toBe("paused");
     expect(run1.pauseReason).toBe("requests");
     let h = await s.hub.get(s.id);
+    expect(h.session.initializedAt).toBeNull();
     expect(h.session.readiness).toMatchObject({ verdict: "needs", checks: [{ ok: true, text: "Postgres 17 reachable (svc pg, psql -c 'select 1')" }, { ok: false, text: "the e2e suite runs (browser download refused)" }] });
+    expect(h.session.readiness?.confirmedAt).toBeUndefined();
     expect(h.session.state).toBe("waiting");
-    expect(h.board.tickets.every((t) => t.state === "ready")).toBe(true); // nothing touched
-    expect(prompts[0]).toContain("Postgres 17 reachable");
+    expect(h.board.tickets.every((t) => t.state === "ready")).toBe(true); // nothing touched, start was dropped
+    expect(prompts[0]).toContain("# Setup instructions from the user\nPostgres 17 reachable");
+    expect(prompts[0]).not.toContain("goal");
+    expect(snapshots).toEqual([]);
 
-    // You answer; the next setup run sees the outcome and reports ready.
+    // You answer; initialization continues, the worker reports ready, and the tickets follow in the same run.
     await h.mutate((d) => ({ next: { inbox: { ...d.inbox, requests: d.inbox.requests.map((r) => ({ ...r, state: "resolved" as const, decidedAt: now(), actions: r.actions.map((a) => ({ ...a, state: "approved" as const, outcome: "allowed cdn.playwright.dev" })) })) } } }));
-    const run2 = await (await mgr.start(s.id, { setup: true })).done;
+    await fs.writeFile(path.join(s.paths.notes, "env.md"), "# Environment\n- postgres: svc pg, port 5432\n");
+    const run2 = await (await mgr.start(s.id, { init: true, start: true })).done;
     expect(run2.state).toBe("finished");
     h = await s.hub.get(s.id);
-    expect(h.session.readiness).toMatchObject({ verdict: "ready" });
-    expect(h.session.state).toBe("setup"); // ready, but not confirmed
+    expect(h.session.initializedAt).toBeTruthy();
+    expect(h.session.readiness).toMatchObject({ verdict: "ready", confirmedAt: expect.any(String) });
+    expect(h.session.snapshot).toMatchObject({ image: "verstas-snap-x" });
+    expect(h.session.state).toBe("finished");
     expect(prompts[1]).toContain("allowed cdn.playwright.dev");
-    await expect(mgr.start(s.id)).rejects.toThrow(/confirm it/);
-
-    // Confirmed: tickets run, and every worker gets the environment description.
-    await fs.writeFile(path.join(s.paths.notes, "env.md"), "# Environment\n- postgres: svc pg, port 5432\n");
-    await h.mutate((d) => ({ next: { session: { ...d.session, readiness: { ...d.session.readiness!, confirmedAt: now() } } } }));
-    const run3 = await (await mgr.start(s.id)).done;
-    expect(run3.state).toBe("finished");
     expect(worker.jobs.map((j) => j.role)).toEqual(["setup", "setup", "implementer", "implementer"]);
     const implPrompt = await fs.readFile(path.join(s.paths.workspace, ".verstas", "prompt.md"), "utf8");
     expect(implPrompt).toContain("svc pg, port 5432");
     expect(await fs.readFile(path.join(s.paths.workspace, "VERSTAS.md"), "utf8")).toContain("the e2e suite runs");
+
+    // Initialized: a setup check runs the worker again and stops; a work run needs no confirmation.
+    const run3 = await (await mgr.start(s.id, { setup: true })).done;
+    expect(run3.state).toBe("finished");
+    expect(worker.jobs.map((j) => j.role).slice(-1)).toEqual(["setup"]);
   } finally {
     await fs.rm(s.root, { recursive: true, force: true });
   }
 });
 
-test("without requirements there is no setup phase", async () => {
-  const s = await makeSession({ reviewer: false });
+test("initialize without start: ready initializes and the run stops, the tickets wait", async () => {
+  const s = await makeSession({ reviewer: false, initialized: false });
+  try {
+    const worker = fakeWorker(s.hub, s.id, async (job) => {
+      expect(job.role).toBe("setup");
+      return { text: "SETUP: ready\n- [x] node 22 (node -v)\nFine." };
+    });
+    const run = await (await manager(s, fakeShell(), worker).start(s.id, { init: true })).done;
+    expect(run.state).toBe("finished");
+    const h = await s.hub.get(s.id);
+    expect(h.session.initializedAt).toBeTruthy();
+    expect(h.session.state).toBe("finished");
+    expect(h.board.tickets.every((t) => t.state === "ready")).toBe(true);
+    expect(worker.jobs).toHaveLength(1);
+  } finally {
+    await fs.rm(s.root, { recursive: true, force: true });
+  }
+});
+
+test("skip mode: initialization is the container and the recipes, no setup worker; with start the tickets follow at once", async () => {
+  const s = await makeSession({ reviewer: false, initialized: false, setupMode: "skip" });
   try {
     const worker = fakeWorker(s.hub, s.id, async (job, hub, id) => {
       await fileReport(hub, id, job.ticket!, "done");
       return {};
     });
-    const run = await (await manager(s, fakeShell(), worker).start(s.id)).done;
+    const run = await (await manager(s, fakeShell(), worker).start(s.id, { init: true, start: true })).done;
     expect(run.state).toBe("finished");
-    expect(worker.jobs.every((j) => j.role === "implementer")).toBe(true);
+    expect(worker.jobs.map((j) => j.role)).toEqual(["implementer", "implementer"]);
+    const h = await s.hub.get(s.id);
+    expect(h.session.initializedAt).toBeTruthy();
+    expect(h.session.readiness).toBeUndefined();
   } finally {
     await fs.rm(s.root, { recursive: true, force: true });
   }
@@ -614,7 +679,7 @@ test("recover after a host crash: stops the orphaned worker, requeues held ticke
   }
 });
 
-test("a prompt runs one worker with your text and the notes, commits a change as one commit, keeps the reply, and is allowed during setup", async () => {
+test("a prompt runs one worker with your text and the notes, commits a change as one commit, and keeps the reply", async () => {
   const s = await makeSession({ requirements: "the e2e suite runs" });
   try {
     await fs.mkdir(s.paths.notes, { recursive: true });
@@ -633,9 +698,9 @@ test("a prompt runs one worker with your text and the notes, commits a change as
     expect(shell.commits).toEqual(["Prompt: Make sure the e2e suite runs"]);
     const h = await s.hub.get(s.id);
     expect(h.session.prompts).toHaveLength(1);
-    expect(h.session.prompts[0]).toMatchObject({ runId: 1, reply: expect.stringContaining("12 passed") });
+    expect(h.session.prompts[0]).toMatchObject({ runId: 1, kind: "prompt", reply: expect.stringContaining("12 passed") });
     expect(h.board.tickets.every((t) => t.state === "ready")).toBe(true);
-    expect(h.session.state).toBe("setup"); // still gated: a prompt is not a confirmation
+    expect(h.session.state).toBe("finished");
     await expect(manager(s, shell, worker).start(s.id, { prompt: "  " })).rejects.toThrow(/empty/);
   } finally {
     await fs.rm(s.root, { recursive: true, force: true });
