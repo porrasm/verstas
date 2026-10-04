@@ -2,8 +2,13 @@ import { test, expect } from "@playwright/test";
 import { listSandboxes, stopAllSandboxes, type SandboxConfig } from "../../src/sandbox/lifecycle.js";
 import type { DockerRunner } from "../../src/sandbox/docker.js";
 
+const noSpawn = (): never => {
+  throw new Error("spawn is not used by these functions");
+};
+
 /** A docker that knows three sessions: one running, one stopped, one with only a proxy left. */
 const fakeDocker = (calls: string[][]): DockerRunner => ({
+  spawn: noSpawn,
   async run(args) {
     calls.push([...args]);
     if (args[0] === "ps") {
@@ -37,6 +42,6 @@ test("stopAllSandboxes: stops the running boxes and their proxies, skips session
 });
 
 test("listSandboxes: docker down means no boxes, not an error", async () => {
-  const c: SandboxConfig = { ...cfg([]), docker: { run: async () => ({ code: 1, stdout: "", stderr: "Cannot connect to the Docker daemon" }) } };
+  const c: SandboxConfig = { ...cfg([]), docker: { spawn: noSpawn, run: async () => ({ code: 1, stdout: "", stderr: "Cannot connect to the Docker daemon" }) } };
   expect((await listSandboxes(c)).size).toBe(0);
 });
