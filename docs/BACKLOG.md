@@ -237,7 +237,7 @@ from the porras.club setup, or the V-01 dashboard's push).
 
 ## V-12 · Second worker driver  (M)
 
-**Status: done 2026-10-04; Codex verified live, Cursor pending a key.** Codex CLI and Cursor CLI
+**Status: done 2026-10-04; Codex and Cursor both verified live.** Codex CLI and Cursor CLI
 drive behind the contract in `docs/DRIVERS.md`, in the same image and the
 same worker; a session picks its agents per role under "Agent options"
 (the reviewer may differ from the worker). Each agent's credential reaches
@@ -256,12 +256,11 @@ backend through the proxy (`*.cursor.sh`), ran tools, and its stream shapes
 match the translator. Its board MCP server failed to load in that run
 because a project-level `.cursor/mcp.json` shadows the user-level file the
 driver writes and demands an interactive approval; the project-level file
-is no longer written and the user-level path was verified inside the image
-(`agent mcp list` reports the board server ready and a headless run calls
-it). One more sandbox run with Cursor should confirm the board round trip
-end to end. Still open: the exact quota-exhausted messages (matched by text
-today), the shell tool's result summary for Cursor (shows the command, not
-its output), and per-driver
+is no longer written, and a later sandbox run confirmed the round trip:
+Cursor found the board namespace ready, called `board_list_tickets` and
+reported the 44 tickets of a real session. Still open: the exact
+quota-exhausted messages (matched by text today), the shell tool's result
+summary for Cursor (shows the command, not its output), and per-driver
 rate-limit backoff (pause only the agent that hit its limit); today any
 rate limit pauses the run as before.
 
