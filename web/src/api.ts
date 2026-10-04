@@ -108,7 +108,34 @@ export const upload = async (file: File): Promise<{ id: string; name: string; by
   return (await res.json()) as { id: string; name: string; bytes: number };
 };
 
-type WsMessage = ({ type: "change"; sessionId: string; board?: Board; inbox?: Inbox; session?: Session }) | { type: "event"; sessionId: string; runId: number; event: VEvent };
+type WsMessage =
+  | { type: "change"; sessionId: string; board?: Board; inbox?: Inbox; session?: Session }
+  | { type: "event"; sessionId: string; runId: number; event: VEvent }
+  | { type: "draft"; draftId: string; deleted: boolean };
+
+/** A draft session (src/drafts/draft.ts): prepared by an assistant, created by you. */
+export type DraftTicket = { id: string; title: string; kind?: string; repo?: string; size?: string; priority?: number; deps?: string[]; state?: string; spec?: string; acceptance?: string[]; notes?: string[]; pinned?: boolean };
+export type Draft = {
+  id: string;
+  name: string;
+  goal: string;
+  requirements: string;
+  notes: string;
+  repos: { target: string; branch?: string; name?: string }[];
+  packs: string[];
+  extraHosts: string[];
+  recipes: string[];
+  tickets: DraftTicket[];
+  createdBy: "agent" | "user";
+  createdAt: string;
+  updatedAt: string;
+  promotedTo?: string;
+  promotedAt?: string;
+};
+export type DraftProblems = { errors: string[]; warnings: string[] };
+export type DraftDetail = { draft: Draft; problems: DraftProblems; boardText: string };
+export type DraftRow = { id: string; name: string; goal: string; tickets: number; repos: string[]; errors: number; warnings: number; createdBy: string; createdAt: string; updatedAt: string; promotedTo?: string };
+export type McpSetup = { url: string; claudeCode: string; desktopConfig: string; stdioBuilt: boolean; prompt: string };
 
 /** One socket per page; reconnects with backoff; delivers parsed messages to the latest handler. */
 export const useLive = (onMessage: (m: WsMessage) => void): boolean => {

@@ -22,6 +22,9 @@ The design is in the
 - **Board**: tickets in plain JSON (`docs/BOARD.md`), editable by hand in
   the UI, by paste (import), and by the agent through a stdio MCP server
   that talks to the agent API.
+- **Drafts**: a session prepared by an assistant on your machine through
+  the draft MCP endpoint (`/mcp` on the UI port), step by step, then
+  reviewed and created by you (`docs/DRAFTS.md`).
 
 ## Running it
 
@@ -52,6 +55,8 @@ Then, in the web app:
 2. **New session**: name, goal, pick repositories (fresh clones) and zip
    attachments, edit the network allowlist and caps, optionally paste a
    board. Tick "start the planner" to let it draft tickets from the goal.
+   Or let an assistant prepare a draft first (**Connect an assistant** on
+   the Sessions page, `docs/DRAFTS.md`); its review page fills this form.
 3. **Session page**: approve tickets by moving them from backlog to ready,
    start the run, watch the live log, answer requests in the inbox, pause
    or stop at any time.
@@ -150,6 +155,7 @@ loop with fakes. Running a session needs Docker and the image.
 - `docs/BOARD.md`: the ticket and board format for import and export.
 - `docs/DRIVERS.md`: the worker contract, for running another agent.
 - `docs/REMOTE.md`: the remote dashboard, what it sends and what it can do.
+- `docs/DRAFTS.md`: draft sessions over MCP, how to connect an assistant.
 
 ## Layout
 
@@ -165,6 +171,7 @@ src/
   harness/            the loop, prompts, Docker-backed runner
   web/api.ts          the UI's API (loopback)
   remote/             the remote dashboard client: what is sent, what may be asked
+  drafts/             draft sessions: model, file store, MCP tools, /mcp endpoint, stdio bridge
   server.ts           startVerstas(): the host app, for the window and the command line
   main.ts             command-line entrypoint (npm run serve, npm run dev:server)
 electron/main.mjs     the desktop window (npm start, npm run dev)
@@ -172,5 +179,5 @@ scripts/              setup.mjs (npm run setup), dev.mjs (npm run dev)
 images/devbox/        the session image
 web/                  React UI (Vite)
 tests/unit/           Playwright unit project
-docs/                 SANDBOX, BOARD, DRIVERS, REMOTE
+docs/                 SANDBOX, BOARD, DRIVERS, REMOTE, DRAFTS
 ```

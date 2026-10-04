@@ -329,6 +329,11 @@ project needs it, with its resource cost accepted then.
 
 ## Done
 
+- 2026-10-04 · Draft sessions over MCP (docs/DRAFTS.md): an assistant builds
+  a draft step by step through `/mcp` (Streamable HTTP on the UI port, plus a
+  stdio bridge); drafts are files under `~/.verstas/drafts`; a review page
+  follows edits live; Continue fills the New session form; Create marks the
+  draft and makes it read-only. No tool creates or starts a session.
 - 2026-10-04 · Loop manager Phase 1: the agent has passwordless sudo (logged),
   `svc` for services, browser libraries in the image, a per-session home
   volume; session requirements with a setup worker and a gate you confirm;

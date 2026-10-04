@@ -64,6 +64,7 @@ process.on("SIGINT", () => stop(0));
 process.on("SIGTERM", () => stop(0));
 
 run("build", bin("tsc"), ["-p", "tsconfig.json", "--watch", "--preserveWatchOutput"]);
-run("server", bin("tsx"), ["watch", "--clear-screen=false", "src/main.ts"], { VERSTAS_DEBUG: "1" });
+// VERSTAS_UI_URL: review links the draft tools hand out point at the Vite UI.
+run("server", bin("tsx"), ["watch", "--clear-screen=false", "src/main.ts"], { VERSTAS_DEBUG: "1", VERSTAS_UI_URL: "http://127.0.0.1:4710" });
 run("web", bin("vite"), ["--config", "web/vite.config.ts", "--strictPort"]);
 run("app", bin("electron"), [".", "--dev"]);

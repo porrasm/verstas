@@ -14,6 +14,14 @@ import { listSessions } from "./sessions/sessions.js";
 import { createUiApi } from "./web/api.js";
 import { RemoteClient } from "./remote/client.js";
 import { requestJson } from "./remote/http.js";
+import { DraftStore, type DraftChange } from "./drafts/store.js";
+import { createDraftTools, DRAFT_SERVER_INSTRUCTIONS } from "./drafts/tools.js";
+import { createMcpHandler, createMcpRouter } from "./drafts/mcp.js";
+import { buildContext, probeImage } from "./context/context.js";
+import { listScripts } from "./scripts/library.js";
+import { listBranches } from "./sessions/workspace.js";
+import { detectPacksInRepo } from "./network/packs.js";
+import { mcpSetup } from "./drafts/setup.js";
 
 /**
  * The host app as a function, so the command line (src/main.ts) and the
@@ -113,9 +121,28 @@ export const startVerstas = async (): Promise<Verstas> => {
     log: (m) => console.log(m),
   });
 
-  // UI API + static UI + WebSocket, loopback only.
+  // Drafts: prepared by an assistant through /mcp, reviewed and turned into a
+  // session by you in the UI. One store, so both see the same files.
+  const drafts = new DraftStore();
+  const uiUrl = process.env.VERSTAS_UI_URL?.replace(/\/$/, "") ?? `http://127.0.0.1:${config.uiPort}`;
+  const draftTools = createDraftTools({
+    store: drafts,
+    workTargets: () => config.workTargets,
+    recipes: () => listScripts(),
+    branches: listBranches,
+    detectPacks: detectPacksInRepo,
+    context: async () => {
+      const facts = await probeImage(docker, config.devboxImage).catch(() => null);
+      return buildContext({ tail: "draft", config, facts, scripts: await listScripts(), repoNames: config.workTargets.map((w) => w.name) });
+    },
+    reviewUrl: (id) => `${uiUrl}/#/d/${encodeURIComponent(id)}`,
+  });
+  const mcp = createMcpRouter(createMcpHandler({ name: "verstas-drafts", version, instructions: DRAFT_SERVER_INSTRUCTIONS }, draftTools));
+
+  // UI API + static UI + WebSocket + the draft MCP endpoint, loopback only.
   const uiApp = express();
   uiApp.use("/api", requestLog("ui"));
+  uiApp.use("/mcp", requestLog("mcp"), mcp);
   uiApp.use(createUiApi({
     hub,
     runs,
@@ -129,6 +156,18 @@ export const startVerstas = async (): Promise<Verstas> => {
     },
     version,
     remote,
+    drafts,
+    mcpSetup: async () => {
+      const stdioScript = path.join(distRoot, "src", "drafts", "mcp-stdio.js");
+      const stdioBuilt = await fs.access(stdioScript).then(() => true, () => false);
+      return mcpSetup({
+        url: `http://127.0.0.1:${config.uiPort}/mcp`,
+        stdioScript,
+        stdioBuilt,
+        // Inside the desktop app, process.execPath is Electron; it runs scripts as Node with ELECTRON_RUN_AS_NODE.
+        node: { command: process.execPath, electron: Boolean(process.versions.electron) },
+      });
+    },
   }));
   const webDist = path.join(repoRoot, "web", "dist");
   uiApp.use(express.static(webDist));
@@ -147,6 +186,7 @@ export const startVerstas = async (): Promise<Verstas> => {
     for (const c of wss.clients) if (c.readyState === WebSocket.OPEN) c.send(data);
   };
   hub.on("change", (c) => broadcast({ type: "change", ...c }));
+  drafts.on("change", (c: DraftChange) => broadcast({ type: "draft", draftId: c.draftId, deleted: c.deleted ?? false }));
   hub.on("event", (e) => {
     broadcast({ type: "event", ...e });
     const ev = e.event;
@@ -184,6 +224,7 @@ export const startVerstas = async (): Promise<Verstas> => {
     if (st.state !== "off") console.log(`remote dashboard ${config.remote.baseUrl}: ${st.state}${st.error ? ` (${st.error})` : ""}`);
   });
   const url = `http://127.0.0.1:${config.uiPort}`;
+  console.log(`draft mcp  ${url}/mcp`);
   console.log(`verstas ${version}  ${url}  sessions in ${config.sessionsRoot}${process.env.VERSTAS_DEBUG ? "  [debug: docker commands, raw worker streams, full tool output]" : ""}`);
 
   let stopped: Promise<void> | null = null;

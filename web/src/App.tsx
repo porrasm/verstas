@@ -5,8 +5,9 @@ import { NewSessionPage } from "./pages/NewSession";
 import { SessionPage } from "./pages/Session";
 import { SettingsPage } from "./pages/Settings";
 import { ScriptsPage } from "./pages/Scripts";
+import { DraftPage } from "./pages/Draft";
 
-/** Hash routing: #/ sessions, #/new, #/s/<id>, #/s/<id>/t/<ticket>, #/scripts, #/settings. */
+/** Hash routing: #/ sessions, #/new (?draft=<id>), #/s/<id>, #/s/<id>/t/<ticket>, #/d/<draft>, #/scripts, #/settings. */
 const useRoute = (): string => {
   const [hash, setHash] = useState(location.hash || "#/");
   useEffect(() => {
@@ -30,12 +31,13 @@ export const App = () => {
   let page: JSX.Element;
   const m = /^#\/s\/([^/]+)(?:\/t\/([^/]+))?/.exec(route);
   if (m) page = <SessionPage id={decodeURIComponent(m[1]!)} ticketId={m[2] ? decodeURIComponent(m[2]) : null} />;
-  else if (route.startsWith("#/new")) page = <NewSessionPage />;
+  else if (/^#\/d\/[^/?]+/.test(route)) page = <DraftPage id={decodeURIComponent(/^#\/d\/([^/?]+)/.exec(route)![1]!)} />;
+  else if (route.startsWith("#/new")) page = <NewSessionPage key={route} draftId={new URLSearchParams(route.split("?")[1] ?? "").get("draft")} />;
   else if (route.startsWith("#/scripts")) page = <ScriptsPage />;
   else if (route.startsWith("#/settings")) page = <SettingsPage status={status} />;
   else page = <SessionsPage status={status} />;
 
-  const onSessions = route === "#/" || route.startsWith("#/s/");
+  const onSessions = route === "#/" || route.startsWith("#/s/") || route.startsWith("#/d/");
   return (
     <>
       <header className="top">

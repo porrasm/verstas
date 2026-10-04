@@ -123,3 +123,10 @@ export const entryProblem = (name: string, attr: number, size: number): string |
   if (size > ZIP_MAX_FILE_BYTES) return "file too large";
   return null;
 };
+
+/** Local branches of a work target and the checked-out one, for the new-session form and the draft tools. */
+export const listBranches = async (repoPath: string): Promise<{ current: string; branches: string[] }> => {
+  const out = await git(["-C", repoPath, "for-each-ref", "--format=%(refname:short)", "refs/heads/"]);
+  const current = await git(["-C", repoPath, "symbolic-ref", "--short", "HEAD"]).catch(() => "");
+  return { current, branches: out.split("\n").filter(Boolean) };
+};

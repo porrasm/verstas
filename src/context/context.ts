@@ -1,4 +1,4 @@
-import type { Session } from "../core/types.js";
+import { capsSchema, type Session } from "../core/types.js";
 import type { Config } from "../config.js";
 import type { SetupScript } from "../scripts/library.js";
 import type { DockerRunner } from "../sandbox/docker.js";
@@ -56,7 +56,7 @@ export const probeImage = async (docker: DockerRunner, image: string): Promise<I
   return p;
 };
 
-export type ContextTail = "script" | "board" | "free";
+export type ContextTail = "script" | "board" | "draft" | "free";
 
 export type ContextInput = {
   tail: ContextTail;
@@ -128,19 +128,58 @@ export const buildContext = (i: ContextInput): string => {
     out.push("- End with a verification command that fails the script if the install did not work.");
   } else if (i.tail === "board") {
     const repos = i.session?.repos.map((r) => r.name) ?? i.repoNames ?? [];
-    out.push("## Board format", "");
-    out.push("```json");
-    out.push(JSON.stringify({ verstas: 1, goal: "…", tickets: [{ id: "T-1", title: "…", kind: "feature", repo: repos[0] ?? "name", size: "S", priority: 10, deps: [], state: "ready", spec: "…", acceptance: ["…"] }] }, null, 2));
-    out.push("```");
-    out.push("- `kind`: feature | bug | followup | chore. `size`: S (under half a day) | M | L. Lower `priority` runs first. `deps` are ids that must be done first. `state`: backlog or ready.");
-    out.push(`- \`repo\` must be one of: ${repos.length ? repos.join(", ") : "(the session's repository names)"}; a ticket with another name is refused.`);
-    out.push("- Acceptance criteria must be checkable by a reviewer who did not write the code. Prefer ten small tickets over thirty vague ones. Each ticket is worked by a fresh agent with the spec, the acceptance criteria and the last five reports as its only context, so specs must say where and how.");
+    out.push(...boardFormat(repos));
     out.push("");
     out.push("## Your task", "");
     out.push("Produce a Verstas board as JSON for: (FILL IN the feature or goal). Output only the JSON.");
+  } else if (i.tail === "draft") {
+    out.push(...draftGuide(i.repoNames ?? []));
   } else {
     out.push("## Your task", "");
     out.push("(Ask your question here.)");
   }
   return out.join("\n") + "\n";
 };
+
+/** The board format and the rules a good board follows; shared by the "board" and "draft" tails. */
+const boardFormat = (repos: readonly string[]): string[] => {
+  const caps = capsSchema.parse({});
+  return [
+    "## Board format",
+    "",
+    "```json",
+    JSON.stringify({ verstas: 1, goal: "…", tickets: [{ id: "T-1", title: "…", kind: "feature", repo: repos[0] ?? "name", size: "S", priority: 10, deps: [], state: "ready", spec: "…", acceptance: ["…"] }] }, null, 2),
+    "```",
+    "- `kind`: feature | bug | followup | chore. `size`: S (under half a day) | M | L. Lower `priority` runs first. `deps` are ids that must be done first. `state`: backlog or ready.",
+    `- \`repo\` must be one of: ${repos.length ? repos.join(", ") : "(the session's repository names)"}; a ticket with another name is refused.`,
+    "- Acceptance criteria must be checkable by a reviewer who did not write the code. Prefer ten small tickets over thirty vague ones. Each ticket is worked by a fresh agent with the spec, the acceptance criteria and the last five reports as its only context, so specs must say where and how.",
+    `- One worker gets ${caps.workerMinutes} minutes and ${caps.workerTurns} model turns by default, then the ticket goes back to the board. Size tickets so one worker finishes one.`,
+  ];
+};
+
+/** What an assistant needs to prepare a draft session through the draft tools. */
+const draftGuide = (repos: readonly string[]): string[] => [
+  ...boardFormat(repos),
+  "",
+  "## Network packs",
+  "",
+  "Named bundles of download hosts. The Claude API is always on; tick the rest by name. Extra hosts are single names or `*.suffix`, HTTPS only.",
+  "",
+  ...NETWORK_PACKS.filter((p) => p.name !== "anthropic").map((p) => `- \`${p.name}\`: ${p.title} (${p.hosts.join(", ")})`),
+  "",
+  "## Drafts",
+  "",
+  "A draft is a session that does not exist yet: a name, a goal, session requirements, repositories, network packs, recipes, notes for the person, and a board. You prepare it; a person reviews it in the Verstas app and creates the session. You cannot create, start or change a session, and you cannot run anything in the box.",
+  "",
+  "Work in small steps and read the problems every tool returns:",
+  "",
+  "1. `draft_create` with a name and the goal. Say what done looks like in the goal: workers read it on every ticket.",
+  "2. `draft_set_repositories` with work targets from `list_repositories`. The ticket `repo` field is the directory name (the target name unless you rename it).",
+  "3. `draft_update` with `requirements`: one verifiable line per need (\"Chromium for Playwright launches\", \"Postgres 17 reachable on 5432\"). A setup worker makes the box meet them before any ticket runs, so tickets do not install toolchains.",
+  "4. `draft_set_network` for the toolchains the repositories download from, and `draft_set_recipes` for library recipes that already set up part of the box.",
+  "5. `draft_add_tickets` a few at a time, in dependency order. Give each ticket a spec that names files and commands, and acceptance criteria a reviewer can check by running something.",
+  "6. `draft_validate` until there are no errors. Put assumptions and open questions in `notes` for the person.",
+  "7. Tell the person the draft is ready and give them the review link from the tool results. They create the session; you do not.",
+  "",
+  "Leave caps, budget, model, memory and attachments out: the person sets them on the New session form.",
+];

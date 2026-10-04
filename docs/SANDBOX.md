@@ -310,6 +310,14 @@ labelled resources without a matching directory and offers to remove them.
   is reachable from your LAN; it should be firewalled or bound to the
   Docker bridge address in a later change.
 
+- **Draft MCP endpoint.** `POST /mcp` on port 4700 lets an assistant on
+  your machine write draft sessions (docs/DRAFTS.md). It sits behind the
+  same loopback bind, answers only loopback `Host` names and refuses
+  non-loopback `Origin`s (DNS rebinding). Its tools write draft files and
+  read work-target branch names and manifests; none creates, starts or
+  runs a session, and a session made from a draft goes through the same
+  create call and review as any other.
+
 - **Remote dashboard (off by default).** When you turn it on and tick a
   session, that session's tickets, inbox, setup verdict, prompts and a
   short activity log go to the dashboard you configured, over HTTPS, while
@@ -334,6 +342,9 @@ labelled resources without a matching directory and offers to remove them.
       inside the session container, and the container's flags match the
       table in Boundary 2.
 - [ ] Deleting a session removes network, proxy, container and directory.
+- [ ] The draft MCP tools (`src/drafts/tools.ts`) only read installation
+      facts and write draft files; no tool creates, starts, runs or deletes
+      anything, and `/mcp` keeps its loopback Host and Origin checks.
 - [ ] `src/remote/` sends only sessions with `remote: true`, never tool
       results, and `remoteCommandSchema` has no kind that reaches settings,
       secrets, the allowlist, files, export/apply or session deletion.

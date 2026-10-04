@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { api, fmtAgo, fmtDateTime, fmtUsd, STATE_LABEL, useLive, useNow, type SessionSummary, type Status } from "../api";
+import { api, fmtAgo, fmtDateTime, fmtUsd, STATE_LABEL, useLive, useNow, type DraftRow, type SessionSummary, type Status } from "../api";
+import { ConnectAssistant } from "./ConnectAssistant";
 
 const ORDER = ["done", "review", "in_progress", "waiting", "blocked", "ready", "backlog"];
 
@@ -25,11 +26,15 @@ export const SessionsPage = ({ status }: { status: Status | null }) => {
   const [err, setErr] = useState("");
   const [arm, setArm] = useState<string | null>(null);
   const now = useNow();
+  const [drafts, setDrafts] = useState<DraftRow[]>([]);
   const load = () => api<SessionSummary[]>("GET", "/sessions").then(setRows).catch((e: Error) => setErr(e.message));
+  const loadDrafts = () => api<DraftRow[]>("GET", "/drafts").then(setDrafts).catch(() => setDrafts([]));
   useEffect(() => {
     load();
+    void loadDrafts();
   }, []);
   useLive((m) => {
+    if (m.type === "draft") void loadDrafts();
     if (m.type === "change") load();
     if (m.type === "event" && (m.event.kind === "run" || m.event.kind === "ticket")) load();
   });
@@ -54,6 +59,7 @@ export const SessionsPage = ({ status }: { status: Status | null }) => {
       {status && !status.docker.ok && <div className="banner warn">Docker is not reachable. Sessions can be created and edited, but not run.</div>}
       {status && !status.image && status.docker.ok && <div className="banner signal"><span>The dev-box image <code>{status.imageName}</code> is missing. Build it with <code>npm run image:build</code>.</span></div>}
       {status && !status.hasClaudeToken && <div className="banner signal"><span>No Claude token yet. Run <code>claude setup-token</code> and paste it in <a href="#/settings">Settings</a>.</span></div>}
+      <Drafts rows={drafts.filter((d) => !d.promotedTo)} now={now} />
       {sorted && sorted.length === 0 ? (
         <div className="card empty-state">
           <h3>No sessions yet</h3>
@@ -123,3 +129,34 @@ export const SessionsPage = ({ status }: { status: Status | null }) => {
     </div>
   );
 };
+
+/** Drafts an assistant prepared (or is preparing): review one, then create the session from it. */
+const Drafts = ({ rows, now }: { rows: DraftRow[]; now: number }) => (
+  <div className="stack tight">
+    {rows.length > 0 && (
+      <div className="tbl sessions">
+        <table>
+          <thead>
+            <tr><th>Draft</th><th>Board</th><th>Check</th><th>Updated</th><th></th></tr>
+          </thead>
+          <tbody>
+            {rows.map((d) => (
+              <tr key={d.id}>
+                <td className="name">
+                  <a href={`#/d/${encodeURIComponent(d.id)}`}><strong>{d.name}</strong></a> <span className="pill quiet">draft</span>
+                  {d.goal && <div className="goal ellipsis" title={d.goal}>{d.goal}</div>}
+                  <div className="mono faint small">{d.id}{d.repos.length ? ` · ${d.repos.join(", ")}` : ""}</div>
+                </td>
+                <td className="small muted">{d.tickets} ticket{d.tickets === 1 ? "" : "s"}</td>
+                <td>{d.errors ? <span className="pill warn">{d.errors} error{d.errors > 1 ? "s" : ""}</span> : <span className="pill good">ready to create</span>}{d.warnings ? <div className="muted small">{d.warnings} warning{d.warnings > 1 ? "s" : ""}</div> : null}</td>
+                <td title={fmtDateTime(d.updatedAt)}>{fmtAgo(d.updatedAt, now)}</td>
+                <td className="acts"><a className="btn" href={`#/d/${encodeURIComponent(d.id)}`}>Review</a></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    )}
+    <ConnectAssistant />
+  </div>
+);

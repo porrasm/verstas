@@ -1,9 +1,12 @@
 import { useEffect, useState } from "react";
-import { api, copyText, fmtBytes, MODEL_CHOICES, upload, type Config, type NetworkPack, type SetupScript } from "../api";
+import { api, copyText, fmtBytes, MODEL_CHOICES, upload, useLive, type Config, type DraftDetail, type NetworkPack, type SetupScript } from "../api";
+import { ConnectAssistant } from "./ConnectAssistant";
 
-type RepoPick = { target: string; branch: string; branches: string[]; on: boolean };
+/** `as`: the workspace directory name a draft chose, when it differs from the target name. */
+type RepoPick = { target: string; branch: string; branches: string[]; on: boolean; as?: string };
 
-export const NewSessionPage = () => {
+/** With `draftId`, the form starts filled from that draft (#/new?draft=<id>); you still review and press Create. */
+export const NewSessionPage = ({ draftId = null }: { draftId?: string | null }) => {
   const [cfg, setCfg] = useState<Config | null>(null);
   const [name, setName] = useState("");
   const [goal, setGoal] = useState("");
@@ -24,6 +27,40 @@ export const NewSessionPage = () => {
   const [model, setModel] = useState("claude-sonnet-5-5");
   const [busy, setBusy] = useState("");
   const [err, setErr] = useState("");
+  const [fromDraft, setFromDraft] = useState<{ id: string; name: string } | null>(null);
+  const [draftChanged, setDraftChanged] = useState(false);
+
+  /** Copies a draft into the form. Caps, model, limits and attachments stay as they are: they are yours to set. */
+  const applyDraft = (d: DraftDetail, picks: RepoPick[]) => {
+    const x = d.draft;
+    setName(x.name);
+    setGoal(x.goal);
+    setRequirements(x.requirements);
+    setRepos(
+      picks.map((p) => {
+        const r = x.repos.find((y) => y.target === p.target);
+        return r ? { ...p, on: true, branch: r.branch ?? p.branch, as: r.name && r.name !== r.target ? r.name : undefined } : { ...p, on: false, as: undefined };
+      }),
+    );
+    setPacks(x.packs);
+    setExtraHosts(x.extraHosts.join("\n"));
+    setPicked(x.recipes);
+    setBoard(x.tickets.length ? d.boardText : "");
+    setFromDraft({ id: x.id, name: x.name });
+    setDraftChanged(false);
+    if (x.promotedTo) setErr(`This draft already became the session ${x.promotedTo}.`);
+  };
+  const loadDraft = async (picks: RepoPick[]) => {
+    if (!draftId) return;
+    try {
+      applyDraft(await api<DraftDetail>("GET", `/drafts/${encodeURIComponent(draftId)}`), picks);
+    } catch (e) {
+      setErr(`Could not load the draft: ${(e as Error).message}`);
+    }
+  };
+  useLive((m) => {
+    if (m.type === "draft" && draftId && m.draftId === draftId) setDraftChanged(true);
+  });
 
   useEffect(() => {
     api<Config>("GET", "/config")
@@ -35,6 +72,7 @@ export const NewSessionPage = () => {
           picks.push({ target: w.name, branch: b.current, branches: b.branches, on: false });
         }
         setRepos(picks);
+        await loadDraft(picks);
       })
       .catch((e: Error) => setErr(e.message));
     api<SetupScript[]>("GET", "/scripts").then(setScripts).catch(() => setScripts([]));
@@ -96,7 +134,7 @@ export const NewSessionPage = () => {
       const r = await api<{ session: { id: string } }>("POST", "/sessions", {
         name,
         goal,
-        repos: repos.filter((r) => r.on).map((r) => ({ target: r.target, branch: r.branch || undefined })),
+        repos: repos.filter((r) => r.on).map((r) => ({ target: r.target, branch: r.branch || undefined, name: r.as })),
         uploads: uploads.map((u) => ({ id: u.id, name: u.name })),
         packs,
         allowlist: extraHosts.split(/\n/).map((s) => s.trim()).filter(Boolean),
@@ -106,6 +144,7 @@ export const NewSessionPage = () => {
         setupScripts: picked,
         board: board.trim() || undefined,
         requirements: requirements.trim() || undefined,
+        draftId: fromDraft?.id,
       });
       location.hash = `#/s/${encodeURIComponent(r.session.id)}`;
     } catch (e) {
@@ -124,6 +163,20 @@ export const NewSessionPage = () => {
         <p className="muted" style={{ marginTop: 6 }}>Everything the agent will ever have is on this form: fresh clones of the repositories, the attachments, the hosts it may reach, the goal, and the caps.</p>
       </div>
       {err && <div className="banner warn"><span>{err}</span><button className="quiet sm end" onClick={() => setErr("")}>Dismiss</button></div>}
+      {fromDraft && (
+        <div className="banner info">
+          <span>
+            Filled from the draft <a href={`#/d/${encodeURIComponent(fromDraft.id)}`}><strong>{fromDraft.name}</strong></a>. Review every section; caps, model and attachments are yours to set. Nothing exists until you press Create.
+          </span>
+        </div>
+      )}
+      {draftChanged && (
+        <div className="banner signal">
+          <span>The draft changed after you opened it.</span>
+          <button className="quiet sm end" onClick={() => void loadDraft(repos)}>Reload from the draft (replaces your edits)</button>
+        </div>
+      )}
+      {!fromDraft && <ConnectAssistant />}
 
       <section className="card">
         <h3>What to build</h3>
@@ -156,7 +209,7 @@ export const NewSessionPage = () => {
         {repos.length === 0 && <div className="muted small">No work targets yet.</div>}
         {repos.map((r, i) => (
           <div className="repo-row" key={r.target}>
-            <label className="chk"><input type="checkbox" checked={r.on} onChange={(e) => void pickRepo(i, e.target.checked)} /> <strong>{r.target}</strong></label>
+            <label className="chk"><input type="checkbox" checked={r.on} onChange={(e) => void pickRepo(i, e.target.checked)} /> <strong>{r.target}</strong>{r.as && r.on ? <span className="muted small">as {r.as}</span> : null}</label>
             <select value={r.branch} disabled={!r.on} onChange={(e) => setRepos(repos.map((x, j) => (j === i ? { ...x, branch: e.target.value } : x)))}>
               {r.branches.map((b) => <option key={b} value={b}>{b}</option>)}
             </select>

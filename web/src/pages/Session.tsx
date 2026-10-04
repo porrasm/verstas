@@ -168,7 +168,7 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
     }
   };
   const live = useLive((m) => {
-    if (m.sessionId !== id) return;
+    if (m.type === "draft" || m.sessionId !== id) return;
     if (m.type === "change") {
       if (m.board) setBoard(m.board);
       if (m.inbox) setInbox(m.inbox);

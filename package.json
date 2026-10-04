@@ -11,6 +11,7 @@
     "start": "electron .",
     "dev": "node scripts/dev.mjs",
     "serve": "node dist/src/main.js",
+    "mcp": "node dist/src/drafts/mcp-stdio.js",
     "dev:server": "tsx watch src/main.ts",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit -p tsconfig.json",

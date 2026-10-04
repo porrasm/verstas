@@ -40,6 +40,10 @@ import { detectPacksInRepo, NETWORK_PACKS, packHosts } from "../network/packs.js
 import { allRuns, lastRun, runTotals } from "../sessions/runs.js";
 import { RemoteClient } from "../remote/client.js";
 import { isLoopback } from "../remote/http.js";
+import { listBranches } from "../sessions/workspace.js";
+import { DraftError, draftBoardText, validateDraft, type Draft } from "../drafts/draft.js";
+import type { DraftStore } from "../drafts/store.js";
+import type { McpSetup } from "../drafts/setup.js";
 
 /**
  * The UI's API, on 127.0.0.1 only. Everything the agent API refuses lives
@@ -59,6 +63,10 @@ export type UiApiDeps = {
   version: string;
   /** The remote dashboard connection; absent in tests that do not need it. */
   remote?: RemoteClient;
+  /** Draft sessions (src/drafts); the same store the draft MCP endpoint writes. */
+  drafts: DraftStore;
+  /** How to connect an assistant to the draft MCP endpoint, with real paths. */
+  mcpSetup: () => Promise<McpSetup>;
 };
 
 const wrap =
@@ -69,6 +77,8 @@ const wrap =
         const msg = `Invalid input: ${e.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`;
         console.warn(`[ui] 400 ${req.method} ${req.originalUrl}: ${msg}`);
         res.status(400).json({ error: msg });
+      } else if (e instanceof DraftError) {
+        res.status(e.code === "not_found" ? 404 : e.code === "invalid" ? 400 : 409).json({ error: e.message });
       } else if (e instanceof BoardError) {
         console.warn(`[ui] ${req.method} ${req.originalUrl}: ${e.message}`);
         res.status(e.code === "unknown_ticket" ? 404 : 409).json({ error: e.message });
@@ -230,9 +240,7 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
         res.status(404).json({ error: "No such work target" });
         return;
       }
-      const out = await execFileP("git", ["-C", t.path, "for-each-ref", "--format=%(refname:short)", "refs/heads/"]);
-      const current = await execFileP("git", ["-C", t.path, "symbolic-ref", "--short", "HEAD"]).then((r) => r.stdout.trim()).catch(() => "");
-      res.json({ current, branches: out.stdout.split("\n").filter(Boolean) });
+      res.json(await listBranches(t.path));
     }),
   );
 
@@ -332,6 +340,48 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
     }),
   );
 
+  // --- drafts (docs/DRAFTS.md) ------------------------------------------------------
+  // Prepared through the draft MCP endpoint; here they are read, deleted, and
+  // turned into sessions through the normal create call (draftId above).
+
+  api.get(
+    "/mcp/setup",
+    wrap(async (_req, res) => {
+      res.json(await d.mcpSetup());
+    }),
+  );
+
+  const draftEnv = async () => ({ workTargets: d.getConfig().workTargets, recipes: (await listScripts()).map((x) => x.name) });
+  const draftRow = (x: Draft, env: Awaited<ReturnType<typeof draftEnv>>) => {
+    const p = validateDraft(x, env);
+    return { id: x.id, name: x.name, goal: x.goal, tickets: x.tickets.length, repos: x.repos.map((r) => r.name ?? r.target), errors: p.errors.length, warnings: p.warnings.length, createdBy: x.createdBy, createdAt: x.createdAt, updatedAt: x.updatedAt, promotedTo: x.promotedTo };
+  };
+
+  api.get(
+    "/drafts",
+    wrap(async (_req, res) => {
+      const env = await draftEnv();
+      res.json((await d.drafts.list()).map((x) => draftRow(x, env)));
+    }),
+  );
+
+  api.get(
+    "/drafts/:id",
+    wrap(async (req, res) => {
+      const draft = await d.drafts.get(param(req, "id"));
+      res.json({ draft, problems: validateDraft(draft, await draftEnv()), boardText: draftBoardText(draft) });
+    }),
+  );
+
+  api.delete(
+    "/drafts/:id",
+    wrap(async (req, res) => {
+      await d.drafts.get(param(req, "id"));
+      await d.drafts.remove(param(req, "id"));
+      res.json({ ok: true });
+    }),
+  );
+
   // --- sessions ----------------------------------------------------------------
 
   const summarize = async (s: Session) => {
@@ -384,6 +434,8 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
     board: z.string().optional(),
     requirements: z.string().max(20_000).optional(),
     plan: z.boolean().default(false),
+    /** The draft this form was filled from; it is marked as having become this session. */
+    draftId: z.string().max(90).optional(),
   });
 
   api.post(
@@ -391,6 +443,10 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
     wrap(async (req, res) => {
       const input = createBody.parse(req.body);
       const cfg = d.getConfig();
+      if (input.draftId) {
+        const draft = await d.drafts.get(input.draftId);
+        if (draft.promotedTo) throw new DraftError(`This draft already became the session ${draft.promotedTo}`, "promoted");
+      }
       const repos = input.repos.map((r) => {
         const target = cfg.workTargets.find((w) => w.name === r.target);
         if (!target) throw new Error(`Unknown work target ${r.target}`);
@@ -417,6 +473,7 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
           return { next: { board: r.board }, result: { created: r.created, skipped: r.skipped } };
         });
       }
+      if (input.draftId) await d.drafts.markPromoted(input.draftId, created.session.id).catch((e: Error) => console.warn(`[ui] draft ${input.draftId}: ${e.message}`));
       // With requirements, setup starts at once: it is the part that needs you, so it should happen while you are here.
       if (created.session.requirements.trim()) await d.runs.start(created.session.id, { setup: true });
       else if (input.plan) await d.runs.start(created.session.id, { plan: true });
