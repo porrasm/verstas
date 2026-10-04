@@ -17,7 +17,7 @@ import type { Job } from "../../src/worker/worker.js";
  * loop's decisions: board moves, commit messages, run state.
  */
 
-const makeSession = async (opts: { reviewer?: boolean; attempts?: number; requirements?: string } = {}) => {
+const makeSession = async (opts: { reviewer?: boolean; attempts?: number; requirements?: string; agents?: { worker?: { driver: "claude" | "codex" | "cursor"; model?: string }; reviewer?: { driver: "claude" | "codex" | "cursor"; model?: string } } } = {}) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "verstas-run-"));
   const id = "2026-10-03-run";
   const paths = sessionPaths(root, id);
@@ -32,6 +32,7 @@ const makeSession = async (opts: { reviewer?: boolean; attempts?: number; requir
       createdAt: now(),
       repos: [{ name: "app", sourcePath: "/x", branch: "main", runBranch: `verstas/${id}` }],
       requirements: opts.requirements ?? "",
+      agents: opts.agents ?? {},
       caps: { reviewer: opts.reviewer ?? true, ticketAttempts: opts.attempts ?? 2, runTickets: 10 },
     }),
   );
@@ -138,6 +139,26 @@ test("a ticket that passes gates and review is committed and done; dependents fo
     const log = await fs.readFile(path.join(s.paths.runs, "1", "events.jsonl"), "utf8");
     expect(log.split("\n").filter(Boolean).length).toBeGreaterThan(8);
     expect(await fs.readFile(path.join(s.paths.runs, "1", "tickets", "T-1.md"), "utf8")).toContain("did the thing");
+  } finally {
+    await fs.rm(s.root, { recursive: true, force: true });
+  }
+});
+
+test("the reviewer can be a different agent: each job names its driver and model, and the workspace carries files for every agent", async () => {
+  const s = await makeSession({ agents: { worker: { driver: "claude", model: "sonnet" }, reviewer: { driver: "codex", model: "gpt-5.1-codex" } } });
+  try {
+    const shell = fakeShell();
+    const worker = fakeWorker(s.hub, s.id, async (job, hub, id) => {
+      if (job.role === "implementer") await fileReport(hub, id, job.ticket!, "done");
+      if (job.role === "reviewer") return { text: "VERDICT: ok" };
+      return {};
+    });
+    const run = await (await manager(s, shell, worker).start(s.id)).done;
+    expect(run.state).toBe("finished");
+    expect(worker.jobs.map((j) => `${j.role}:${j.driver}:${j.model}`)).toEqual(["implementer:claude:sonnet", "reviewer:codex:gpt-5.1-codex", "implementer:claude:sonnet", "reviewer:codex:gpt-5.1-codex"]);
+    expect(JSON.parse(await fs.readFile(path.join(s.paths.workspace, ".verstas", "job.json"), "utf8"))).toMatchObject({ role: "reviewer", driver: "codex", model: "gpt-5.1-codex" });
+    expect(await fs.readFile(path.join(s.paths.workspace, "AGENTS.md"), "utf8")).toContain("/workspace/VERSTAS.md");
+    expect(await fs.stat(path.join(s.paths.workspace, ".cursor", "mcp.json")).catch(() => null)).toBeNull();
   } finally {
     await fs.rm(s.root, { recursive: true, force: true });
   }

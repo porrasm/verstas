@@ -206,21 +206,30 @@ machine (`core.fsmonitor`, `core.sshCommand`, `pre-commit`). So:
 
 ## Boundary 6: secrets
 
-Two secrets enter a session, and neither is in the container's
+Two secrets enter a session per worker, and neither is in the container's
 environment. Each worker's `docker exec` passes them by name only
-(`-e CLAUDE_CODE_OAUTH_TOKEN`), with the value in the docker CLI's own
-environment, so they never appear in a command line on the host or in the
-box, and setup scripts, recipes, gates and harness git do not see them.
+(`-e CLAUDE_CODE_OAUTH_TOKEN`, or the chosen agent's variable), with the
+value in the docker CLI's own environment, so they never appear in a
+command line on the host or in the box, and setup scripts, recipes, gates
+and harness git do not see them.
 
-- `CLAUDE_CODE_OAUTH_TOKEN`, made once with `claude setup-token` and stored
-  in the host app's config file with mode `0600`. The worker and what it
-  starts can read it, as any process can read its own credentials, and
-  with sudo in the box so can root. It works only against the one host the
-  allowlist permits for it.
+- The agent's credential: `CLAUDE_CODE_OAUTH_TOKEN` (made once with
+  `claude setup-token`), `VERSTAS_CODEX_AUTH` (the contents of Codex's
+  `auth.json`) or `CURSOR_API_KEY`, stored in the host app's secrets file
+  with mode `0600`. The worker and what it starts can read it, as any
+  process can read its own credentials, and with sudo in the box so can
+  root. Each works only against the hosts its network pack permits.
+  Codex rotates its login during a run; the driver writes it to a private
+  `CODEX_HOME` under `/tmp` for the duration of the worker, hands the
+  rotated file back to the harness on the worker's stdout (a line the
+  harness stores and never logs), and removes the directory. Nothing
+  under the session directory or the home volume holds a credential
+  (docs/DRIVERS.md).
 - The run's board token, scoped as described above.
 
 **Commits are scanned.** Before the harness commits, it reads each repo's
-staged diff on the host and looks for the Claude token. A repo where it
+staged diff on the host and looks for every agent credential (the Claude
+token, the Cursor key, the tokens inside the Codex login). A repo where one
 appears is not committed (its changes are unstaged and kept), and a ticket
 that would have been done is blocked with the reason. This keeps the
 token out of bundles and out of "Apply to repo". Taking the token out of

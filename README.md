@@ -16,9 +16,10 @@ The design is in the
   `4701` that only the sandbox proxy may reach.
 - **Session sandbox** (`images/devbox`): one container per session on an
   internal Docker network with no route out except a small allowlist proxy.
-  Workers run inside it as `claude -p` (or any other agent command that
-  speaks the same event contract, see `docs/DRIVERS.md`) against
-  `/workspace`.
+  Workers run inside it as `claude -p`, `codex exec` or Cursor's `agent -p`
+  (chosen per session and per role under "Agent options"; any other agent
+  that speaks the same event contract works too, see `docs/DRIVERS.md`)
+  against `/workspace`.
 - **Board**: tickets in plain JSON (`docs/BOARD.md`), editable by hand in
   the UI, by paste (import), and by the agent through a stdio MCP server
   that talks to the agent API.
@@ -41,7 +42,10 @@ npm start         # Verstas in its own window
 proxy and worker code containers mount (`dist/`), the UI (`web/dist`), the
 session image `verstas-devbox:local` and the proxy's `node:22-alpine`. Run it
 again after a pull. It asks for the token from `claude setup-token` when
-none is saved (you can also paste it later in Settings).
+none is saved (you can also paste it later in Settings). Codex and Cursor
+are optional: add their credentials in Settings and pick them per session
+under "Agent options" (`docs/DRIVERS.md`); without them everything runs on
+Claude Code as before.
 
 `npm start` runs the host app inside the desktop window's process. On
 macOS, closing the window keeps the loop running (the Dock icon brings it
@@ -166,7 +170,7 @@ src/
   sessions/           session directories, clones, zips, the in-process hub
   sandbox/            docker argv builder, CLI runner, lifecycle
   proxy/              the allowlist egress proxy (mounted into node:22-alpine)
-  worker/             in-container: claude -p driver, stream translator, board MCP server
+  worker/             in-container: the worker loop, one driver per agent (Claude, Codex, Cursor), translators, board MCP server
   agent-api/          what a worker may do, behind a run token
   harness/            the loop, prompts, Docker-backed runner
   web/api.ts          the UI's API (loopback)

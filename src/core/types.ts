@@ -342,14 +342,61 @@ export const sessionStateSchema = z.enum([
 ]);
 export type SessionState = z.infer<typeof sessionStateSchema>;
 
+/**
+ * Which coding agent runs a worker. Every driver honours the same contract
+ * (docs/DRIVERS.md); Claude Code is the reference and the default, so a
+ * session that never chooses runs exactly as before.
+ */
+export const driverNameSchema = z.enum(["claude", "codex", "cursor"]);
+export type DriverName = z.infer<typeof driverNameSchema>;
+export const DRIVER_NAMES = driverNameSchema.options;
+
+/** One agent choice: the driver and, optionally, the model it should use (any id the CLI accepts; empty means the account's default). */
+export const agentSpecSchema = z.object({
+  driver: driverNameSchema.default("claude"),
+  model: z.string().max(100).optional(),
+});
+export type AgentSpec = z.infer<typeof agentSpecSchema>;
+
+/** Per-role agents. `worker` runs implementer, planner, setup and prompts; `reviewer` defaults to the worker's agent. */
+export const sessionAgentsSchema = z.object({
+  worker: agentSpecSchema.optional(),
+  reviewer: agentSpecSchema.optional(),
+});
+export type SessionAgents = z.infer<typeof sessionAgentsSchema>;
+
+export type WorkerRole = "implementer" | "reviewer" | "planner" | "setup" | "prompt";
+
+/**
+ * The agent for a role. Older sessions carry only `model`; that is the
+ * worker's Claude model, so they keep running unchanged.
+ */
+export const agentFor = (s: { model?: string; agents?: SessionAgents }, role: WorkerRole): AgentSpec => {
+  const worker: AgentSpec = s.agents?.worker ?? { driver: "claude", model: s.model || undefined };
+  if (role === "reviewer" && s.agents?.reviewer) return s.agents.reviewer;
+  return worker;
+};
+
+/** Every driver a session uses, worker first. */
+export const sessionDrivers = (s: { model?: string; agents?: SessionAgents; caps?: { reviewer?: boolean } }): DriverName[] => {
+  const out = [agentFor(s, "implementer").driver];
+  if (s.caps?.reviewer !== false) {
+    const r = agentFor(s, "reviewer").driver;
+    if (!out.includes(r)) out.push(r);
+  }
+  return out;
+};
+
 export const sessionSchema = z.object({
   id: sessionIdSchema,
   name: z.string().min(1).max(200),
   goal: z.string().max(20_000),
   createdAt: z.string(),
   image: z.string().min(1).default("verstas-devbox:local"),
-  /** Model for every worker (`claude --model`); empty means the token's default. Aliases like "sonnet" work. */
+  /** Legacy: the worker's Claude model, from before `agents` existed. Read through `agentFor`; new sessions set `agents` instead. */
   model: z.string().max(100).optional(),
+  /** Which agent runs each role (see `agentFor`). Absent means Claude Code for everything. */
+  agents: sessionAgentsSchema.prefault({}),
   repos: z.array(repoSpecSchema).default([]),
   attachments: z.array(attachmentSchema).default([]),
   allowlist: z.array(z.string()).default([]),

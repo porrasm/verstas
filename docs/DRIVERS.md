@@ -2,8 +2,11 @@
 
 A driver is what runs one ticket inside the session container. The
 reference driver is Claude Code (`src/worker/worker.ts`, shipped in the
-image as `/opt/verstas/worker.js`). Any other agent can replace it by
-honouring the same contract; the loop does not change.
+image as `/opt/verstas/worker.js`). The same worker also drives Codex CLI
+and Cursor CLI (`src/worker/driver-*.ts`): a session chooses its agents
+under "Agent options", per role, and the reviewer may be a different agent
+than the worker. Any other agent can replace the worker by honouring the
+same contract; the loop does not change.
 
 ## The contract
 
@@ -24,7 +27,8 @@ The harness runs, inside the container as the agent user, with
   "systemPromptFile": "/workspace/.verstas/system.md",   // the rules
   "caps": { "minutes": 25, "turns": 60, "budgetUsd": 5 },
   "mcpConfigFile": "/workspace/.verstas/mcp.json",       // board tools
-  "model": "claude-fable-5-1"       // optional
+  "driver": "claude",               // claude | codex | cursor; absent means claude
+  "model": "claude-fable-5-1"       // optional; any id the chosen CLI accepts
 }
 ```
 
@@ -72,11 +76,61 @@ speaks MCP can load it with:
 Inside the box, plain HTTP must go through the proxy (`HTTP_PROXY` is set);
 `src/worker/http.ts` shows the forward-proxy request form.
 
+## The built-in agents
+
+| | Claude Code | Codex CLI | Cursor CLI |
+|---|---|---|---|
+| Command | `claude -p --output-format stream-json` | `codex exec --json` (prompt on stdin) | `agent -p --output-format stream-json --force` |
+| Rules (`system.md`) | `--append-system-prompt` | prepended to the prompt | prepended to the prompt |
+| Board MCP server | `--mcp-config .verstas/mcp.json` | `$CODEX_HOME/config.toml`, written per run | `~/.cursor/mcp.json`, written per run (a project-level file would need an interactive approval) |
+| Pointers file | `CLAUDE.md` | `AGENTS.md` | `AGENTS.md` (and `CLAUDE.md`) |
+| Credential, env var | setup token, `CLAUDE_CODE_OAUTH_TOKEN` | `auth.json` contents, `VERSTAS_CODEX_AUTH` | user API key, `CURSOR_API_KEY` |
+| Network pack | `anthropic` | `openai` (`chatgpt.com` confirmed live) | `cursor` (`*.cursor.sh`, confirmed live) |
+| Reports USD cost | yes (`--max-budget-usd` applies) | tokens only; budget cap does not apply | no; budget cap does not apply |
+| Quota exhausted | `result` line names it | `turn.failed` message text | `result` error text |
+
+The image installs all three (`images/devbox/Dockerfile`); the Codex and
+Cursor installs are best-effort. A job for an agent whose binary is
+missing ends with `worker_done` `stopReason: "driver_missing"` and the
+ticket is handled like any failed worker; sessions on Claude Code never
+notice.
+
+### Credentials and the no-pay-as-you-go setup
+
+Each agent's credential lives in `~/.verstas/secrets.json` (mode 0600) and
+reaches only the worker process, by name on its `docker exec`
+(docs/SANDBOX.md, Boundary 6). Use subscription logins:
+
+- **Claude**: `claude setup-token` (Pro or Max); long-lived.
+- **Codex**: `codex login --device-auth` on the host with a ChatGPT
+  account, then "Import login" in Settings. Codex rotates the tokens in
+  `auth.json` (about every eight days; the refresh token is single use).
+  The driver writes the file into a private `CODEX_HOME` for the run and,
+  when Codex changed it, hands it back on stdout as one line
+  `{"kind":"credential","driver":"codex","value":"<file>"}`. The harness
+  stores it and never logs it, so the next run starts from the rotated
+  token. Once the login is older than seven days, Codex workers run one at
+  a time across sessions until the refreshed file is stored. Never import
+  an API-key login: that bills per use.
+- **Cursor**: a user API key from the Cursor dashboard. It authenticates
+  the Cursor account and draws on the plan, not on a provider key.
+
+Verstas cannot see your account's billing switches. For a hard stop at the
+plan's limit turn off: Claude "extra usage"; Codex usage credits (keep the
+balance at zero) and automatic reload; Cursor on-demand usage. An
+exhausted quota then fails the worker, the translator marks it
+`rateLimited`, and the loop pauses and retries instead of blaming the
+ticket.
+
 ## Writing a driver for another agent
 
-- Put the agent's binary in a derived image (`FROM verstas-devbox:local`).
-- Write a small launcher that reads `job.json`, runs the agent in print or
-  batch mode with the prompt and the MCP config, maps its output to events,
-  enforces the caps, and prints `worker_done`.
-- Point the session's driver command at it. The session container, the
-  proxy, the agent API and the loop stay the same.
+- Add a `DriverImpl` in `src/worker/driver-<name>.ts` (how to spawn, how to
+  translate output lines, what to do after exit) and register it in
+  `DRIVER_IMPLS`; add the host side (credential field, env var, pack,
+  hint, models) to `src/harness/drivers.ts` and the name to
+  `driverNameSchema`. Put the binary in the image.
+- Or, outside this codebase: write a launcher that reads `job.json`, runs
+  the agent in print or batch mode with the prompt and the MCP config,
+  maps its output to events, enforces the caps, and prints `worker_done`,
+  and point the worker command at it. The session container, the proxy,
+  the agent API and the loop stay the same.

@@ -14,10 +14,15 @@ import { promisify } from "node:util";
  * packs are ticked per session and shown with their hosts.
  */
 
-export type NetworkPack = { name: string; title: string; hosts: readonly string[] };
+export type NetworkPack = { name: string; title: string; hosts: readonly string[]; /** Set on the packs an agent driver needs; they follow the agent choice instead of being ticked. */ agent?: "claude" | "codex" | "cursor" };
 
 export const NETWORK_PACKS = [
-  { name: "anthropic", title: "Claude API (always on)", hosts: ["api.anthropic.com"] },
+  { name: "anthropic", title: "Claude API (always on)", hosts: ["api.anthropic.com"], agent: "claude" },
+  // Codex over a ChatGPT login talks to chatgpt.com (verified live) and refreshes its login at auth.openai.com; api.openai.com covers an
+  // API-key login. It also tries ab.chatgpt.com (telemetry) and *.oaiusercontent.com (attachments); both are left denied on purpose.
+  { name: "openai", title: "Codex (OpenAI) API and login", hosts: ["chatgpt.com", "auth.openai.com", "api.openai.com"], agent: "codex" },
+  // Cursor's agent backend: api2.cursor.sh plus a regional agent host (seen live: agentn.global.api5.cursor.sh), so the whole cursor.sh zone.
+  { name: "cursor", title: "Cursor agent backend", hosts: ["*.cursor.sh", "cursor.com", "api.cursor.com"], agent: "cursor" },
   { name: "node", title: "npm, Yarn, Node.js headers", hosts: ["registry.npmjs.org", "registry.yarnpkg.com", "repo.yarnpkg.com", "nodejs.org"] },
   { name: "python", title: "PyPI", hosts: ["pypi.org", "files.pythonhosted.org"] },
   { name: "debian", title: "Debian packages (apt)", hosts: ["deb.debian.org", "security.debian.org"] },
@@ -38,6 +43,11 @@ export const PACK_NAMES = NETWORK_PACKS.map((p) => p.name) as [PackName, ...Pack
 export const DEFAULT_PACKS: readonly PackName[] = ["anthropic", "node", "python", "debian", "github"];
 
 export const isPackName = (s: string): s is PackName => (PACK_NAMES as string[]).includes(s);
+
+/** The pack an agent driver needs; added to a session's packs when that driver is chosen. */
+export const driverPack = (driver: "claude" | "codex" | "cursor"): PackName => (NETWORK_PACKS as readonly NetworkPack[]).find((p) => p.agent === driver)!.name as PackName;
+/** Pack names that belong to a driver rather than to a toolchain. */
+export const AGENT_PACKS: readonly PackName[] = (NETWORK_PACKS as readonly NetworkPack[]).filter((p) => p.agent).map((p) => p.name as PackName);
 
 export const packHosts = (names: readonly string[]): string[] => {
   const out: string[] = [];

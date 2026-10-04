@@ -1,13 +1,15 @@
 import { createWriteStream } from "node:fs";
 import path from "node:path";
-import type { Session } from "../core/types.js";
+import type { DriverName, Session } from "../core/types.js";
 import type { SessionHub } from "../sessions/hub.js";
 import type { RunTokens } from "../agent-api/agent-api.js";
 import { promises as fs } from "node:fs";
 import { buildSpec, ensureSandboxUp, execInSandbox, healSandbox, proxyLogsSince, runInSandbox, runRootScript, runSetupScript, usableSnapshot, writeEnvFile, type SandboxConfig } from "../sandbox/lifecycle.js";
 import { now, type SetupResult } from "../core/types.js";
+import { secretValues, type Secrets } from "../config.js";
 import { writeAllowlist } from "../sessions/sessions.js";
 import { readWorkerStream, RunManager, type Shell, type WorkerDone, type WorkerRunner } from "./run.js";
+import { CODEX_SERIALIZE_AFTER_DAYS, codexAuthAgeDays, credentialFor, driverInfo, missingCredentialError, missingCredentials } from "./drivers.js";
 import type { Job } from "../worker/worker.js";
 
 /**
@@ -17,64 +19,115 @@ import type { Job } from "../worker/worker.js";
  */
 
 export const WORKER_COMMAND = ["node", "/opt/verstas/worker.js", "--job", "/workspace/.verstas/job.json"] as const;
-/** What pkill matches to stop a worker; the driver forwards the signal to claude. */
+/** What pkill matches to stop a worker; the driver forwards the signal to the agent it runs. */
 export const WORKER_PATTERN = "/opt/verstas/worker.js";
 
 export const dockerShell = (cfg: SandboxConfig, sessionId: string): Shell => ({
   exec: (cmd, opts = {}) => runInSandbox(cfg, sessionId, cmd, { workdir: opts.workdir, timeoutMs: opts.timeoutMs, allowFailure: true, input: opts.input }),
 });
 
+/** Where the host keeps credentials and takes back the ones an agent rotated. */
+export type CredentialStore = {
+  secrets: () => Promise<Secrets>;
+  /** Store a credential a driver handed back (Codex's refreshed auth file). */
+  save: (driver: DriverName, value: string) => Promise<void>;
+};
+
 /**
- * The Claude token and the run token reach the worker process only: passed
- * by name on its `docker exec`, not in the container's environment, so
- * setup scripts, recipes, gates and harness git never see them.
+ * Once Codex's login is old enough to be refreshed, Codex workers run one
+ * at a time across sessions: the refresh token is single use, and two
+ * concurrent refreshes would log the account out (src/harness/drivers.ts).
  */
-export const dockerWorker = (cfg: SandboxConfig, sessionId: string, claudeToken: () => Promise<string | undefined> = async () => undefined): WorkerRunner => ({
+let codexTurn: Promise<void> = Promise.resolve();
+const serializeCodex = async <T>(fn: () => Promise<T>): Promise<T> => {
+  const prev = codexTurn;
+  let release!: () => void;
+  codexTurn = new Promise<void>((r) => (release = r));
+  await prev;
+  try {
+    return await fn();
+  } finally {
+    release();
+  }
+};
+
+/**
+ * The agent's credential and the run token reach the worker process only:
+ * passed by name on its `docker exec`, not in the container's environment,
+ * so setup scripts, recipes, gates and harness git never see them. Which
+ * credential depends on the job's driver.
+ */
+export const dockerWorker = (cfg: SandboxConfig, sessionId: string, store: CredentialStore = { secrets: async () => ({}), save: async () => undefined }): WorkerRunner => ({
   async run(job: Job, onEvent, signal, opts = {}): Promise<WorkerDone> {
-    const claude = await claudeToken();
-    if (!claude) throw new Error("No Claude token configured. Run `claude setup-token` and paste it in Settings.");
-    const secretEnv: Record<string, string> = { CLAUDE_CODE_OAUTH_TOKEN: claude };
+    const driver = driverInfo(job.driver);
+    const secrets = await store.secrets();
+    const credential = credentialFor(secrets, driver.name);
+    if (!credential) throw missingCredentialError(driver.name);
+    const secretEnv: Record<string, string> = { [driver.env]: credential };
     if (opts.runToken) secretEnv.VERSTAS_RUN_TOKEN = opts.runToken;
-    const child = execInSandbox(cfg, sessionId, WORKER_COMMAND, { secretEnv });
-    child.stdin?.end();
-    let stderr = "";
-    const raw = opts.rawLog ? createWriteStream(opts.rawLog, { flags: "a" }) : null;
-    child.stderr?.setEncoding("utf8").on("data", (d: string) => {
-      stderr = (stderr + d).slice(-4000);
-      if (raw) raw.write(`# stderr: ${d}`);
-      if (process.env.VERSTAS_DEBUG) process.stderr.write(`[worker ${job.ticket ?? job.role} stderr] ${d}`);
-    });
-    if (raw) child.stdout?.on("data", (d: Buffer) => raw.write(d));
-    const onAbort = () => {
-      // Stop the driver; the harness's `docker exec` child dies, and the
-      // driver's own SIGTERM handling stops claude. The container stays up.
-      child.kill("SIGTERM");
-      void runInSandbox(cfg, sessionId, ["pkill", "-TERM", "-f", WORKER_PATTERN], { allowFailure: true, timeoutMs: 10_000 });
-    };
-    signal.addEventListener("abort", onAbort, { once: true });
-    const t0 = Date.now();
-    const done = await readWorkerStream(child.stdout!, onEvent);
-    const code = await new Promise<number>((resolve) => child.on("close", (c) => resolve(c ?? 1)));
-    signal.removeEventListener("abort", onAbort);
-    raw?.end();
-    return (
-      done ?? {
-        kind: "worker_done",
-        t: new Date().toISOString(),
-        ticket: job.ticket,
-        role: job.role,
-        ok: false,
-        stopReason: signal.aborted ? "aborted" : `exec_exit_${code}`,
-        rateLimited: /rate.?limit|429/i.test(stderr),
-        costUsd: 0,
-        turns: 0,
-        seconds: Math.round((Date.now() - t0) / 1000),
-        text: "",
-        stderr,
-      }
-    );
+    const age = driver.name === "codex" ? codexAuthAgeDays(secrets) : undefined;
+    const exec = () => runWorkerExec(cfg, sessionId, job, secretEnv, onEvent, signal, opts, store);
+    return age !== undefined && age >= CODEX_SERIALIZE_AFTER_DAYS ? serializeCodex(exec) : exec();
   },
 });
+
+const runWorkerExec = async (
+  cfg: SandboxConfig,
+  sessionId: string,
+  job: Job,
+  secretEnv: Record<string, string>,
+  onEvent: Parameters<WorkerRunner["run"]>[1],
+  signal: AbortSignal,
+  opts: NonNullable<Parameters<WorkerRunner["run"]>[3]>,
+  store: CredentialStore,
+): Promise<WorkerDone> => {
+  const child = execInSandbox(cfg, sessionId, WORKER_COMMAND, { secretEnv });
+  child.stdin?.end();
+  let stderr = "";
+  const raw = opts.rawLog ? createWriteStream(opts.rawLog, { flags: "a" }) : null;
+  child.stderr?.setEncoding("utf8").on("data", (d: string) => {
+    stderr = (stderr + d).slice(-4000);
+    if (raw) raw.write(`# stderr: ${d}`);
+    if (process.env.VERSTAS_DEBUG) process.stderr.write(`[worker ${job.ticket ?? job.role} stderr] ${d}`);
+  });
+  const onAbort = () => {
+    // Stop the driver; the harness's `docker exec` child dies, and the
+    // driver's own SIGTERM handling stops the agent. The container stays up.
+    child.kill("SIGTERM");
+    void runInSandbox(cfg, sessionId, ["pkill", "-TERM", "-f", WORKER_PATTERN], { allowFailure: true, timeoutMs: 10_000 });
+  };
+  signal.addEventListener("abort", onAbort, { once: true });
+  const t0 = Date.now();
+  const done = await readWorkerStream(child.stdout!, onEvent, {
+    onRaw: raw ? (line) => raw.write(line + "\n") : undefined,
+    onCredential: async (c) => {
+      try {
+        await store.save(c.driver, c.value);
+      } catch (e) {
+        console.warn(`[worker ${job.ticket ?? job.role}] could not store the refreshed ${c.driver} login: ${(e as Error).message}`);
+      }
+    },
+  });
+  const code = await new Promise<number>((resolve) => child.on("close", (c) => resolve(c ?? 1)));
+  signal.removeEventListener("abort", onAbort);
+  raw?.end();
+  return (
+    done ?? {
+      kind: "worker_done",
+      t: new Date().toISOString(),
+      ticket: job.ticket,
+      role: job.role,
+      ok: false,
+      stopReason: signal.aborted ? "aborted" : `exec_exit_${code}`,
+      rateLimited: /rate.?limit|429/i.test(stderr),
+      costUsd: 0,
+      turns: 0,
+      seconds: Math.round((Date.now() - t0) / 1000),
+      text: "",
+      stderr,
+    }
+  );
+};
 
 export const proxyDenials =
   (cfg: SandboxConfig, sessionId: string) =>
@@ -102,7 +155,7 @@ export type RunManagerConfig = {
   tokens: RunTokens;
   sandbox: SandboxConfig;
   agentApiUrl: string;
-  claudeToken: () => Promise<string | undefined>;
+  credentials: CredentialStore;
 };
 
 /**
@@ -112,8 +165,11 @@ export type RunManagerConfig = {
  * root commands the user approved earlier when a recreate does happen.
  */
 export const ensureSessionSandbox = async (c: RunManagerConfig, session: Session, envFile: string, runToken: string | undefined): Promise<void> => {
-  // No secrets in the container's environment (see dockerWorker); fail early if a run will need the token.
-  if (runToken && !(await c.claudeToken())) throw new Error("No Claude token configured. Run `claude setup-token` and paste it in Settings.");
+  // No secrets in the container's environment (see dockerWorker); fail early if a run will need a credential it does not have.
+  if (runToken) {
+    const missing = missingCredentials(await c.credentials.secrets(), session);
+    if (missing.length) throw missingCredentialError(missing[0]!);
+  }
   await writeEnvFile(envFile, { VERSTAS_SESSION: session.id });
   const h = await c.hub.get(session.id);
   // Sessions created before the proxy directory existed get it here.
@@ -188,8 +244,8 @@ export const createDockerRunManager = (c: RunManagerConfig): RunManager =>
     tokens: c.tokens,
     agentApiUrl: c.agentApiUrl,
     shell: (sessionId) => dockerShell(c.sandbox, sessionId),
-    worker: (sessionId) => dockerWorker(c.sandbox, sessionId, c.claudeToken),
-    secrets: async () => [await c.claudeToken()].filter((x): x is string => Boolean(x)),
+    worker: (sessionId) => dockerWorker(c.sandbox, sessionId, c.credentials),
+    secrets: async () => secretValues(await c.credentials.secrets()),
     proxyDenials: (sessionId, since) => proxyDenials(c.sandbox, sessionId)(since),
     ensureSandbox: (session, envFile, token) => ensureSessionSandbox(c, session, envFile, token),
     healSandbox: async (sessionId) => {

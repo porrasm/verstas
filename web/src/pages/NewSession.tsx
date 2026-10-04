@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { api, copyText, fmtBytes, MODEL_CHOICES, upload, useLive, type Config, type DraftDetail, type NetworkPack, type SetupScript } from "../api";
+import { api, copyText, fmtBytes, upload, useLive, type Config, type DraftDetail, type NetworkPack, type SessionAgents, type SetupScript } from "../api";
+import { AgentOptionsButton } from "./AgentOptions";
 import { ConnectAssistant } from "./ConnectAssistant";
 
 /** `as`: the workspace directory name a draft chose, when it differs from the target name. */
@@ -24,13 +25,13 @@ export const NewSessionPage = ({ draftId = null }: { draftId?: string | null }) 
   const [copied, setCopied] = useState("");
   const [limits, setLimits] = useState({ memory: "4g", cpus: 2, workspaceMb: 20000 });
   const [preview, setPreview] = useState<{ ok: boolean; error?: string; tickets?: { id: string; title: string; repo?: string; state: string }[] } | null>(null);
-  const [model, setModel] = useState("claude-sonnet-5-5");
+  const [agents, setAgents] = useState<SessionAgents>({ worker: { driver: "claude", model: "claude-sonnet-5-5" } });
   const [busy, setBusy] = useState("");
   const [err, setErr] = useState("");
   const [fromDraft, setFromDraft] = useState<{ id: string; name: string } | null>(null);
   const [draftChanged, setDraftChanged] = useState(false);
 
-  /** Copies a draft into the form. Caps, model, limits and attachments stay as they are: they are yours to set. */
+  /** Copies a draft into the form. Caps, agents, limits and attachments stay as they are: they are yours to set. */
   const applyDraft = (d: DraftDetail, picks: RepoPick[]) => {
     const x = d.draft;
     setName(x.name);
@@ -89,7 +90,8 @@ export const NewSessionPage = ({ draftId = null }: { draftId?: string | null }) 
     setPacks((p) => [...new Set([...p, ...found.filter((n) => n !== "anthropic")])]);
   };
   const detectedBy = (pack: string) => repos.filter((r) => r.on && detected[r.target]?.includes(pack)).map((r) => r.target);
-  const hostCount = new Set([...packList.filter((p) => p.name === "anthropic" || packs.includes(p.name)).flatMap((p) => p.hosts), ...extraHosts.split(/\n/).map((s) => s.trim()).filter(Boolean)]).size;
+  const usedDrivers = ["claude", agents.worker?.driver, agents.reviewer?.driver].filter(Boolean);
+  const hostCount = new Set([...packList.filter((p) => packs.includes(p.name) || (p.agent && usedDrivers.includes(p.agent))).flatMap((p) => p.hosts), ...extraHosts.split(/\n/).map((s) => s.trim()).filter(Boolean)]).size;
 
   const validateBoard = async (text: string) => {
     if (!text.trim()) return setPreview(null);
@@ -140,7 +142,7 @@ export const NewSessionPage = ({ draftId = null }: { draftId?: string | null }) 
         allowlist: extraHosts.split(/\n/).map((s) => s.trim()).filter(Boolean),
         caps,
         limits,
-        model: model.trim() || undefined,
+        agents,
         setupScripts: picked,
         board: board.trim() || undefined,
         requirements: requirements.trim() || undefined,
@@ -166,7 +168,7 @@ export const NewSessionPage = ({ draftId = null }: { draftId?: string | null }) 
       {fromDraft && (
         <div className="banner info">
           <span>
-            Filled from the draft <a href={`#/d/${encodeURIComponent(fromDraft.id)}`}><strong>{fromDraft.name}</strong></a>. Review every section; caps, model and attachments are yours to set. Nothing exists until you press Create.
+            Filled from the draft <a href={`#/d/${encodeURIComponent(fromDraft.id)}`}><strong>{fromDraft.name}</strong></a>. Review every section; caps, agents and attachments are yours to set. Nothing exists until you press Create.
           </span>
         </div>
       )}
@@ -182,11 +184,7 @@ export const NewSessionPage = ({ draftId = null }: { draftId?: string | null }) 
         <h3>What to build</h3>
         <div className="two">
           <label>Name<input id="name" value={name} onChange={(e) => setName(e.target.value)} placeholder="Nuppi MVP" autoFocus /></label>
-          <label>
-            Model for every worker <span className="help">Any id or alias; empty uses the token's default</span>
-            <input id="model" className="mono" list="models" value={model} onChange={(e) => setModel(e.target.value)} placeholder="claude-sonnet-5-5" />
-            <datalist id="models">{MODEL_CHOICES.map((m) => <option key={m} value={m} />)}</datalist>
-          </label>
+          <AgentOptionsButton agents={agents} reviewerOn={caps.reviewer} onChange={setAgents} />
         </div>
         <label>
           Goal <span className="help">The planner turns this into tickets. Workers read it on every ticket, so say what done looks like.</span>
@@ -256,9 +254,9 @@ export const NewSessionPage = ({ draftId = null }: { draftId?: string | null }) 
 
       <section className="card">
         <h3>Network</h3>
-        <p className="lead">HTTPS only, through the session's proxy. Tick the toolchains the project downloads from; ticking a repository ticks the packs its manifests imply. The Claude API is always on. The worker can ask for a pack or a host during the run.</p>
+        <p className="lead">HTTPS only, through the session's proxy. Tick the toolchains the project downloads from; ticking a repository ticks the packs its manifests imply. The chosen agents' own backends are always on. The worker can ask for a pack or a host during the run.</p>
         <div className="packs">
-          {packList.filter((p) => p.name !== "anthropic").map((p) => {
+          {packList.filter((p) => !p.agent).map((p) => {
             const by = detectedBy(p.name);
             return (
               <label className="chk" key={p.name} title={p.hosts.join("\n")}>

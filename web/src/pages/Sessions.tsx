@@ -58,7 +58,7 @@ export const SessionsPage = ({ status }: { status: Status | null }) => {
       {err && <div className="banner warn"><span>{err}</span><button className="quiet sm end" onClick={() => setErr("")}>Dismiss</button></div>}
       {status && !status.docker.ok && <div className="banner warn">Docker is not reachable. Sessions can be created and edited, but not run.</div>}
       {status && !status.image && status.docker.ok && <div className="banner signal"><span>The dev-box image <code>{status.imageName}</code> is missing. Build it with <code>npm run image:build</code>.</span></div>}
-      {status && !status.hasClaudeToken && <div className="banner signal"><span>No Claude token yet. Run <code>claude setup-token</code> and paste it in <a href="#/settings">Settings</a>.</span></div>}
+      {status && !Object.values(status.credentials ?? {}).some(Boolean) && <div className="banner signal"><span>No agent credential yet. Run <code>claude setup-token</code> and paste it in <a href="#/settings">Settings</a>, or add a Codex login or a Cursor key there.</span></div>}
       <Drafts rows={drafts.filter((d) => !d.promotedTo)} now={now} />
       {sorted && sorted.length === 0 ? (
         <div className="card empty-state">

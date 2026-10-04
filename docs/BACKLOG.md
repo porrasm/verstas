@@ -237,9 +237,33 @@ from the porras.club setup, or the V-01 dashboard's push).
 
 ## V-12 · Second worker driver  (M)
 
-Codex CLI or OpenCode behind the driver contract in `docs/DRIVERS.md`;
-derived image with the binary; same board MCP server. Only after V-04, so
-the second agent never sees the token either.
+**Status: done 2026-10-04; Codex verified live, Cursor pending a key.** Codex CLI and Cursor CLI
+drive behind the contract in `docs/DRIVERS.md`, in the same image and the
+same worker; a session picks its agents per role under "Agent options"
+(the reviewer may differ from the worker). Each agent's credential reaches
+the worker process only; Codex's rotating login round-trips through the
+worker's stdout and is stored on the host. Claude Code stays the default
+and is untouched when the others are missing or unconfigured.
+
+Verified live on 2026-10-04 with Codex CLI 0.160.0: a prompt run inside
+the sandbox read the workspace files, ran shell commands, called the board
+through the MCP server and the proxy, and finished clean; the stream
+shapes match the translator and the generated config passes
+`--strict-config`. The proxy allowed `chatgpt.com` only; it denied
+`ab.chatgpt.com` (telemetry) and `*.oaiusercontent.com` (attachment
+storage), neither needed. Cursor ran live in the sandbox the same day: the agent reached its
+backend through the proxy (`*.cursor.sh`), ran tools, and its stream shapes
+match the translator. Its board MCP server failed to load in that run
+because a project-level `.cursor/mcp.json` shadows the user-level file the
+driver writes and demands an interactive approval; the project-level file
+is no longer written and the user-level path was verified inside the image
+(`agent mcp list` reports the board server ready and a headless run calls
+it). One more sandbox run with Cursor should confirm the board round trip
+end to end. Still open: the exact quota-exhausted messages (matched by text
+today), the shell tool's result summary for Cursor (shows the command, not
+its output), and per-driver
+rate-limit backoff (pause only the agent that hit its limit); today any
+rate limit pauses the run as before.
 
 ## V-13 · Parallel tickets  (L)
 

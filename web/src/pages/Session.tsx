@@ -10,7 +10,6 @@ import {
   fmtDuration,
   fmtTime,
   fmtUsd,
-  MODEL_CHOICES,
   STATE_LABEL,
   needsSetup,
   useLive,
@@ -27,6 +26,7 @@ import {
   type Totals,
   type VEvent,
 } from "../api";
+import { AgentOptionsButton } from "./AgentOptions";
 
 const COLUMNS: { key: string; title: string; states: string[] }[] = [
   { key: "backlog", title: "Backlog", states: ["backlog"] },
@@ -264,7 +264,7 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
           <span className={sb.tone === "good" ? "ok" : ""}>{sb.text}</span>
           <span>{session.repos.length ? <>repos <span className="mono">{session.repos.map((r) => r.name).join(", ")}</span></> : "no repositories"}</span>
           {dir && <SessionDir dir={dir} />}
-          <ModelPicker session={session} onChange={(model) => tryAct("model", () => api("PUT", `${base}/caps`, { model }))} />
+          <AgentOptionsButton compact agents={session.agents ?? {}} legacyModel={session.model} reviewerOn={session.caps.reviewer} title="Applies to the next worker that starts; a running worker keeps its agent" onChange={(agents) => tryAct("agents", () => api("PUT", `${base}/caps`, { agents }))} />
           <NotifyToggle />
           <RemoteToggle session={session} onSet={(remote) => tryAct("remote", () => api("PUT", `${base}/remote`, { remote }))} />
           <span className={live ? "" : "err"} title={live ? "Live updates connected" : "Reconnecting to the host app"}><span className={`dot ${live ? "good" : "bad"}`} /> {live ? "live" : "reconnecting…"}</span>
@@ -740,53 +740,6 @@ const ProgressStrip = ({ counts, total }: { counts: Record<string, number>; tota
     <div className="legend">{ORDER.filter((k) => counts[k]).map((k) => <span key={k} className={k}>{counts[k]} {STATE_LABEL[k]?.toLowerCase()}</span>)}</div>
   </div>
 );
-
-const ModelPicker = ({ session, onChange }: { session: Session; onChange: (model: string | null) => void }) => {
-  const [custom, setCustom] = useState<string | null>(null);
-  const current = session.model ?? "";
-  const known = !current || MODEL_CHOICES.includes(current);
-  if (custom !== null) {
-    return (
-      <label title="Any model id or alias claude --model accepts">
-        <span>model</span>
-        <input
-          autoFocus
-          className="mono"
-          style={{ width: 200 }}
-          value={custom}
-          placeholder="model id or alias"
-          onChange={(e) => setCustom(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") {
-              onChange(custom.trim() || null);
-              setCustom(null);
-            }
-            if (e.key === "Escape") setCustom(null);
-          }}
-        />
-        <button className="sm" onClick={() => { onChange(custom.trim() || null); setCustom(null); }}>Set</button>
-        <button className="quiet sm" onClick={() => setCustom(null)}>Cancel</button>
-      </label>
-    );
-  }
-  return (
-    <label title="Applies to the next worker that starts; a running worker keeps its model">
-      <span>model</span>
-      <select
-        id="model-select"
-        value={known ? current : "__custom"}
-        onChange={(e) => {
-          if (e.target.value === "__custom") setCustom(current);
-          else onChange(e.target.value || null);
-        }}
-      >
-        <option value="">token default</option>
-        {MODEL_CHOICES.map((m) => <option key={m} value={m}>{m}</option>)}
-        {known ? <option value="__custom">other…</option> : <option value="__custom">{current} (other…)</option>}
-      </select>
-    </label>
-  );
-};
 
 const MoreMenu = ({ items }: { items: { label: string; onClick?: () => void; href?: string; disabled?: boolean }[] }) => {
   const [open, setOpen] = useState(false);

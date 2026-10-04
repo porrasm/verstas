@@ -63,6 +63,33 @@ ARG CLAUDE_CODE_VERSION=2.1.287
 RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} \
  && npm cache clean --force
 
+# Optional agents (docs/DRIVERS.md): Codex CLI and Cursor CLI. Each install
+# is best-effort so a vendor hiccup never breaks the image: a session that
+# picks an agent whose binary is missing fails its worker with
+# "driver_missing", and sessions on Claude Code are unaffected. Set the
+# build arg to 0 to leave one out on purpose.
+ARG INSTALL_CODEX=1
+ARG CODEX_VERSION=0.160.0
+RUN if [ "$INSTALL_CODEX" = "1" ]; then \
+      (npm install -g @openai/codex@${CODEX_VERSION} && npm cache clean --force && codex --version) \
+      || echo "WARNING: Codex CLI not installed; the codex driver will report driver_missing"; \
+    fi
+# The Cursor installer unpacks a self-contained package (a bash launcher plus
+# its own node) under ~/.local/share/cursor-agent and symlinks ~/.local/bin;
+# the package moves to /opt so the agent user can run it, and the launcher
+# finds its files through the symlink's real path.
+ARG INSTALL_CURSOR=1
+RUN if [ "$INSTALL_CURSOR" = "1" ]; then \
+      (curl -fsSL https://cursor.com/install | bash >/dev/null \
+       && mv /root/.local/share/cursor-agent /opt/cursor-agent \
+       && chmod -R a+rX /opt/cursor-agent \
+       && ln -sf "$(ls -d /opt/cursor-agent/versions/*/cursor-agent | head -1)" /usr/local/bin/agent \
+       && ln -sf "$(ls -d /opt/cursor-agent/versions/*/cursor-agent | head -1)" /usr/local/bin/cursor-agent \
+       && rm -rf /root/.local/bin/agent /root/.local/bin/cursor-agent \
+       && su -s /bin/sh node -c "HOME=/tmp agent --version") \
+      || echo "WARNING: Cursor CLI not installed; the cursor driver will report driver_missing"; \
+    fi
+
 # The worker and the board MCP server, dependency-free ESM compiled from
 # src/worker. At run time the host mounts its current dist/src/worker over
 # this directory read-only, so this copy is a fallback for running the image

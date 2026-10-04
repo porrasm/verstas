@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
-import { eventSchema, needsSetup, now, requestOutcome, runSchema, type Board, type Readiness, type Run, type Session, type Ticket, type TicketState, type VerstasEvent } from "../core/types.js";
+import { agentFor, DRIVER_NAMES, eventSchema, needsSetup, now, requestOutcome, runSchema, type Board, type DriverName, type Readiness, type Run, type Session, type Ticket, type TicketState, type VerstasEvent } from "../core/types.js";
 import { addNote, getTicket, hasOpenWork, nextReady, replaceTicket, transition, validateRepos } from "../board/board.js";
 import { writeJsonAtomic } from "../board/store.js";
 import type { SessionHandle, SessionHub } from "../sessions/hub.js";
@@ -523,14 +523,17 @@ export class RunManager {
     await fs.mkdir(dir, { recursive: true });
     await fs.writeFile(path.join(dir, "prompt.md"), job.promptText);
     await fs.writeFile(path.join(dir, "system.md"), systemMd(job.role));
+    // The reviewer may be a different agent than the worker (session.agents); everything else about the job is the same.
+    const agent = agentFor(h.session, job.role);
     const spec: Job = {
       role: job.role,
       ticket: job.ticket,
+      driver: agent.driver,
       promptFile: `/workspace/${WORKSPACE_FILES}/prompt.md`,
       systemPromptFile: `/workspace/${WORKSPACE_FILES}/system.md`,
       caps: { minutes: h.session.caps.workerMinutes, turns: h.session.caps.workerTurns, budgetUsd: h.session.caps.budgetUsd },
       mcpConfigFile: `/workspace/${WORKSPACE_FILES}/mcp.json`,
-      model: h.session.model || undefined,
+      model: agent.model || undefined,
     };
     if (DEBUG) spec.debug = true;
     await fs.writeFile(path.join(dir, "job.json"), JSON.stringify(spec, null, 2));
@@ -556,8 +559,13 @@ export class RunManager {
     const ws = h.paths.workspace;
     await fs.writeFile(path.join(ws, "VERSTAS.md"), verstasMd(h.session, this.deps.agentApiUrl));
     await fs.writeFile(path.join(ws, "CLAUDE.md"), workspaceClaudeMd());
+    // Codex and Cursor read AGENTS.md where Claude Code reads CLAUDE.md; same pointers.
+    await fs.writeFile(path.join(ws, "AGENTS.md"), workspaceClaudeMd());
     await fs.mkdir(path.join(ws, WORKSPACE_FILES, "logs"), { recursive: true });
     await fs.writeFile(path.join(ws, WORKSPACE_FILES, "mcp.json"), JSON.stringify(mcpConfig(), null, 2));
+    // No project-level .cursor/mcp.json: Cursor would demand an interactive approval for it and it would shadow the
+    // user-level file the Cursor driver writes for the run (src/worker/driver-cursor.ts). Remove one left by earlier versions.
+    await fs.rm(path.join(ws, ".cursor", "mcp.json"), { force: true });
     await fs.mkdir(h.paths.notes, { recursive: true });
     const index = path.join(h.paths.notes, "INDEX.md");
     await fs.access(index).catch(() => fs.writeFile(index, notesIndexMd()));
@@ -758,13 +766,36 @@ export const parseWorkerLine = (line: string): VerstasEvent | null => {
   }
 };
 
+/** A driver handing back a credential its agent rotated (Codex's auth file). Never an event: it is stored, not logged. */
+export type CredentialLine = { kind: "credential"; driver: DriverName; value: string };
+
+export const parseCredentialLine = (line: string): CredentialLine | null => {
+  if (!line.includes('"credential"')) return null;
+  try {
+    const j = JSON.parse(line) as Partial<CredentialLine>;
+    if (j.kind === "credential" && typeof j.value === "string" && j.value && typeof j.driver === "string" && (DRIVER_NAMES as readonly string[]).includes(j.driver)) return j as CredentialLine;
+  } catch {
+    // not JSON
+  }
+  return null;
+};
+
 export const readWorkerStream = async (
   stdout: NodeJS.ReadableStream,
   onEvent: (e: VerstasEvent) => void,
+  opts: { onCredential?: (c: CredentialLine) => Promise<void> | void; /** Every other line, for the raw debug log; credential lines never reach it. */ onRaw?: (line: string) => void } = {},
 ): Promise<WorkerDone | undefined> => {
   let done: WorkerDone | undefined;
   const rl = readline.createInterface({ input: stdout, crlfDelay: Infinity });
   for await (const line of rl) {
+    const cred = parseCredentialLine(line);
+    if (cred) {
+      await opts.onCredential?.(cred);
+      continue;
+    }
+    // A malformed credential line is dropped without a trace: it may still hold a secret.
+    if (/"kind"\s*:\s*"credential"/.test(line)) continue;
+    opts.onRaw?.(line);
     const e = parseWorkerLine(line);
     if (!e) continue;
     if (e.kind === "worker_done") done = e;

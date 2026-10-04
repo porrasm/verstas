@@ -7,10 +7,14 @@ import os from "node:os";
 import express, { type Request, type Response } from "express";
 import { z } from "zod";
 import {
+  agentFor,
   capsSchema,
   DEFAULT_ALLOWLIST,
+  DRIVER_NAMES,
+  driverNameSchema,
   limitsSchema,
   needsSetup,
+  sessionAgentsSchema,
   now,
   ticketIdSchema,
   ticketImportSchema,
@@ -25,9 +29,10 @@ import {
   type Ticket,
 } from "../core/types.js";
 import { emptyBoard, addNote, BoardError, exportBoard, getTicket, importBoard, parseBoardPaste, replaceTicket, transition, validateDeps, validateRepos, canTransition } from "../board/board.js";
-import { configSchema, loadConfig, loadSecrets, saveConfig, saveSecrets, verstasHome, workTargetSchema, type Config } from "../config.js";
+import { codexAuthRefreshedAt, configSchema, loadConfig, loadSecrets, saveConfig, saveSecrets, verstasHome, workTargetSchema, type Config } from "../config.js";
+import { codexAuthAgeDays, configuredDrivers, DRIVERS } from "../harness/drivers.js";
 import type { SessionHub } from "../sessions/hub.js";
-import { createSession, deleteSessionDir, listSessions, sessionPaths } from "../sessions/sessions.js";
+import { createSession, deleteSessionDir, listSessions, sessionPaths, withAgentPacks } from "../sessions/sessions.js";
 import { applyBundle, ApplyError } from "../sessions/apply.js";
 import type { SessionHandle } from "../sessions/hub.js";
 import { removeSandbox, sandboxStatus, snapshotSandbox, stopSandbox, type SandboxConfig } from "../sandbox/lifecycle.js";
@@ -114,7 +119,56 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
       const cfg = d.getConfig();
       const image = docker.ok ? await d.sandbox.docker.run(["image", "inspect", cfg.devboxImage, "--format", "{{.Id}}"], { allowFailure: true, timeoutMs: 10_000 }) : null;
       const secrets = await loadSecrets();
-      res.json({ version: d.version, docker, image: image ? image.code === 0 : false, imageName: cfg.devboxImage, sessionsRoot: cfg.sessionsRoot, hasClaudeToken: Boolean(secrets.claudeToken) });
+      const credentials = configuredDrivers(secrets);
+      const codexAge = codexAuthAgeDays(secrets);
+      res.json({
+        version: d.version,
+        docker,
+        image: image ? image.code === 0 : false,
+        imageName: cfg.devboxImage,
+        sessionsRoot: cfg.sessionsRoot,
+        hasClaudeToken: Boolean(secrets.claudeToken),
+        credentials,
+        /** Every driver the UI can offer, with whether its credential is configured. */
+        drivers: DRIVER_NAMES.map((name) => ({ ...DRIVERS[name], configured: credentials[name], ...(name === "codex" && codexAge !== undefined ? { codexAuthAgeDays: Math.round(codexAge * 10) / 10 } : {}) })),
+      });
+    }),
+  );
+
+  const codexAuthBody = z.string().min(2).max(200_000).refine((s) => {
+    try {
+      const j = JSON.parse(s) as Record<string, unknown>;
+      return typeof j === "object" && j !== null && ("tokens" in j || "OPENAI_API_KEY" in j);
+    } catch {
+      return false;
+    }
+  }, "Not a Codex auth.json: expected JSON with a tokens object");
+
+  /** Import Codex's login from this machine, after `codex login` (or `codex login --device-auth`) here. */
+  api.post(
+    "/secrets/codex/import",
+    wrap(async (req, res) => {
+      const body = z.object({ path: z.string().max(1000).optional() }).parse(req.body ?? {});
+      const file = body.path ? expandHome(body.path) : path.join(process.env.CODEX_HOME ?? path.join(os.homedir(), ".codex"), "auth.json");
+      const text = await fs.readFile(file, "utf8").catch((e: NodeJS.ErrnoException) => {
+        throw new Error(e.code === "ENOENT" ? `No Codex login at ${file}. Run \`codex login --device-auth\` on this machine first.` : e.message);
+      });
+      const auth = codexAuthBody.parse(text.trim());
+      if (/"OPENAI_API_KEY"\s*:\s*"[^"]+"/.test(auth) && !/"tokens"/.test(auth)) throw new Error("That Codex login is an API key, which bills per use. Log in with your ChatGPT account instead (`codex logout`, then `codex login --device-auth`).");
+      await saveSecrets({ ...(await loadSecrets()), codexAuth: auth });
+      res.json({ ok: true, from: file, refreshedAt: codexAuthRefreshedAt(auth)?.toISOString() });
+    }),
+  );
+
+  /** Forget one credential. Sessions that need it fail at their next worker with a clear message. */
+  api.delete(
+    "/secrets/:driver",
+    wrap(async (req, res) => {
+      const driver = driverNameSchema.parse(param(req, "driver"));
+      const s = { ...(await loadSecrets()) };
+      delete s[DRIVERS[driver].secret];
+      await saveSecrets(s);
+      res.json({ ok: true });
     }),
   );
 
@@ -135,8 +189,22 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
   api.put(
     "/secrets",
     wrap(async (req, res) => {
-      const { claudeToken } = z.object({ claudeToken: z.string().min(10).max(4000) }).parse(req.body);
-      await saveSecrets({ ...(await loadSecrets()), claudeToken: claudeToken.trim() });
+      const body = z
+        .object({
+          claudeToken: z.string().min(10).max(4000).optional(),
+          cursorApiKey: z.string().min(10).max(4000).optional(),
+          /** The text of Codex's auth.json, pasted; the import route reads it from disk instead. */
+          codexAuth: codexAuthBody.optional(),
+        })
+        .parse(req.body);
+      if (!body.claudeToken && !body.cursorApiKey && !body.codexAuth) throw new Error("Nothing to save");
+      const cur = await loadSecrets();
+      await saveSecrets({
+        ...cur,
+        ...(body.claudeToken ? { claudeToken: body.claudeToken.trim() } : {}),
+        ...(body.cursorApiKey ? { cursorApiKey: body.cursorApiKey.trim() } : {}),
+        ...(body.codexAuth ? { codexAuth: body.codexAuth.trim() } : {}),
+      });
       res.json({ ok: true });
     }),
   );
@@ -427,7 +495,9 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
     uploads: z.array(z.object({ id: z.string().regex(/^[a-f0-9]{16}$/), name: z.string() })).default([]),
     allowlist: z.array(z.string()).optional(),
     packs: z.array(z.string()).optional(),
+    /** Legacy: the worker's Claude model. New callers send `agents`. */
     model: z.string().max(100).optional(),
+    agents: sessionAgentsSchema.optional(),
     setupScripts: z.array(z.string()).default([]),
     caps: capsSchema.partial().optional(),
     limits: limitsSchema.partial().optional(),
@@ -981,18 +1051,36 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
   api.put(
     "/sessions/:id/caps",
     wrap(async (req, res) => {
-      const body = z.object({ caps: capsSchema.partial().optional(), limits: limitsSchema.partial().optional(), model: z.string().max(100).nullable().optional() }).parse(req.body);
+      const body = z
+        .object({
+          caps: capsSchema.partial().optional(),
+          limits: limitsSchema.partial().optional(),
+          /** Legacy: sets the worker's model and keeps its driver. */
+          model: z.string().max(100).nullable().optional(),
+          /** Replaces the agents block. Applies to the next worker that starts. */
+          agents: sessionAgentsSchema.optional(),
+        })
+        .parse(req.body);
       const h = await d.hub.get(param(req, "id"));
-      await h.mutate((docs) => ({
-        next: {
-          session: {
-            ...docs.session,
-            caps: capsSchema.parse({ ...docs.session.caps, ...body.caps }),
-            limits: limitsSchema.parse({ ...docs.session.limits, ...body.limits }),
-            model: body.model === undefined ? docs.session.model : body.model?.trim() || undefined,
-          },
-        },
-      }));
+      await h.mutate((docs) => {
+        const s = docs.session;
+        let agents = body.agents ?? s.agents;
+        if (body.model !== undefined && !body.agents) {
+          const worker = agentFor(s, "implementer");
+          agents = { ...s.agents, worker: { driver: worker.driver, model: body.model?.trim() || undefined } };
+        }
+        const next = {
+          ...s,
+          caps: capsSchema.parse({ ...s.caps, ...body.caps }),
+          limits: limitsSchema.parse({ ...s.limits, ...body.limits }),
+          model: body.model === undefined ? s.model : body.model?.trim() || undefined,
+          agents,
+        };
+        // A newly chosen agent's backend joins the allowlist; the proxy picks it up before the next worker.
+        const packs = withAgentPacks(next.packs, next);
+        const allowlist = [...new Set([...next.allowlist, ...packHosts(packs)])];
+        return { next: { session: { ...next, packs, allowlist } } };
+      });
       res.json({ ok: true });
     }),
   );

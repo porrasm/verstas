@@ -5,8 +5,9 @@ import { fileURLToPath } from "node:url";
 import express from "express";
 import { WebSocketServer, WebSocket } from "ws";
 import { createAgentApi, RunTokens } from "./agent-api/agent-api.js";
-import { loadConfig, loadSecrets, saveConfig, type Config } from "./config.js";
-import { createDockerRunManager, proxyDistPath, workerDistPath } from "./harness/docker-worker.js";
+import { loadConfig, loadSecrets, saveConfig, saveSecrets, type Config } from "./config.js";
+import { DRIVERS } from "./harness/drivers.js";
+import { createDockerRunManager, proxyDistPath, workerDistPath, type RunManagerConfig } from "./harness/docker-worker.js";
 import { createDockerRunner } from "./sandbox/docker.js";
 import type { SandboxConfig } from "./sandbox/lifecycle.js";
 import { SessionHub } from "./sessions/hub.js";
@@ -85,12 +86,19 @@ export const startVerstas = async (): Promise<Verstas> => {
   const hub = new SessionHub(config.sessionsRoot);
   const tokens = new RunTokens();
   const agentApiUrl = `http://host.docker.internal:${config.agentApiPort}/agent`;
-  const runConfig = {
+  const runConfig: RunManagerConfig = {
     hub,
     tokens,
     sandbox,
     agentApiUrl,
-    claudeToken: async () => (await loadSecrets()).claudeToken,
+    credentials: {
+      secrets: loadSecrets,
+      // A driver handed back a rotated login (Codex): store it so the next worker starts from the fresh token.
+      save: async (driver, value) => {
+        const field = DRIVERS[driver].secret;
+        await saveSecrets({ ...(await loadSecrets()), [field]: value });
+      },
+    },
   };
   const runs = createDockerRunManager(runConfig);
 

@@ -42,7 +42,9 @@ export type Session = {
   goal: string;
   createdAt: string;
   image: string;
+  /** Legacy: the worker's Claude model from before `agents`; read through agentFor. */
   model?: string;
+  agents?: SessionAgents;
   repos: { name: string; sourcePath: string; branch: string; runBranch: string; baseCommit?: string }[];
   attachments: { name: string; dir: string; bytes: number; skipped: string[] }[];
   allowlist: string[];
@@ -68,7 +70,7 @@ export type RemoteSettings = {
 export type Readiness = { verdict: "ready" | "needs"; at: string; summary: string; checks: { text: string; ok: boolean }[]; confirmedAt?: string };
 /** Tickets wait for the environment: requirements set and not confirmed. Mirrors src/core/types.ts. */
 export const needsSetup = (s: { requirements: string; readiness?: Readiness }): boolean => Boolean(s.requirements.trim()) && !s.readiness?.confirmedAt;
-export type NetworkPack = { name: string; title: string; hosts: string[] };
+export type NetworkPack = { name: string; title: string; hosts: string[]; /** Set on the packs that follow an agent choice instead of being ticked. */ agent?: DriverName };
 export type SetupScript = { name: string; description: string; hosts: string[]; note: string; script: string; runAs: "root" | "agent"; env: string };
 export type Run = { id: number; state: string; startedAt: string; endedAt?: string; currentTicket?: string; ticketsDone: number; cost: { usd?: number }; pauseReason?: string; resumeAt?: string };
 export type VEvent = { kind: string; t: string; ticket?: string; [k: string]: unknown };
@@ -76,7 +78,27 @@ export type Totals = { usd: number; runs: number; lastActivityAt: string };
 export type SessionSummary = { session: Session; counts: Record<string, number>; run?: Run; openRequests: number; ideas: number; totals?: Totals; error?: string };
 export type Sandbox = { network: boolean; proxy: "running" | "stopped" | "absent"; container: "running" | "stopped" | "absent" };
 export type SessionDetail = { session: Session; board: Board; inbox: Inbox; run?: Run; runs: Run[]; totals: Totals; sandbox: Sandbox | null; active: boolean; /** The session directory on this machine. */ dir: string };
-export type Status = { version: string; docker: { ok: boolean; detail: string }; image: boolean; imageName: string; sessionsRoot: string; hasClaudeToken: boolean };
+export type DriverName = "claude" | "codex" | "cursor";
+export type AgentSpec = { driver: DriverName; model?: string };
+export type SessionAgents = { worker?: AgentSpec; reviewer?: AgentSpec };
+export type WorkerRole = "implementer" | "reviewer" | "planner" | "setup" | "prompt";
+/** Mirrors src/core/types.ts agentFor: the reviewer defaults to the worker; sessions from before `agents` ran Claude with `model`. */
+export const agentFor = (s: { model?: string; agents?: SessionAgents }, role: WorkerRole): AgentSpec => {
+  const worker: AgentSpec = s.agents?.worker ?? { driver: "claude", model: s.model || undefined };
+  return role === "reviewer" && s.agents?.reviewer ? s.agents.reviewer : worker;
+};
+/** One driver as /status lists it: what the UI needs to offer it and to warn when it cannot run. */
+export type DriverInfo = { name: DriverName; title: string; models: string[]; hint: string; reportsCost: boolean; configured: boolean; codexAuthAgeDays?: number };
+export type Status = {
+  version: string;
+  docker: { ok: boolean; detail: string };
+  image: boolean;
+  imageName: string;
+  sessionsRoot: string;
+  hasClaudeToken: boolean;
+  credentials: Record<DriverName, boolean>;
+  drivers: DriverInfo[];
+};
 export type Config = { sessionsRoot: string; workTargets: { name: string; path: string }[]; uiPort: number; agentApiPort: number; devboxImage: string; linuxHost: boolean };
 
 export class ApiError extends Error {
@@ -227,8 +249,6 @@ export const STATE_LABEL: Record<string, string> = { backlog: "Backlog", ready: 
 export const fmtBytes = (n: number): string => (n > 1e9 ? `${(n / 1e9).toFixed(1)} GB` : n > 1e6 ? `${(n / 1e6).toFixed(1)} MB` : `${Math.round(n / 1e3)} kB`);
 
 /** Models offered in the UI; any other id or alias can be typed. */
-export const MODEL_CHOICES = ["claude-sonnet-5-5", "claude-opus-5-5", "claude-fable-5-1", "claude-haiku-4-5-20251001", "sonnet", "opus", "haiku"];
-
 /** Clipboard write with a fallback for views that refuse it. */
 export const copyText = async (text: string): Promise<void> => {
   try {

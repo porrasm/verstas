@@ -4,16 +4,18 @@ import {
   DEFAULT_ALLOWLIST,
   inboxSchema,
   now,
+  sessionDrivers,
   sessionSchema,
   SESSION_ID_PATTERN,
   type Inbox,
   type Session,
+  type SessionAgents,
   type SessionSetupScript,
 } from "../core/types.js";
 import { writeJsonAtomic, saveBoard } from "../board/store.js";
 import { emptyBoard } from "../board/board.js";
 import type { WorkTarget } from "../config.js";
-import { allowlistFor, DEFAULT_PACKS } from "../network/packs.js";
+import { allowlistFor, DEFAULT_PACKS, driverPack, packHosts } from "../network/packs.js";
 import { cloneWorkTarget, extractZip, type CloneResult, type ExtractResult } from "./workspace.js";
 
 /**
@@ -102,10 +104,22 @@ export type CreateSessionInput = {
   packs?: string[];
   requirements?: string;
   image: string;
+  /** Legacy: the worker's Claude model. New callers pass `agents`. */
   model?: string;
+  agents?: SessionAgents;
   setupScripts?: SessionSetupScript[];
   caps?: Partial<Session["caps"]>;
   limits?: Partial<Session["limits"]>;
+};
+
+/** The packs plus the one each chosen agent's backend lives in (the Claude pack is always on through packHosts). */
+export const withAgentPacks = (packs: readonly string[], s: { model?: string; agents?: SessionAgents; caps?: { reviewer?: boolean } }): string[] => {
+  const out = [...packs];
+  for (const d of sessionDrivers(s)) {
+    const p = driverPack(d);
+    if (!out.includes(p)) out.push(p);
+  }
+  return out;
 };
 
 export type CreateSessionResult = {
@@ -134,13 +148,14 @@ export const createSession = async (root: string, input: CreateSessionInput): Pr
     createdAt: now(),
     image: input.image,
     model: input.model?.trim() || undefined,
+    agents: input.agents ?? {},
     requirements: input.requirements?.trim() ?? "",
     setupScripts: input.setupScripts ?? [],
-    // Packs plus extra hosts; hosts the chosen scripts download from join too.
-    packs: input.packs ?? (input.allowlist ? [] : [...DEFAULT_PACKS]),
+    // Packs plus extra hosts; hosts the chosen scripts download from join too. The agents' own backends come with the agent choice.
+    packs: withAgentPacks(input.packs ?? (input.allowlist ? [] : [...DEFAULT_PACKS]), input),
     allowlist: [
       ...new Set([
-        ...(input.packs ? allowlistFor(input.packs, input.allowlist ?? []) : (input.allowlist ?? [...DEFAULT_ALLOWLIST])),
+        ...(input.packs ? allowlistFor(withAgentPacks(input.packs, input), input.allowlist ?? []) : [...(input.allowlist ?? [...DEFAULT_ALLOWLIST]), ...packHosts(withAgentPacks([], input))]),
         ...(input.setupScripts ?? []).flatMap((x) => x.hosts),
       ]),
     ],
