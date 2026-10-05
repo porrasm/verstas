@@ -3,12 +3,12 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
 import { agentFor, DRIVER_NAMES, eventSchema, isInitialized, now, requestOutcome, runSchema, type Board, type DriverName, type Readiness, type Run, type Session, type Ticket, type TicketState, type VerstasEvent } from "../core/types.js";
-import { addNote, getTicket, hasOpenWork, nextReady, replaceTicket, transition, validateRepos } from "../board/board.js";
+import { addNote, canStart, getTicket, hasOpenWork, nextReady, replaceTicket, transition, validateRepos } from "../board/board.js";
 import { writeJsonAtomic } from "../board/store.js";
 import type { SessionHandle, SessionHub } from "../sessions/hub.js";
-import type { RunTokens } from "../agent-api/agent-api.js";
+import type { AgentRunHooks, RunToken, RunTokens } from "../agent-api/agent-api.js";
 import { workspaceSizeMb } from "../sessions/sessions.js";
-import { implementerPrompt, mcpConfig, notesIndexMd, plannerPrompt, reviewerPrompt, setupPrompt, systemMd, userPrompt, verstasMd, withContext, workspaceClaudeMd } from "./prompts.js";
+import { implementerPrompt, leadContinuePrompt, leadPrompt, mcpConfig, notesIndexMd, plannerPrompt, reviewerPrompt, setupPrompt, systemMd, userPrompt, verstasMd, withContext, workspaceClaudeMd } from "./prompts.js";
 import type { Job } from "../worker/worker.js";
 
 /**
@@ -55,6 +55,25 @@ export type RunDeps = {
   now?: () => string;
   /** For tests: how long to sleep on a rate limit (ms). */
   rateLimitSleepMs?: number;
+  /** How long a lead that asked to hand off may take to stop before it is stopped (ms). */
+  handoffGraceMs?: number;
+};
+
+/** What the hooks a lead calls through the agent API share with the run that started it. */
+type LeadContext = {
+  runId: number;
+  h: SessionHandle;
+  run: Run;
+  log: (e: VerstasEvent) => Promise<void>;
+  signal: AbortSignal;
+  isPause: () => boolean;
+  /** Judging and parking, one at a time, in the order the lead asked. */
+  queue: Promise<void>;
+  handoff?: string;
+  rateLimited: boolean;
+  halted: boolean;
+  /** Stops the current lead only (a handoff it does not follow), not the run. */
+  leadAbort?: AbortController;
 };
 
 export type RunOptions = {
@@ -79,10 +98,11 @@ export type RunControl = {
 const WORKSPACE_FILES = ".verstas";
 
 /** What a worker of this role may do through the agent API (src/agent-api/agent-api.ts). */
-const tokenRole = (role: Job["role"]): "worker" | "planner" => (role === "planner" ? "planner" : "worker");
+const tokenRole = (role: Job["role"]): "worker" | "planner" | "lead" => (role === "planner" ? "planner" : role === "lead" ? "lead" : "worker");
 
-export class RunManager {
+export class RunManager implements AgentRunHooks {
   private active = new Map<string, RunControl>();
+  private leads = new Map<string, LeadContext>();
   /** Numbers each worker's job directory. */
   private jobSeq = 0;
   constructor(private readonly deps: RunDeps) {}
@@ -147,6 +167,62 @@ export class RunManager {
   /** Sessions with an active run. */
   activeSessions(): string[] {
     return [...this.active.keys()];
+  }
+
+  // --- What a lead's agent API calls do (AgentRunHooks) ----------------------
+
+  private leadFor(r: RunToken): LeadContext | undefined {
+    const c = this.leads.get(r.sessionId);
+    return c && c.runId === r.runId ? c : undefined;
+  }
+
+  /** Judge the submitted ticket while the lead waits for the verdict. */
+  submitted(r: RunToken, ticketId: string): void {
+    const c = this.leadFor(r);
+    if (!c) return;
+    c.queue = c.queue.then(async () => {
+      c.run.currentTicket = ticketId;
+      try {
+        const out = await this.judge(c.h, c.run, ticketId, { ok: true, stopReason: "submitted", costUsd: 0 }, c.log, c.signal);
+        if (out === "rate_limited") c.rateLimited = true;
+      } catch (e) {
+        await c.log({ kind: "error", t: (this.deps.now ?? now)(), ticket: ticketId, text: `judging failed: ${(e as Error).message}` });
+        // Never leave it in review: the lead waits on that.
+        await c.h.mutate((docs) => (getTicket(docs.board, ticketId).state === "review" ? { next: { board: transition(docs.board, ticketId, "ready", { by: "harness", text: `Judging failed (${(e as Error).message.slice(0, 200)}); requeued with the work kept` }) } } : {})).catch(() => undefined);
+      } finally {
+        if (!c.signal.aborted) c.run.currentTicket = undefined;
+      }
+    });
+  }
+
+  /** Park the held ticket on its request so the lead can move on. */
+  requested(r: RunToken, ticketId: string): void {
+    const c = this.leadFor(r);
+    if (!c) return;
+    c.queue = c.queue.then(async () => {
+      if (getTicket(c.h.board, ticketId).state !== "in_progress") return;
+      const parked = await this.parkOnRequests(c.h, ticketId, c.log);
+      if (parked === "halted") c.halted = true;
+    }).catch((e: Error) => c.log({ kind: "error", t: (this.deps.now ?? now)(), ticket: ticketId, text: `parking failed: ${e.message}` }));
+  }
+
+  /** End this lead; the loop starts a fresh one with the note. */
+  handoff(r: RunToken, note: string): void {
+    const c = this.leadFor(r);
+    if (!c) return;
+    c.handoff = note;
+    const lead = c.leadAbort;
+    setTimeout(() => lead?.abort(), this.deps.handoffGraceMs ?? 120_000).unref();
+  }
+
+  claimRefusal(r: RunToken): string | undefined {
+    const c = this.leadFor(r);
+    if (!c) return "This run has ended; stop.";
+    if (c.handoff) return "You handed off; stop now and reply with one line.";
+    if (c.halted) return "The run halts after you finish; stop now and reply with what you found.";
+    if (c.isPause()) return "The user asked the run to pause: do not claim another ticket. Submit or park what you hold, then reply with one line and stop.";
+    if (c.run.ticketsDone >= c.h.session.caps.runTickets) return `This run's cap of ${c.h.session.caps.runTickets} tickets is reached; reply with one line and stop.`;
+    return undefined;
   }
 
   /** Every active run finishes its current ticket, then stops. */
@@ -340,6 +416,10 @@ export class RunManager {
       }
 
       let lastDenialCheck = clock();
+      if (proceed && h.session.mode === "lead") {
+        await this.leadLoop(h, run, ctl, log, saveRun, setSessionState);
+        proceed = false;
+      }
       // With caps.resumeWorker, the implementers of this run share one agent conversation.
       const convo: { id?: string } = {};
       while (proceed && !ctl.isStop()) {
@@ -424,10 +504,12 @@ export class RunManager {
       }
       if (ctl.isStop()) {
         run.state = "stopped";
-        // A stopped worker leaves its ticket in progress; put it back.
-        if (run.currentTicket) {
+        // A stopped worker leaves its ticket in progress; put it back. A lead
+        // may have claimed tickets the run never saw; every held one goes back.
+        const held = h.session.mode === "lead" ? h.board.tickets.filter((t) => t.state === "in_progress" || t.state === "review").map((t) => t.id) : run.currentTicket ? [run.currentTicket] : [];
+        for (const id of held) {
           await h.mutate((docs) => {
-            const t = getTicket(docs.board, run.currentTicket!);
+            const t = getTicket(docs.board, id);
             return t.state === "in_progress" || t.state === "review"
               ? { next: { board: transition(docs.board, t.id, "ready", { by: "harness", text: "Run stopped by the user; requeued" }) } }
               : {};
@@ -450,6 +532,140 @@ export class RunManager {
       await setSessionState(sessionState).catch(() => undefined);
     }
     return run;
+  }
+
+  /**
+   * Lead mode: keep one lead working the board until nothing it can start
+   * is left. The lead claims and submits tickets through the agent API; the
+   * hooks above judge and park them. When a lead ends, the next one
+   * continues its conversation, or starts fresh from its handoff note (or
+   * from its last words when it hit a cap). Two leads in a row that move
+   * nothing pause the run instead of spending more.
+   */
+  private async leadLoop(
+    h: SessionHandle,
+    run: Run,
+    ctl: { isPause: () => boolean; isStop: () => boolean; signal: AbortSignal },
+    log: (e: VerstasEvent) => Promise<void>,
+    saveRun: () => Promise<void>,
+    setSessionState: (state: Session["state"]) => Promise<unknown>,
+  ): Promise<void> {
+    const d = this.deps;
+    const clock = d.now ?? now;
+    const status = (text: string, ticket?: string) => log({ kind: "status", t: clock(), ticket, text });
+    const ctx: LeadContext = { runId: run.id, h, run, log, signal: ctl.signal, isPause: ctl.isPause, queue: Promise.resolve(), rateLimited: false, halted: false };
+    this.leads.set(h.id, ctx);
+    let convoId: string | undefined;
+    let handoffNote = (await this.readNote(h, "state.md", 16_000)) ?? undefined;
+    let idle = 0;
+    let lastDenialCheck = clock();
+    const fingerprint = () => JSON.stringify([h.board.tickets.map((t) => [t.id, t.state, t.attempts]), h.inbox.requests.length]);
+    try {
+      while (!ctl.isStop()) {
+        if (ctl.isPause()) {
+          run.state = "paused";
+          run.pauseReason = "user";
+          break;
+        }
+        const sizeMb = await workspaceSizeMb(h.paths).catch(() => 0);
+        if (sizeMb > h.session.limits.workspaceMb) {
+          run.state = "paused";
+          run.pauseReason = `workspace is ${sizeMb} MB, over the ${h.session.limits.workspaceMb} MB limit`;
+          break;
+        }
+        if (run.ticketsDone >= h.session.caps.runTickets) {
+          run.state = "finished";
+          await status(`run ticket cap of ${h.session.caps.runTickets} reached`);
+          break;
+        }
+        if (d.healSandbox) {
+          const healed = await d.healSandbox(h.id).catch((e: Error) => [`heal failed: ${e.message}`]);
+          for (const line of healed) await status(line);
+        }
+        const holds = h.board.tickets.find((t) => t.state === "in_progress");
+        if (!holds && !h.board.tickets.some((t) => canStart(h.board, t))) {
+          const open = h.inbox.requests.some((r) => r.state === "open");
+          run.state = hasOpenWork(h.board) || open ? "paused" : "finished";
+          const blockers = describeBlockers(h.board);
+          run.pauseReason = open ? "requests" : hasOpenWork(h.board) ? blockers || "waiting on dependencies" : undefined;
+          await status(open ? "nothing ready; waiting for your answers in the inbox" : run.state === "finished" ? "no ready tickets left" : `nothing can run: ${blockers}`);
+          break;
+        }
+
+        const before = fingerprint();
+        const agent = agentFor(h.session, "lead");
+        const resume = Boolean(convoId) && agent.driver === "claude";
+        const agentSession = agent.driver === "claude" ? (resume ? { id: convoId!, resume: true } : { id: randomUUID(), resume: false }) : undefined;
+        const freshPrompt = () => this.withNotes(h, leadPrompt(h.board, { holds, handoff: handoffNote }));
+        const promptText = resume ? leadContinuePrompt(h.board, holds) : await freshPrompt();
+        const leadAbort = new AbortController();
+        const onStop = () => leadAbort.abort();
+        ctl.signal.addEventListener("abort", onStop, { once: true });
+        ctx.leadAbort = leadAbort;
+        ctx.handoff = undefined;
+        run.currentTicket = holds?.id;
+        await status(resume ? "lead: continuing its conversation" : handoffNote ? "lead: a fresh lead starts from the handoff note" : "lead: started");
+        const lead = await this.runJob(h, run, { role: "lead", holds: holds?.id, agentSession, promptText, freshPrompt }, log, leadAbort.signal);
+        ctl.signal.removeEventListener("abort", onStop);
+        await ctx.queue;
+        addCost(run, lead.costUsd);
+        await saveRun();
+        if (ctl.isStop()) break;
+        if (ctx.halted) {
+          run.state = "halted";
+          break;
+        }
+        if (lead.rateLimited || ctx.rateLimited) {
+          ctx.rateLimited = false;
+          run.state = "paused";
+          run.pauseReason = "rate_limit";
+          const sleep = d.rateLimitSleepMs ?? 60 * 60_000;
+          run.resumeAt = new Date(Date.now() + sleep).toISOString();
+          await log({ kind: "run", t: clock(), state: "paused", reason: `rate limited; sleeping until ${run.resumeAt}` });
+          await saveRun();
+          await setSessionState("paused");
+          await waitOrAbort(sleep, ctl.signal);
+          if (ctl.isStop()) break;
+          run.state = "running";
+          run.pauseReason = undefined;
+          run.resumeAt = undefined;
+          await setSessionState("running");
+          if (lead.agentSession && lead.turns > 0) convoId = lead.agentSession;
+          continue;
+        }
+
+        // Set by the handoff hook while the lead ran.
+        const handedOff = ctx.handoff as string | undefined;
+        if (handedOff) {
+          handoffNote = handedOff;
+          convoId = undefined;
+          await fs.writeFile(path.join(h.paths.notes, "state.md"), `# Handoff note\n\nWritten by the lead at ${clock()}, for the next lead.\n\n${handoffNote.trim()}\n`);
+          await status(`lead handed off: ${handoffNote.trim().split("\n")[0]!.slice(0, 160)}`);
+        } else if (lead.stopReason === "time_cap" || lead.stopReason === "turn_cap" || leadAbort.signal.aborted) {
+          handoffNote = `The previous lead was stopped (${lead.stopReason}) before it handed off. Its last message:\n${lead.text.trim().slice(0, 3000) || "(none)"}`;
+          convoId = undefined;
+          await status(`lead stopped at ${lead.stopReason}; a fresh lead takes over`);
+        } else {
+          convoId = lead.agentSession && lead.turns > 0 ? lead.agentSession : undefined;
+        }
+
+        idle = fingerprint() === before ? idle + 1 : 0;
+        if (idle >= 2) {
+          run.state = "paused";
+          run.pauseReason = "the lead ended twice without moving a ticket";
+          await status(`${run.pauseReason}; its last message: ${lead.text.trim().slice(0, 300)}`);
+          break;
+        }
+        if (d.proxyDenials) {
+          const denials = await d.proxyDenials(h.id, lastDenialCheck).catch(() => []);
+          lastDenialCheck = clock();
+          for (const den of denials) await log({ kind: "denied_network", t: clock(), host: den.host, port: den.port });
+        }
+      }
+    } finally {
+      await ctx.queue;
+      this.leads.delete(h.id);
+    }
   }
 
   /** One ticket, start to finish: the implementer, then the judge. Returns how it ended for the loop's bookkeeping. */
@@ -617,7 +833,16 @@ export class RunManager {
   private async runJob(
     h: SessionHandle,
     run: Run,
-    job: { role: Job["role"]; ticket?: string; promptText: string; agentSession?: Job["agentSession"]; /** The prompt for a fresh conversation when a resume fails. */ freshPrompt?: () => Promise<string> },
+    job: {
+      role: Job["role"];
+      ticket?: string;
+      promptText: string;
+      agentSession?: Job["agentSession"];
+      /** The prompt for a fresh conversation when a resume fails. */
+      freshPrompt?: () => Promise<string>;
+      /** The ticket a lead already holds; its token starts with it. */
+      holds?: string;
+    },
     log: (e: VerstasEvent) => Promise<void>,
     signal: AbortSignal,
   ): Promise<WorkerDone> {
@@ -635,7 +860,10 @@ export class RunManager {
       driver: agent.driver,
       promptFile: `/workspace/${rel}/prompt.md`,
       systemPromptFile: `/workspace/${rel}/system.md`,
-      caps: { minutes: h.session.caps.workerMinutes, turns: h.session.caps.workerTurns, budgetUsd: h.session.caps.budgetUsd },
+      caps:
+        job.role === "lead"
+          ? { minutes: h.session.caps.leadMinutes, turns: h.session.caps.leadTurns, budgetUsd: h.session.caps.budgetUsd }
+          : { minutes: h.session.caps.workerMinutes, turns: h.session.caps.workerTurns, budgetUsd: h.session.caps.budgetUsd },
       mcpConfigFile: `/workspace/${WORKSPACE_FILES}/mcp.json`,
       model: agent.model || undefined,
       budgetFile: `/workspace/${rel}/budget.json`,
@@ -645,7 +873,7 @@ export class RunManager {
     const jobFile = `/workspace/${rel}/job.json`;
     await fs.writeFile(path.join(dir, "job.json"), JSON.stringify(spec, null, 2));
     const rawLog = DEBUG ? path.join(h.paths.runs, String(run.id), `worker-${name}-${job.ticket ?? "none"}.raw.jsonl`) : undefined;
-    const token = this.deps.tokens.issue({ sessionId: h.id, runId: run.id, role: tokenRole(job.role), currentTicket: job.ticket });
+    const token = this.deps.tokens.issue({ sessionId: h.id, runId: run.id, role: tokenRole(job.role), currentTicket: job.holds ?? job.ticket });
     try {
       let done = await this.deps.worker(h.id).run(spec, (e) => void log(e), signal, { rawLog, runToken: token, jobFile });
       // A conversation that cannot be resumed (pruned, written by another CLI

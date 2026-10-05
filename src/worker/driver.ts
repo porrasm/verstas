@@ -13,7 +13,7 @@ import path from "node:path";
 import type { Translated } from "./translate.js";
 
 export type Job = {
-  role: "implementer" | "reviewer" | "planner" | "setup" | "prompt";
+  role: "implementer" | "reviewer" | "planner" | "setup" | "prompt" | "lead";
   ticket?: string;
   /** Which agent runs this job; absent means Claude Code. */
   driver?: "claude" | "codex" | "cursor";

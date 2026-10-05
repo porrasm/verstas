@@ -9,6 +9,7 @@ import { z } from "zod";
 import {
   agentFor,
   capsSchema,
+  sessionModeSchema,
   DEFAULT_ALLOWLIST,
   DRIVER_NAMES,
   driverNameSchema,
@@ -1251,6 +1252,8 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
           model: z.string().max(100).nullable().optional(),
           /** Replaces the agents block. Applies to the next worker that starts. */
           agents: sessionAgentsSchema.optional(),
+          /** How tickets are worked; applies to the next run. */
+          mode: sessionModeSchema.optional(),
         })
         .parse(req.body);
       const h = await d.hub.get(param(req, "id"));
@@ -1267,6 +1270,7 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
           limits: limitsSchema.parse({ ...s.limits, ...body.limits }),
           model: body.model === undefined ? s.model : body.model?.trim() || undefined,
           agents,
+          mode: body.mode ?? s.mode,
         };
         // A newly chosen agent's backend joins the allowlist; the proxy picks it up before the next worker.
         const packs = withAgentPacks(next.packs, next);

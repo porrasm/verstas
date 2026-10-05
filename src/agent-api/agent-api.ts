@@ -6,6 +6,7 @@ import {
   ideaSchema,
   messageSchema,
   now,
+  requestOutcome,
   requestSchema,
   ticketIdSchema,
   ticketImportSchema,
@@ -35,6 +36,10 @@ export type AgentRunHooks = {
   submitted(run: RunToken, ticketId: string): void;
   /** The lead asked to end its worker and hand over to a fresh one with this note. */
   handoff(run: RunToken, note: string): void;
+  /** Why the lead may not claim now (the run is pausing, the ticket cap is reached), or undefined. */
+  claimRefusal?(run: RunToken): string | undefined;
+  /** The lead filed a request or a halt on the ticket it holds; the run parks the ticket so the lead can move on. */
+  requested?(run: RunToken, ticketId: string): void;
 };
 
 /** States in which a ticket still belongs to the lead that claimed it. */
@@ -226,8 +231,12 @@ export const createAgentApi = (hub: SessionHub, tokens: RunTokens, hooks?: Agent
         ok: true,
         id: created.id,
         actions: created.actions.map((a) => a.id),
-        next: "Stop working on this ticket now and reply with a short status. The ticket resumes when the user has decided every action; the next worker gets the outcomes.",
+        next:
+          req.run.role === "lead"
+            ? "The ticket parks until the user has decided every action; claiming it again later gives you the outcomes. Leave it and claim another ticket."
+            : "Stop working on this ticket now and reply with a short status. The ticket resumes when the user has decided every action; the next worker gets the outcomes.",
       });
+      if (req.run.role === "lead" && req.run.currentTicket) hooks?.requested?.(req.run, req.run.currentTicket);
     }),
   );
 
@@ -251,6 +260,7 @@ export const createAgentApi = (hub: SessionHub, tokens: RunTokens, hooks?: Agent
         return { next: { inbox: { ...d.inbox, requests: [...d.inbox.requests, request] }, board }, result: request };
       });
       res.status(201).json({ ok: true, id: created.id, next: "The run pauses after you finish. Stop now and reply with what you found." });
+      if (req.run.role === "lead" && req.run.currentTicket) hooks?.requested?.(req.run, req.run.currentTicket);
     }),
   );
 
@@ -302,6 +312,11 @@ export const createAgentApi = (hub: SessionHub, tokens: RunTokens, hooks?: Agent
       if (!leadOnly(req, res)) return;
       const id = ticketIdSchema.parse(req.params.id);
       const token = (req.headers.authorization ?? "").slice(7);
+      const refusal = hooks!.claimRefusal?.(req.run);
+      if (refusal) {
+        res.status(409).json({ error: refusal });
+        return;
+      }
       const h = await hub.get(req.run.sessionId);
       await h.mutate((d) => {
         const held = req.run.currentTicket ? d.board.tickets.find((t) => t.id === req.run.currentTicket && HELD.has(t.state)) : undefined;
@@ -315,7 +330,9 @@ export const createAgentApi = (hub: SessionHub, tokens: RunTokens, hooks?: Agent
         return { next: { board: transition(d.board, id, "in_progress", { by: "agent", text: `Claimed by the lead (judged attempts so far: ${t.attempts})` }) } };
       });
       tokens.update(token, { currentTicket: id });
-      res.json({ ok: true, id, state: "in_progress" });
+      // A ticket that waited on the user comes back with the outcome.
+      const answered = h.inbox.requests.filter((x) => x.ticketId === id && x.state !== "open").at(-1);
+      res.json({ ok: true, id, state: "in_progress", ...(answered ? { answer: requestOutcome(answered) } : {}) });
     }),
   );
 

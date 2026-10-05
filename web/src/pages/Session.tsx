@@ -255,7 +255,7 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
   const initNeeds = !initialized && !active && session.readiness?.verdict === "needs" && !session.readiness.confirmedAt;
   const saveSettings = async (patch: SettingsPatch) => {
     if (patch.allowlist || patch.packs) await api("PUT", `${base}/allowlist`, { allowlist: patch.allowlist, packs: patch.packs });
-    if (patch.caps || patch.limits) await api("PUT", `${base}/caps`, { caps: patch.caps, limits: patch.limits });
+    if (patch.caps || patch.limits || patch.mode) await api("PUT", `${base}/caps`, { caps: patch.caps, limits: patch.limits, mode: patch.mode });
     await refreshRun();
   };
   const bodyProps: BodyProps = {
@@ -1656,13 +1656,15 @@ const requestSummary = (r: AgentRequest): string => r.summary.split("\n")[0]!.sl
 
 // --- settings --------------------------------------------------------------
 
-type SettingsPatch = { allowlist?: string[]; packs?: string[]; caps?: Partial<Session["caps"]>; limits?: Partial<Session["limits"]> };
+type SettingsPatch = { allowlist?: string[]; packs?: string[]; caps?: Partial<Session["caps"]>; limits?: Partial<Session["limits"]>; mode?: Session["mode"] };
 const CAP_HELP: Record<string, string> = {
   workerMinutes: "Wall-clock cap for one worker",
   workerTurns: "Model turns per worker",
   budgetUsd: "Spend cap per worker",
   runTickets: "Tickets per run before it pauses",
   ticketAttempts: "Tries before a ticket is blocked",
+  leadMinutes: "Wall-clock life of one lead; then a fresh one takes over",
+  leadTurns: "Model turns per lead; then a fresh one takes over",
 };
 
 /**
@@ -1681,6 +1683,9 @@ const SessionSettings = ({ session, onSave, part = "all" }: { session: Session; 
     ticketAttempts: String(session.caps.ticketAttempts),
     reviewer: session.caps.reviewer,
     resumeWorker: session.caps.resumeWorker ?? false,
+    mode: session.mode ?? "loop",
+    leadMinutes: String(session.caps.leadMinutes ?? 180),
+    leadTurns: String(session.caps.leadTurns ?? 600),
     memory: session.limits.memory,
     cpus: String(session.limits.cpus),
   });
@@ -1695,7 +1700,7 @@ const SessionSettings = ({ session, onSave, part = "all" }: { session: Session; 
     setF(fromSession());
     setState("clean");
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [session.allowlist, session.packs, session.caps, session.limits]);
+  }, [session.allowlist, session.packs, session.caps, session.limits, session.mode]);
   const set = <K extends keyof ReturnType<typeof fromSession>>(k: K, v: ReturnType<typeof fromSession>[K]) => {
     setF({ ...f, [k]: v });
     setState("dirty");
@@ -1707,8 +1712,9 @@ const SessionSettings = ({ session, onSave, part = "all" }: { session: Session; 
         ...(part !== "caps" ? { allowlist: f.allow.split(/\n/).map((s) => s.trim()).filter(Boolean), packs: f.packs } : {}),
         ...(part !== "network"
           ? {
-              caps: { workerMinutes: Number(f.workerMinutes), workerTurns: Number(f.workerTurns), budgetUsd: Number(f.budgetUsd), runTickets: Number(f.runTickets), ticketAttempts: Number(f.ticketAttempts), reviewer: f.reviewer, resumeWorker: f.resumeWorker },
+              caps: { workerMinutes: Number(f.workerMinutes), workerTurns: Number(f.workerTurns), budgetUsd: Number(f.budgetUsd), runTickets: Number(f.runTickets), ticketAttempts: Number(f.ticketAttempts), reviewer: f.reviewer, resumeWorker: f.resumeWorker, leadMinutes: Number(f.leadMinutes), leadTurns: Number(f.leadTurns) },
               limits: { memory: f.memory, cpus: Number(f.cpus) },
+              mode: f.mode,
             }
           : {}),
       });
@@ -1741,7 +1747,25 @@ const SessionSettings = ({ session, onSave, part = "all" }: { session: Session; 
         </label>
       )}
       {part !== "network" && (
+        <label>
+          How tickets are worked
+          <span className="help">{f.mode === "lead" ? "One lead agent works the board: it picks the order, claims and submits tickets, and hands over to a fresh lead when its context gets noisy. Every ticket is still judged and committed by Verstas." : "Verstas picks each ready ticket and starts a fresh implementer for it."} Applies to the next run.</span>
+          <select value={f.mode} onChange={(e) => set("mode", e.target.value as "loop" | "lead")}>
+            <option value="loop">One worker per ticket</option>
+            <option value="lead">A lead works the board</option>
+          </select>
+        </label>
+      )}
+      {part !== "network" && (
         <div className="two">
+          {f.mode === "lead" &&
+            (["leadMinutes", "leadTurns"] as const).map((k) => (
+              <label key={k}>
+                {{ leadMinutes: "Lead minutes", leadTurns: "Lead turns" }[k]}
+                <span className="help">{CAP_HELP[k]}</span>
+                <input type="number" min={1} value={f[k]} onChange={(e) => set(k, e.target.value)} />
+              </label>
+            ))}
           {(["workerMinutes", "workerTurns", "budgetUsd", "runTickets", "ticketAttempts"] as const).map((k) => (
             <label key={k}>
               {{ workerMinutes: "Worker minutes", workerTurns: "Worker turns", budgetUsd: "Budget USD per worker", runTickets: "Tickets per run", ticketAttempts: "Attempts per ticket" }[k]}
@@ -1749,8 +1773,10 @@ const SessionSettings = ({ session, onSave, part = "all" }: { session: Session; 
               <input type="number" min={1} value={f[k]} onChange={(e) => set(k, e.target.value)} />
             </label>
           ))}
-          <label className="chk" style={{ alignSelf: "end" }}><input type="checkbox" checked={f.reviewer} onChange={(e) => set("reviewer", e.target.checked)} /> Reviewer pass after each ticket</label>
-          <label className="chk" style={{ alignSelf: "end" }} title="Claude Code only. The next ticket's implementer continues the previous one's conversation instead of re-reading the repositories. The reviewer always starts fresh."><input type="checkbox" checked={f.resumeWorker} onChange={(e) => set("resumeWorker", e.target.checked)} /> Implementers continue one conversation</label>
+          <div style={{ alignSelf: "end", display: "grid", gap: 6 }}>
+          <label className="chk"><input type="checkbox" checked={f.reviewer} onChange={(e) => set("reviewer", e.target.checked)} /> Reviewer pass after each ticket</label>
+          {f.mode !== "lead" && <label className="chk" title="Claude Code only. The next ticket's implementer continues the previous one's conversation instead of re-reading the repositories. The reviewer always starts fresh."><input type="checkbox" checked={f.resumeWorker} onChange={(e) => set("resumeWorker", e.target.checked)} /> Implementers continue one conversation</label>}
+          </div>
           <label>Memory <span className="help">Container limit, e.g. 4g</span><input value={f.memory} onChange={(e) => set("memory", e.target.value)} /></label>
           <label>CPUs<input type="number" step="0.5" min={0.5} value={f.cpus} onChange={(e) => set("cpus", e.target.value)} /></label>
         </div>

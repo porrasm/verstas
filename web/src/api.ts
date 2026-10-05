@@ -52,7 +52,9 @@ export type Session = {
   attachments: { name: string; dir: string; bytes: number; skipped: string[] }[];
   allowlist: string[];
   packs: string[];
-  caps: { workerMinutes: number; workerTurns: number; runTickets: number; budgetUsd: number; ticketAttempts: number; reviewer: boolean; resumeWorker?: boolean };
+  caps: { workerMinutes: number; workerTurns: number; runTickets: number; budgetUsd: number; ticketAttempts: number; reviewer: boolean; resumeWorker?: boolean; leadMinutes?: number; leadTurns?: number };
+  /** loop: a fresh implementer per ticket. lead: one long-lived agent works the board. */
+  mode?: "loop" | "lead";
   limits: { memory: string; cpus: number; pids: number; workspaceMb: number };
   rootScripts: { script: string; cwd?: string; at: string; requestId?: string }[];
   setupScripts: { name: string; description: string; hosts: string[]; note: string; script: string; runAs: "root" | "agent" }[];
@@ -86,7 +88,7 @@ export type SessionDetail = { session: Session; board: Board; inbox: Inbox; run?
 export type DriverName = "claude" | "codex" | "cursor";
 export type AgentSpec = { driver: DriverName; model?: string };
 export type SessionAgents = { worker?: AgentSpec; reviewer?: AgentSpec };
-export type WorkerRole = "implementer" | "reviewer" | "planner" | "setup" | "prompt";
+export type WorkerRole = "implementer" | "reviewer" | "planner" | "setup" | "prompt" | "lead";
 /** Mirrors src/core/types.ts agentFor: the reviewer defaults to the worker; sessions from before `agents` ran Claude with `model`. */
 export const agentFor = (s: { model?: string; agents?: SessionAgents }, role: WorkerRole): AgentSpec => {
   const worker: AgentSpec = s.agents?.worker ?? { driver: "claude", model: s.model || undefined };

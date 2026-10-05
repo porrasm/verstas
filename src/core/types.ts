@@ -278,6 +278,9 @@ export const capsSchema = z.object({
    * reviewer always starts fresh.
    */
   resumeWorker: z.boolean().default(false),
+  /** A lead lives much longer than a worker; at a cap it hands over to a fresh lead instead of failing a ticket. */
+  leadMinutes: z.number().int().min(10).max(1440).default(180),
+  leadTurns: z.number().int().min(20).max(5000).default(600),
 });
 export type Caps = z.infer<typeof capsSchema>;
 
@@ -342,6 +345,15 @@ export const isInitialized = (s: { initializedAt?: string | null }): boolean => 
 
 /** How the environment is set up at initialization: a setup worker, or nothing beyond the container and the recipes. */
 export const setupModeSchema = z.enum(["agentic", "skip"]);
+
+/**
+ * How the tickets are worked. loop: the harness picks each ready ticket and
+ * starts a fresh implementer for it. lead: one long-lived agent works the
+ * board, claiming and submitting tickets itself; the harness keeps it alive
+ * and still judges every ticket.
+ */
+export const sessionModeSchema = z.enum(["loop", "lead"]);
+export type SessionMode = z.infer<typeof sessionModeSchema>;
 export type SetupMode = z.infer<typeof setupModeSchema>;
 
 export const sessionStateSchema = z.enum([
@@ -380,7 +392,7 @@ export const sessionAgentsSchema = z.object({
 });
 export type SessionAgents = z.infer<typeof sessionAgentsSchema>;
 
-export type WorkerRole = "implementer" | "reviewer" | "planner" | "setup" | "prompt";
+export type WorkerRole = "implementer" | "reviewer" | "planner" | "setup" | "prompt" | "lead";
 
 /**
  * The agent for a role. Older sessions carry only `model`; that is the
@@ -434,6 +446,7 @@ export const sessionSchema = z.object({
    */
   requirements: z.string().max(20_000).default(""),
   setupMode: setupModeSchema.default("agentic"),
+  mode: sessionModeSchema.default("loop"),
   /** Prompts you ran from the session page (one worker, no ticket) and planning requests, with their replies; newest last, at most 20. */
   prompts: z
     .array(z.object({ at: z.string(), runId: z.number().int(), kind: z.enum(["prompt", "plan"]).default("prompt"), text: z.string().max(20_000), reply: z.string().max(8000).default(""), stopReason: z.string().default("") }))
@@ -490,7 +503,7 @@ export type Run = z.infer<typeof runSchema>;
  * one vendor's format.
  */
 export const eventSchema = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("text"), t: z.string(), ticket: ticketIdSchema.optional(), role: z.enum(["implementer", "reviewer", "planner", "setup", "prompt"]).optional(), text: z.string() }),
+  z.object({ kind: z.literal("text"), t: z.string(), ticket: ticketIdSchema.optional(), role: z.enum(["implementer", "reviewer", "planner", "setup", "prompt", "lead"]).optional(), text: z.string() }),
   z.object({ kind: z.literal("tool_use"), t: z.string(), ticket: ticketIdSchema.optional(), tool: z.string(), summary: z.string() }),
   z.object({ kind: z.literal("tool_result"), t: z.string(), ticket: ticketIdSchema.optional(), tool: z.string(), ok: z.boolean(), summary: z.string() }),
   z.object({ kind: z.literal("status"), t: z.string(), ticket: ticketIdSchema.optional(), text: z.string() }),
@@ -506,7 +519,7 @@ export const eventSchema = z.discriminatedUnion("kind", [
     kind: z.literal("worker_done"),
     t: z.string(),
     ticket: ticketIdSchema.optional(),
-    role: z.enum(["implementer", "reviewer", "planner", "setup", "prompt"]),
+    role: z.enum(["implementer", "reviewer", "planner", "setup", "prompt", "lead"]),
     ok: z.boolean(),
     stopReason: z.string(),
     rateLimited: z.boolean(),
