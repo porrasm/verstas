@@ -126,3 +126,13 @@ test("secrets reach an exec by name only, never by value in argv", () => {
   const args = execArgs("nuppi-mvp", ["node", "/opt/verstas/worker.js"], { passEnv: ["CLAUDE_CODE_OAUTH_TOKEN", "VERSTAS_RUN_TOKEN"] });
   expect(args).toEqual(["exec", "-w", "/workspace", "-e", "CLAUDE_CODE_OAUTH_TOKEN", "-e", "VERSTAS_RUN_TOKEN", "verstas-nuppi-mvp", "node", "/opt/verstas/worker.js"]);
 });
+
+test("each worker runs from its own job file, and stopping one matches only that file", async () => {
+  const { workerCommand, workerPattern, WORKER_PATTERN } = await import("../../src/harness/docker-worker.js");
+  const a = "/workspace/.verstas/jobs/3-7-reviewer/job.json";
+  expect(workerCommand(a)).toEqual(["node", "/opt/verstas/worker.js", "--job", a]);
+  expect(workerCommand(a).join(" ")).toContain(workerPattern(a));
+  expect(workerCommand("/workspace/.verstas/jobs/3-6-implementer/job.json").join(" ")).not.toContain(workerPattern(a));
+  // Recovery after a crash still stops them all.
+  expect(workerCommand(a).join(" ")).toContain(WORKER_PATTERN);
+});

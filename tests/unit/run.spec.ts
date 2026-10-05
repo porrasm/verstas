@@ -78,6 +78,9 @@ const fakeShell = (): Shell & { commits: string[]; calls: string[][] } => {
   };
 };
 
+/** A path inside the container, on the host. */
+const onHost = (s: { paths: { workspace: string } }, p: string): string => p.replace(/^\/workspace/, s.paths.workspace);
+
 type Script = (job: Job, hub: SessionHub, sessionId: string) => Promise<Partial<WorkerDone> & { text?: string }>;
 
 const fakeWorker = (hub: SessionHub, sessionId: string, script: Script): WorkerRunner & { jobs: Job[] } => {
@@ -147,7 +150,9 @@ test("a ticket that passes gates and review is committed and done; dependents fo
     expect(h.session.state).toBe("finished");
     // Files the worker reads exist.
     expect(await fs.readFile(path.join(s.paths.workspace, "VERSTAS.md"), "utf8")).toContain("/workspace/app");
-    expect(JSON.parse(await fs.readFile(path.join(s.paths.workspace, ".verstas", "job.json"), "utf8"))).toMatchObject({ role: "reviewer", ticket: "T-2" });
+    expect(JSON.parse(await fs.readFile(onHost(s, worker.jobs.at(-1)!.promptFile.replace("prompt.md", "job.json")), "utf8"))).toMatchObject({ role: "reviewer", ticket: "T-2" });
+    // Each worker had its own directory.
+    expect(new Set(worker.jobs.map((j) => j.promptFile)).size).toBe(4);
     const log = await fs.readFile(path.join(s.paths.runs, "1", "events.jsonl"), "utf8");
     expect(log.split("\n").filter(Boolean).length).toBeGreaterThan(8);
     expect(await fs.readFile(path.join(s.paths.runs, "1", "tickets", "T-1.md"), "utf8")).toContain("did the thing");
@@ -168,7 +173,7 @@ test("the reviewer can be a different agent: each job names its driver and model
     const run = await (await manager(s, shell, worker).start(s.id)).done;
     expect(run.state).toBe("finished");
     expect(worker.jobs.map((j) => `${j.role}:${j.driver}:${j.model}`)).toEqual(["implementer:claude:sonnet", "reviewer:codex:gpt-5.1-codex", "implementer:claude:sonnet", "reviewer:codex:gpt-5.1-codex"]);
-    expect(JSON.parse(await fs.readFile(path.join(s.paths.workspace, ".verstas", "job.json"), "utf8"))).toMatchObject({ role: "reviewer", driver: "codex", model: "gpt-5.1-codex" });
+    expect(JSON.parse(await fs.readFile(onHost(s, worker.jobs.at(-1)!.promptFile.replace("prompt.md", "job.json")), "utf8"))).toMatchObject({ role: "reviewer", driver: "codex", model: "gpt-5.1-codex" });
     expect(await fs.readFile(path.join(s.paths.workspace, "AGENTS.md"), "utf8")).toContain("/workspace/VERSTAS.md");
     expect(await fs.stat(path.join(s.paths.workspace, ".cursor", "mcp.json")).catch(() => null)).toBeNull();
   } finally {
@@ -449,7 +454,7 @@ test("initialization: nothing runs before it; needs parks on its request and sta
     expect(h.session.state).toBe("finished");
     expect(prompts[1]).toContain("allowed cdn.playwright.dev");
     expect(worker.jobs.map((j) => j.role)).toEqual(["setup", "setup", "implementer", "implementer"]);
-    const implPrompt = await fs.readFile(path.join(s.paths.workspace, ".verstas", "prompt.md"), "utf8");
+    const implPrompt = await fs.readFile(onHost(s, worker.jobs.at(-1)!.promptFile), "utf8");
     expect(implPrompt).toContain("svc pg, port 5432");
     expect(await fs.readFile(path.join(s.paths.workspace, "VERSTAS.md"), "utf8")).toContain("the e2e suite runs");
 
@@ -740,7 +745,7 @@ test("with resumeWorker, implementers of a run continue one conversation; the re
     const prompts: string[] = [];
     const worker = fakeWorker(s.hub, s.id, async (job, hub, id) => {
       if (job.role === "implementer") {
-        prompts.push(await fs.readFile(path.join(s.paths.workspace, ".verstas", "prompt.md"), "utf8"));
+        prompts.push(await fs.readFile(onHost(s, job.promptFile), "utf8"));
         if (job.agentSession?.resume && failResume) {
           failResume = false;
           return { ok: false, turns: 0, stopReason: "error_during_execution" };
@@ -756,7 +761,7 @@ test("with resumeWorker, implementers of a run continue one conversation; the re
     expect(impl[0]!.agentSession).toMatchObject({ resume: false });
     expect(impl[1]!.agentSession).toEqual({ id: impl[0]!.agentSession!.id, resume: true });
     expect(worker.jobs.filter((j) => j.role === "reviewer").every((j) => !j.agentSession)).toBe(true);
-    expect(impl.every((j) => j.budgetFile === "/workspace/.verstas/budget.json")).toBe(true);
+    expect(impl.every((j) => j.budgetFile === j.promptFile.replace("prompt.md", "budget.json"))).toBe(true);
     expect(prompts[1]).toContain("continuing in the same conversation");
     expect(prompts[1]).not.toContain("Recent reports from other workers");
 
@@ -786,6 +791,34 @@ test("without resumeWorker every implementer is a throwaway conversation", async
     });
     await (await manager(s, fakeShell(), worker).start(s.id)).done;
     expect(worker.jobs.every((j) => !j.agentSession)).toBe(true);
+  } finally {
+    await fs.rm(s.root, { recursive: true, force: true });
+  }
+});
+
+test("every worker gets its own run token, scoped to its role and ticket and revoked when it ends", async () => {
+  const s = await makeSession();
+  try {
+    const tokens = new RunTokens();
+    const seen: { role: string; token: string; info: unknown }[] = [];
+    const worker: WorkerRunner = {
+      async run(job, _onEvent, _signal, opts) {
+        seen.push({ role: job.role, token: opts!.runToken!, info: tokens.lookup(opts!.runToken!) });
+        if (job.role === "implementer") await fileReport(s.hub, s.id, job.ticket!, "ok");
+        return { kind: "worker_done", t: now(), ticket: job.ticket, role: job.role, ok: true, stopReason: "success", rateLimited: false, costUsd: 0, turns: 1, seconds: 1, text: job.role === "reviewer" ? "VERDICT: ok" : "", stderr: "" };
+      },
+    };
+    const mgr = new RunManager({ hub: s.hub, tokens, shell: () => fakeShell(), worker: () => worker, ensureSandbox: async () => undefined, agentApiUrl: "http://x/agent" });
+    await (await mgr.start(s.id)).done;
+    expect(seen.map((x) => x.role)).toEqual(["implementer", "reviewer", "implementer", "reviewer"]);
+    expect(new Set(seen.map((x) => x.token)).size).toBe(4);
+    expect(seen[0]!.info).toMatchObject({ role: "worker", currentTicket: "T-1" });
+    expect(seen[3]!.info).toMatchObject({ role: "worker", currentTicket: "T-2" });
+    for (const x of seen) expect(tokens.lookup(x.token)).toBeUndefined();
+
+    await (await mgr.start(s.id, { plan: "add caching" })).done;
+    expect(seen.at(-1)!.info).toMatchObject({ role: "planner" });
+    expect((seen.at(-1)!.info as { currentTicket?: string }).currentTicket).toBeUndefined();
   } finally {
     await fs.rm(s.root, { recursive: true, force: true });
   }

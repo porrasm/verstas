@@ -875,7 +875,7 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
         res.status(409).json({ error: "Initialize the session first; the recipes run then" });
         return;
       }
-      await ensureSessionSandbox(d.runConfig, h.session, path.join(h.paths.dir, "sandbox.env"), undefined).catch(() => undefined);
+      await ensureSessionSandbox(d.runConfig, h.session, path.join(h.paths.dir, "sandbox.env"), false).catch(() => undefined);
       try {
         const results = await runSetup(d.runConfig, h.id);
         res.json({ ok: true, results });
@@ -997,7 +997,7 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
   const bundleRepos = async (h: SessionHandle, names?: string[]) => {
     if (d.runs.status(h.id)) throw Object.assign(new Error("Pause or stop the run first"), { status: 409 });
     if (!isInitialized(h.session)) throw Object.assign(new Error("Nothing to export: the session is not initialized"), { status: 409 });
-    await ensureSessionSandbox(d.runConfig, h.session, path.join(h.paths.dir, "sandbox.env"), undefined);
+    await ensureSessionSandbox(d.runConfig, h.session, path.join(h.paths.dir, "sandbox.env"), false);
     const sh = dockerShell(d.sandbox, h.id);
     await sh.exec(["mkdir", "-p", "/workspace/.verstas/export"]);
     const files: { repo: string; file: string; branch: string; bytes: number }[] = [];

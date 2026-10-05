@@ -29,7 +29,7 @@ export interface Shell {
 
 /** Runs one worker job inside the container; streams events; resolves with the final line. */
 export interface WorkerRunner {
-  run(job: Job, onEvent: (e: VerstasEvent) => void, signal: AbortSignal, opts?: { rawLog?: string; runToken?: string }): Promise<WorkerDone>;
+  run(job: Job, onEvent: (e: VerstasEvent) => void, signal: AbortSignal, opts?: { rawLog?: string; runToken?: string; /** The job file inside the container; it also tells this worker's processes from others'. */ jobFile?: string }): Promise<WorkerDone>;
 }
 
 export const DEBUG = Boolean(process.env.VERSTAS_DEBUG);
@@ -41,7 +41,7 @@ export type RunDeps = {
   shell: (sessionId: string) => Shell;
   worker: (sessionId: string) => WorkerRunner;
   /** Called once before the loop; brings the sandbox up with the env file at the given path. */
-  ensureSandbox: (session: Session, envFile: string, token: string) => Promise<void>;
+  ensureSandbox: (session: Session, envFile: string, needsCredentials: boolean) => Promise<void>;
   /** Commits the box to an image once initialization succeeded, so a recreated container starts set up. Best effort. */
   snapshotSandbox?: (session: Session) => Promise<{ image: string; baseImageId: string }>;
   /** Called before every ticket: starts a stopped proxy or container; never recreates. */
@@ -78,8 +78,13 @@ export type RunControl = {
 
 const WORKSPACE_FILES = ".verstas";
 
+/** What a worker of this role may do through the agent API (src/agent-api/agent-api.ts). */
+const tokenRole = (role: Job["role"]): "worker" | "planner" => (role === "planner" ? "planner" : "worker");
+
 export class RunManager {
   private active = new Map<string, RunControl>();
+  /** Numbers each worker's job directory. */
+  private jobSeq = 0;
   constructor(private readonly deps: RunDeps) {}
 
   status(sessionId: string): Run | undefined {
@@ -217,18 +222,17 @@ export class RunManager {
     const setSessionState = (state: Session["state"]) => h.mutate((docs) => ({ next: { session: { ...docs.session, state } } }));
     const status = (text: string, ticket?: string) => log({ kind: "status", t: clock(), ticket, text });
 
-    const token = d.tokens.issue({ sessionId: h.id, runId: run.id, role: "worker" });
     try {
       await log({ kind: "run", t: clock(), state: "running" });
       await setSessionState("running");
       await saveRun();
 
       // One env file per session: the container is created once and keeps its
-      // environment, so only session-stable values go in it. The run token is
-      // passed to each worker on exec instead (see docker-worker.ts).
+      // environment, so only session-stable values go in it. Each worker's
+      // run token is passed on its exec instead (see docker-worker.ts).
       const envFile = path.join(h.paths.dir, "sandbox.env");
-      await d.ensureSandbox(h.session, envFile, token);
-      await this.writeWorkspaceFiles(h, token);
+      await d.ensureSandbox(h.session, envFile, true);
+      await this.writeWorkspaceFiles(h);
 
       let proceed = true;
 
@@ -247,7 +251,7 @@ export class RunManager {
           await setSessionState("checking");
           if (!opts.init) await status("setup: checking the environment again");
           const answers = h.inbox.requests.filter((r) => r.state !== "open" && !r.ticketId).map(requestOutcome);
-          const done = await this.runJob(h, run, { role: "setup", promptText: setupPrompt(h.session, h.board, answers, "setup") }, log, ctl.signal, token);
+          const done = await this.runJob(h, run, { role: "setup", promptText: setupPrompt(h.session, h.board, answers, "setup") }, log, ctl.signal);
           addCost(run, done.costUsd);
           await saveRun();
           if (ctl.signal.aborted) {
@@ -299,7 +303,7 @@ export class RunManager {
         proceed = false;
         const text = opts.prompt;
         await status(`prompt: ${text.trim().split("\n")[0]!.slice(0, 120)}`);
-        const done = await this.runJob(h, run, { role: "prompt", promptText: await this.withNotes(h, userPrompt(text)) }, log, ctl.signal, token);
+        const done = await this.runJob(h, run, { role: "prompt", promptText: await this.withNotes(h, userPrompt(text)) }, log, ctl.signal);
         addCost(run, done.costUsd);
         const leaked = await this.commitInContainer(h, `Prompt: ${text.trim().split("\n")[0]!.slice(0, 72)}`);
         if (leaked.length) await log({ kind: "error", t: clock(), text: `The Claude token appears in the changes to ${leaked.join(", ")}; nothing was committed there. Remove it from the files.` });
@@ -312,7 +316,7 @@ export class RunManager {
       if (proceed && opts.brief) {
         await setSessionState("checking");
         await status("setup worker: refreshing the project brief");
-        const done = await this.runJob(h, run, { role: "setup", promptText: setupPrompt(h.session, h.board, [], "brief") }, log, ctl.signal, token);
+        const done = await this.runJob(h, run, { role: "setup", promptText: setupPrompt(h.session, h.board, [], "brief") }, log, ctl.signal);
         addCost(run, done.costUsd);
         await status(`brief ${(await this.readNote(h, "brief.md", 16_000)) ? "written" : "missing"} (${done.stopReason})`);
         run.state = "finished";
@@ -324,12 +328,10 @@ export class RunManager {
         proceed = false;
         const request = opts.plan;
         await setSessionState("planning");
-        d.tokens.update(token, { role: "planner", currentTicket: undefined });
         await status(`planner: ${request.trim().split("\n")[0]!.slice(0, 120)}`);
-        const done = await this.runJob(h, run, { role: "planner", promptText: await this.withNotes(h, plannerPrompt(h.session, h.board, request)) }, log, ctl.signal, token);
+        const done = await this.runJob(h, run, { role: "planner", promptText: await this.withNotes(h, plannerPrompt(h.session, h.board, request)) }, log, ctl.signal);
         addCost(run, done.costUsd);
         await saveRun();
-        d.tokens.update(token, { role: "worker" });
         const backlog = h.board.tickets.filter((t) => t.state === "backlog").length;
         await status(`planner finished (${done.stopReason}); ${backlog} tickets in backlog await your approval`);
         const entry = { at: clock(), runId: run.id, kind: "plan" as const, text: request.slice(0, 20_000), reply: done.text.slice(0, 8000), stopReason: done.stopReason };
@@ -392,7 +394,7 @@ export class RunManager {
           continue;
         }
 
-        const outcome = await this.workTicket(h, run, ticket, token, log, ctl.signal, convo);
+        const outcome = await this.workTicket(h, run, ticket, log, ctl.signal, convo);
         await saveRun();
         if (outcome === "rate_limited") {
           run.state = "paused";
@@ -450,12 +452,11 @@ export class RunManager {
     return run;
   }
 
-  /** One ticket, start to finish. Returns how it ended for the loop's bookkeeping. */
+  /** One ticket, start to finish: the implementer, then the judge. Returns how it ended for the loop's bookkeeping. */
   private async workTicket(
     h: SessionHandle,
     run: Run,
     ticket: Ticket,
-    token: string,
     log: (e: VerstasEvent) => Promise<void>,
     signal: AbortSignal,
     convo: { id?: string } = {},
@@ -463,21 +464,16 @@ export class RunManager {
     const d = this.deps;
     const clock = d.now ?? now;
     const caps = h.session.caps;
-    const move = async (to: TicketState, note: string) => {
-      await h.mutate((docs) => ({ next: { board: transition(docs.board, ticket.id, to, { by: "harness", text: note }) } }));
-      await log({ kind: "ticket", t: clock(), ticket: ticket.id, from: getTicket(h.board, ticket.id).state, to, note });
-    };
 
     const answer = latestAnswer(h, ticket.id);
     await h.mutate((docs) => ({ next: { board: transition(docs.board, ticket.id, "in_progress", { by: "harness", text: `Implementer started (judged attempts so far: ${ticket.attempts})` }) } }));
     await log({ kind: "ticket", t: clock(), ticket: ticket.id, from: "ready", to: "in_progress" });
     run.currentTicket = ticket.id;
-    d.tokens.update(token, { currentTicket: ticket.id, role: "worker" });
 
     const agentSession = caps.resumeWorker ? (convo.id ? { id: convo.id, resume: true } : { id: randomUUID(), resume: false }) : undefined;
     const freshPrompt = () => this.withNotes(h, implementerPrompt(h.board, getTicket(h.board, ticket.id), answer));
     const promptText = agentSession?.resume ? implementerPrompt(h.board, getTicket(h.board, ticket.id), answer, true) : await freshPrompt();
-    const impl = await this.runJob(h, run, { role: "implementer", ticket: ticket.id, agentSession, promptText, freshPrompt }, log, signal, token);
+    const impl = await this.runJob(h, run, { role: "implementer", ticket: ticket.id, agentSession, promptText, freshPrompt }, log, signal);
     if (impl.agentSession && impl.turns > 0) convo.id = impl.agentSession;
     addCost(run, impl.costUsd);
     await this.writeTicketReport(h, run, ticket.id, "implementer", impl);
@@ -490,22 +486,65 @@ export class RunManager {
       return "rate_limited";
     }
 
-    const openForTicket = h.inbox.requests.filter((r) => r.state === "open" && r.ticketId === ticket.id);
-    const halt = openForTicket.find((r) => r.halt);
-    if (openForTicket.length) {
-      await this.commitInContainer(h, `${ticket.id} (waiting): ${ticket.title}`);
-      await move("waiting", halt ? `Halt requested: ${halt.halt?.reason ?? ""}` : `Waiting on ${openForTicket.map((r) => `${r.id} (${r.actions.map((a) => a.detail.kind).join(", ") || "question"})`).join(", ")}`);
+    const parked = await this.parkOnRequests(h, ticket.id, log);
+    if (parked) {
       run.currentTicket = undefined;
-      return halt ? "halted" : "waiting";
+      return parked;
     }
 
+    const outcome = await this.judge(h, run, ticket.id, impl, log, signal);
+    // A stopped run requeues the ticket it was on; anything else is settled.
+    if (!signal.aborted) run.currentTicket = undefined;
+    return outcome;
+  }
+
+  /** A ticket with open requests waits for them (or halts the run); the work so far is committed. */
+  private async parkOnRequests(h: SessionHandle, ticketId: string, log: (e: VerstasEvent) => Promise<void>): Promise<"waiting" | "halted" | undefined> {
+    const openForTicket = h.inbox.requests.filter((r) => r.state === "open" && r.ticketId === ticketId);
+    if (!openForTicket.length) return undefined;
+    const halt = openForTicket.find((r) => r.halt);
+    const t = getTicket(h.board, ticketId);
+    await this.commitInContainer(h, `${t.id} (waiting): ${t.title}`);
+    await this.move(h, ticketId, "waiting", halt ? `Halt requested: ${halt.halt?.reason ?? ""}` : `Waiting on ${openForTicket.map((r) => `${r.id} (${r.actions.map((a) => a.detail.kind).join(", ") || "question"})`).join(", ")}`, log);
+    return halt ? "halted" : "waiting";
+  }
+
+  private async move(h: SessionHandle, ticketId: string, to: TicketState, note: string, log: (e: VerstasEvent) => Promise<void>): Promise<void> {
+    const from = getTicket(h.board, ticketId).state;
+    await h.mutate((docs) => ({ next: { board: transition(docs.board, ticketId, to, { by: "harness", text: note }) } }));
+    await log({ kind: "ticket", t: (this.deps.now ?? now)(), ticket: ticketId, from, to, note });
+  }
+
+  /**
+   * The verdict on a ticket whose work is finished: the harness's gates and
+   * the diff, the reviewer (or the harness's own rule without one), one
+   * judged attempt, the commit, and the move out of review to done, back to
+   * ready, or to blocked. Only this moves a ticket to done. The work may
+   * come from an implementer the loop started or from an agent that
+   * submitted it; `impl` says how that worker ended.
+   */
+  async judge(
+    h: SessionHandle,
+    run: Run,
+    ticketId: string,
+    impl: { ok: boolean; stopReason: string; costUsd: number },
+    log: (e: VerstasEvent) => Promise<void>,
+    signal: AbortSignal,
+  ): Promise<"done" | "requeued" | "blocked" | "rate_limited"> {
+    const d = this.deps;
+    const clock = d.now ?? now;
+    const caps = h.session.caps;
+    const ticket = getTicket(h.board, ticketId);
+    const move = (to: TicketState, note: string) => this.move(h, ticketId, to, note, log);
+
     // Gates, diff, review.
-    const current = getTicket(h.board, ticket.id);
-    const repoDir = current.repo && h.session.repos.some((r) => r.name === current.repo) ? `/workspace/${current.repo}` : h.session.repos[0] ? `/workspace/${h.session.repos[0].name}` : "/workspace";
-    const gates = await this.runGates(h.id, repoDir, log, ticket.id);
+    const repoDir = ticket.repo && h.session.repos.some((r) => r.name === ticket.repo) ? `/workspace/${ticket.repo}` : h.session.repos[0] ? `/workspace/${h.session.repos[0].name}` : "/workspace";
+    const gates = await this.runGates(h.id, repoDir, log, ticketId);
     const { stat, numstat, diff } = await this.stageAndDiff(h.id, repoDir);
     const changed = numstat.files > 0;
-    await move("review", `Implementer ${impl.ok ? "finished" : `stopped (${impl.stopReason})`}; ${numstat.files} files, +${numstat.added} −${numstat.removed}`);
+    const summary = `Implementer ${impl.ok ? "finished" : `stopped (${impl.stopReason})`}; ${numstat.files} files, +${numstat.added} −${numstat.removed}`;
+    if (getTicket(h.board, ticketId).state !== "review") await move("review", summary);
+    else await h.mutate((docs) => ({ next: { board: addNote(docs.board, ticketId, "harness", summary) } }));
 
     // Who decides. With a reviewer: the reviewer, always, including when no
     // files changed (a report or an investigation can be the deliverable).
@@ -517,13 +556,12 @@ export class RunManager {
     let verdict: "ok" | "fixable" | "blocked";
     let verdictNote = "";
     if (caps.reviewer) {
-      d.tokens.update(token, { role: "worker", currentTicket: ticket.id });
-      const rev = await this.runJob(h, run, { role: "reviewer", ticket: ticket.id, promptText: await this.withNotes(h, reviewerPrompt(getTicket(h.board, ticket.id), stat, diff, gates, { ok: impl.ok, stopReason: impl.stopReason })) }, log, signal, token);
+      const rev = await this.runJob(h, run, { role: "reviewer", ticket: ticketId, promptText: await this.withNotes(h, reviewerPrompt(getTicket(h.board, ticketId), stat, diff, gates, { ok: impl.ok, stopReason: impl.stopReason })) }, log, signal);
       addCost(run, rev.costUsd);
-      await this.writeTicketReport(h, run, ticket.id, "reviewer", rev);
+      await this.writeTicketReport(h, run, ticketId, "reviewer", rev);
       if (rev.rateLimited) {
         // Keep the work; the loop sleeps and the ticket goes back to ready for a fresh review next time.
-        await this.commitInContainer(h, `${ticket.id} (wip): ${ticket.title}`);
+        await this.commitInContainer(h, `${ticketId} (wip): ${ticket.title}`);
         await move("ready", "Reviewer was rate limited; requeued with the work kept");
         return "rate_limited";
       }
@@ -533,7 +571,7 @@ export class RunManager {
       verdictNote = parsed?.reason ?? `reviewer gave no verdict (${rev.stopReason})`;
     } else {
       const failed = gates.filter((g) => !g.ok).map((g) => g.name);
-      const report = getTicket(h.board, ticket.id).report;
+      const report = getTicket(h.board, ticketId).report;
       if (!impl.ok) verdictNote = `implementer stopped (${impl.stopReason})`;
       else if (failed.length) verdictNote = `failed: ${failed.join(", ")}`;
       else if (!changed && !report) verdictNote = "no files changed and no report was filed";
@@ -541,48 +579,51 @@ export class RunManager {
     }
 
     // One judged attempt, whatever the verdict.
-    const attempts = getTicket(h.board, ticket.id).attempts + 1;
-    await h.mutate((docs) => ({ next: { board: replaceTicket(docs.board, { ...getTicket(docs.board, ticket.id), attempts }) } }));
+    const attempts = getTicket(h.board, ticketId).attempts + 1;
+    await h.mutate((docs) => ({ next: { board: replaceTicket(docs.board, { ...getTicket(docs.board, ticketId), attempts }) } }));
 
     if (verdict === "ok") {
-      const leaked = await this.commitInContainer(h, `${ticket.id}: ${ticket.title}`);
+      const leaked = await this.commitInContainer(h, `${ticketId}: ${ticket.title}`);
       if (leaked.length) {
         const note = `The Claude token appears in the changes to ${leaked.join(", ")}; nothing was committed there. Remove it from the files (the changes are still in the working tree) and move the ticket back to ready.`;
-        await log({ kind: "error", t: clock(), ticket: ticket.id, text: note });
+        await log({ kind: "error", t: clock(), ticket: ticketId, text: note });
         await move("blocked", note);
-        run.currentTicket = undefined;
         return "blocked";
       }
       await h.mutate((docs) => {
-        const t = getTicket(docs.board, ticket.id);
+        const t = getTicket(docs.board, ticketId);
         return { next: { board: replaceTicket(docs.board, { ...t, diff: numstat, cost: { ...(t.cost ?? { inputTokens: 0, outputTokens: 0 }), usd: (t.cost?.usd ?? 0) + impl.costUsd } }) } };
       });
       await move("done", `${caps.reviewer ? "Reviewed ok" : "Accepted"}${changed ? "" : " (no files changed)"}${verdictNote ? `: ${verdictNote}` : ""}`);
       run.ticketsDone++;
-      run.currentTicket = undefined;
       return "done";
     }
     if (verdict === "fixable" && attempts < caps.ticketAttempts) {
-      await this.commitInContainer(h, `${ticket.id} (wip attempt ${attempts}): ${ticket.title}`);
+      await this.commitInContainer(h, `${ticketId} (wip attempt ${attempts}): ${ticket.title}`);
       await move("ready", `Not done yet (${verdictNote || "see reviewer notes"}); attempt ${attempts} of ${caps.ticketAttempts}`);
-      run.currentTicket = undefined;
       return "requeued";
     }
-    await this.commitInContainer(h, `${ticket.id} (blocked): ${ticket.title}`);
+    await this.commitInContainer(h, `${ticketId} (blocked): ${ticket.title}`);
     await move("blocked", verdict === "blocked" ? `Reviewer: blocked. ${verdictNote}` : `Gave up after ${attempts} attempts: ${verdictNote || "not accepted"}`);
-    run.currentTicket = undefined;
     return "blocked";
   }
 
+  /**
+   * One worker, start to finish. Each job gets its own directory under
+   * /workspace/.verstas/jobs (job file, prompt, rules, budget) and its own
+   * run token, revoked when the worker ends, so two workers of one run (a
+   * lead and the reviewer judging its ticket) never share either.
+   */
   private async runJob(
     h: SessionHandle,
     run: Run,
     job: { role: Job["role"]; ticket?: string; promptText: string; agentSession?: Job["agentSession"]; /** The prompt for a fresh conversation when a resume fails. */ freshPrompt?: () => Promise<string> },
     log: (e: VerstasEvent) => Promise<void>,
     signal: AbortSignal,
-    token: string,
   ): Promise<WorkerDone> {
-    const dir = path.join(h.paths.workspace, WORKSPACE_FILES);
+    const name = `${run.id}-${++this.jobSeq}-${job.role}`;
+    const rel = `${WORKSPACE_FILES}/jobs/${name}`;
+    const dir = path.join(h.paths.workspace, rel);
     await fs.mkdir(dir, { recursive: true });
     await fs.writeFile(path.join(dir, "prompt.md"), job.promptText);
     await fs.writeFile(path.join(dir, "system.md"), systemMd(job.role));
@@ -592,31 +633,37 @@ export class RunManager {
       role: job.role,
       ticket: job.ticket,
       driver: agent.driver,
-      promptFile: `/workspace/${WORKSPACE_FILES}/prompt.md`,
-      systemPromptFile: `/workspace/${WORKSPACE_FILES}/system.md`,
+      promptFile: `/workspace/${rel}/prompt.md`,
+      systemPromptFile: `/workspace/${rel}/system.md`,
       caps: { minutes: h.session.caps.workerMinutes, turns: h.session.caps.workerTurns, budgetUsd: h.session.caps.budgetUsd },
       mcpConfigFile: `/workspace/${WORKSPACE_FILES}/mcp.json`,
       model: agent.model || undefined,
-      budgetFile: `/workspace/${WORKSPACE_FILES}/budget.json`,
+      budgetFile: `/workspace/${rel}/budget.json`,
     };
     if (job.agentSession && agent.driver === "claude") spec.agentSession = job.agentSession;
     if (DEBUG) spec.debug = true;
+    const jobFile = `/workspace/${rel}/job.json`;
     await fs.writeFile(path.join(dir, "job.json"), JSON.stringify(spec, null, 2));
-    const rawLog = DEBUG ? path.join(h.paths.runs, String(run.id), `worker-${job.ticket ?? "planner"}-${job.role}-${Date.now()}.raw.jsonl`) : undefined;
-    let done = await this.deps.worker(h.id).run(spec, (e) => void log(e), signal, { rawLog, runToken: token });
-    // A conversation that cannot be resumed (pruned, written by another CLI
-    // version) fails before its first turn; start a fresh one under a new id.
-    if (spec.agentSession?.resume && !done.ok && done.turns === 0 && !done.rateLimited && !signal.aborted) {
+    const rawLog = DEBUG ? path.join(h.paths.runs, String(run.id), `worker-${name}-${job.ticket ?? "none"}.raw.jsonl`) : undefined;
+    const token = this.deps.tokens.issue({ sessionId: h.id, runId: run.id, role: tokenRole(job.role), currentTicket: job.ticket });
+    try {
+      let done = await this.deps.worker(h.id).run(spec, (e) => void log(e), signal, { rawLog, runToken: token, jobFile });
+      // A conversation that cannot be resumed (pruned, written by another CLI
+      // version) fails before its first turn; start a fresh one under a new id.
+      if (spec.agentSession?.resume && !done.ok && done.turns === 0 && !done.rateLimited && !signal.aborted) {
+        await log(done);
+        await log({ kind: "status", t: (this.deps.now ?? now)(), ticket: job.ticket, text: `could not resume the agent conversation (${done.stopReason}); starting a fresh one` });
+        if (job.freshPrompt) await fs.writeFile(path.join(dir, "prompt.md"), await job.freshPrompt());
+        const fresh: Job = { ...spec, agentSession: { id: randomUUID(), resume: false } };
+        await fs.writeFile(path.join(dir, "job.json"), JSON.stringify(fresh, null, 2));
+        done = await this.deps.worker(h.id).run(fresh, (e) => void log(e), signal, { rawLog, runToken: token, jobFile });
+        done = { ...done, agentSession: fresh.agentSession!.id };
+      } else if (spec.agentSession) done = { ...done, agentSession: spec.agentSession.id };
       await log(done);
-      await log({ kind: "status", t: (this.deps.now ?? now)(), ticket: job.ticket, text: `could not resume the agent conversation (${done.stopReason}); starting a fresh one` });
-      if (job.freshPrompt) await fs.writeFile(path.join(dir, "prompt.md"), await job.freshPrompt());
-      const fresh: Job = { ...spec, agentSession: { id: randomUUID(), resume: false } };
-      await fs.writeFile(path.join(dir, "job.json"), JSON.stringify(fresh, null, 2));
-      done = await this.deps.worker(h.id).run(fresh, (e) => void log(e), signal, { rawLog, runToken: token });
-      done = { ...done, agentSession: fresh.agentSession!.id };
-    } else if (spec.agentSession) done = { ...done, agentSession: spec.agentSession.id };
-    await log(done);
-    return done;
+      return done;
+    } finally {
+      this.deps.tokens.revoke(token);
+    }
   }
 
   /** A file under notes/, capped so a runaway note cannot crowd out the ticket. */
@@ -631,8 +678,10 @@ export class RunManager {
     return withContext(await this.readNote(h, "brief.md", 16_000), await this.readNote(h, "env.md", 8_000), prompt);
   }
 
-  private async writeWorkspaceFiles(h: SessionHandle, _token: string): Promise<void> {
+  private async writeWorkspaceFiles(h: SessionHandle): Promise<void> {
     const ws = h.paths.workspace;
+    // Job directories of earlier runs; no worker of this session is running now.
+    await fs.rm(path.join(ws, WORKSPACE_FILES, "jobs"), { recursive: true, force: true });
     await fs.writeFile(path.join(ws, "VERSTAS.md"), verstasMd(h.session, this.deps.agentApiUrl));
     await fs.writeFile(path.join(ws, "CLAUDE.md"), workspaceClaudeMd());
     // Codex and Cursor read AGENTS.md where Claude Code reads CLAUDE.md; same pointers.
