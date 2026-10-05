@@ -94,6 +94,9 @@ export const addNote = (
 const isDone = (board: Board, id: string): boolean =>
   board.tickets.some((t) => t.id === id && t.state === "done");
 
+/** Ready and every dependency done: what the loop may take and what a lead may claim. */
+export const canStart = (board: Board, t: Ticket): boolean => t.state === "ready" && t.deps.every((d) => isDone(board, d));
+
 /**
  * The next ticket the loop should take: ready, every dependency done, lowest
  * priority number first, then oldest. Unknown dependencies count as unmet so
@@ -101,7 +104,7 @@ const isDone = (board: Board, id: string): boolean =>
  */
 export const nextReady = (board: Board): Ticket | undefined =>
   board.tickets
-    .filter((t) => t.state === "ready" && t.deps.every((d) => isDone(board, d)))
+    .filter((t) => canStart(board, t))
     .sort((a, b) => a.priority - b.priority || a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id))[0];
 
 /** Ready tickets whose dependencies are not all done; shown as "ready, waiting on …". */
@@ -163,11 +166,14 @@ export const validateRepos = (tickets: readonly Pick<Ticket, "id" | "repo" | "st
 
 // --- The agent's limited powers --------------------------------------------
 
+/** Who is calling the agent API: a worker on a ticket, the planner, or a lead that works the board. */
+export type AgentRole = "worker" | "planner" | "lead";
+
 export const AGENT_TICKET_KINDS: readonly TicketKind[] = ["bug", "followup", "chore"];
 
-/** Workers create tickets of these kinds only; the planner may also create features. */
-export const assertAgentMayCreate = (kind: TicketKind, role: "worker" | "planner"): void => {
-  if (role === "planner") return;
+/** Workers create tickets of these kinds only; the planner and a lead may also create features (into the backlog, for your approval). */
+export const assertAgentMayCreate = (kind: TicketKind, role: AgentRole): void => {
+  if (role === "planner" || role === "lead") return;
   if (!AGENT_TICKET_KINDS.includes(kind)) {
     throw new BoardError(`A worker may not create ${kind} tickets; file an idea instead`, "forbidden_kind");
   }
@@ -226,7 +232,7 @@ export type ImportResult = {
 export const importBoard = (
   board: Board,
   input: unknown,
-  opts: { by: "user" | "agent"; role?: "worker" | "planner"; defaultState?: "backlog" | "ready" } = { by: "user" },
+  opts: { by: "user" | "agent"; role?: AgentRole; defaultState?: "backlog" | "ready" } = { by: "user" },
 ): ImportResult => {
   const parsed: BoardImport = boardImportSchema.parse(input);
   const at = now();

@@ -154,7 +154,7 @@ test("cursor driver: the board server goes into the user-level mcp.json for the 
     expect(Object.keys(written.mcpServers)).toEqual(["board"]);
     // Proxy variables of the host running the tests may ride along; nothing else does.
     expect(written.mcpServers.board!.env).toMatchObject({ VERSTAS_AGENT_API: "http://host.docker.internal:4701/agent", VERSTAS_RUN_TOKEN: "run-9" });
-    expect(Object.keys(written.mcpServers.board!.env).every((k) => /^(VERSTAS_AGENT_API|VERSTAS_RUN_TOKEN|https?_proxy|HTTPS?_PROXY|no_proxy|NO_PROXY)$/.test(k))).toBe(true);
+    expect(Object.keys(written.mcpServers.board!.env).every((k) => /^(VERSTAS_AGENT_API|VERSTAS_RUN_TOKEN|VERSTAS_ROLE|VERSTAS_BUDGET_FILE|https?_proxy|HTTPS?_PROXY|no_proxy|NO_PROXY)$/.test(k))).toBe(true);
     await cursorDriver.finish!(job);
     expect(await fs.readFile(userFile, "utf8")).toBe('{"mcpServers":{"mine":{"command":"x"}}}');
     // No previous file: it is removed again.
@@ -231,7 +231,11 @@ test("worker: the budget file tracks turns and the context size, and the agent i
     return true;
   };
   try {
+    const savedEnv = { role: process.env.VERSTAS_ROLE, budget: process.env.VERSTAS_BUDGET_FILE };
     expect(await runJob(job)).toBe(0);
+    expect(process.env.VERSTAS_ROLE).toBe("implementer");
+    if (savedEnv.role === undefined) delete process.env.VERSTAS_ROLE; else process.env.VERSTAS_ROLE = savedEnv.role;
+    if (savedEnv.budget === undefined) delete process.env.VERSTAS_BUDGET_FILE; else process.env.VERSTAS_BUDGET_FILE = savedEnv.budget;
     await new Promise((r) => setTimeout(r, 50)); // the last write is fire-and-forget
     const budget = JSON.parse(await fs.readFile(budgetFile, "utf8")) as Record<string, unknown>;
     expect(budget).toMatchObject({ turns: 2, contextTokens: 4010, outputTokens: 10, caps: { turns: 20 }, resumed: false });

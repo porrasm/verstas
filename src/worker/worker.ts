@@ -66,6 +66,11 @@ export const runJob = async (job: Job): Promise<number> => {
 
   const prompt = await fs.readFile(job.promptFile, "utf8");
   const system = await fs.readFile(job.systemPromptFile, "utf8");
+  // The board server reads these: which tools this role gets, and where the
+  // running totals are. Set before prepare: Codex and Cursor copy named
+  // variables into their MCP config there; Claude Code passes its env on.
+  process.env.VERSTAS_ROLE = job.role;
+  if (job.budgetFile) process.env.VERSTAS_BUDGET_FILE = job.budgetFile;
   const spawned = await driver.prepare(job, prompt, system, bin);
   const translator = driver.translator(job);
   let turns = 0;
@@ -81,7 +86,7 @@ export const runJob = async (job: Job): Promise<number> => {
     void fs.writeFile(job.budgetFile, JSON.stringify(budget)).catch(() => undefined);
   };
   writeBudget();
-  const env = job.budgetFile ? { ...spawned.env, VERSTAS_BUDGET_FILE: job.budgetFile } : spawned.env;
+  const env = { ...spawned.env, VERSTAS_ROLE: job.role, ...(job.budgetFile ? { VERSTAS_BUDGET_FILE: job.budgetFile } : {}) };
 
   const child = spawn(spawned.bin, spawned.args, { cwd: spawned.cwd, stdio: ["pipe", "pipe", "pipe"], env });
   child.stdin.end(spawned.stdin ?? "");

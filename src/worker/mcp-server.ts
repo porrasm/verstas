@@ -21,6 +21,8 @@ const PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"];
 
 type Tool = {
   name: string;
+  /** Shown only to a lead (VERSTAS_ROLE=lead); a worker's ticket is moved by the harness. */
+  leadOnly?: boolean;
   description: string;
   inputSchema: Record<string, unknown>;
   call: (args: Record<string, unknown>) => Promise<unknown>;
@@ -64,6 +66,29 @@ export const readBudget = async (file = process.env.VERSTAS_BUDGET_FILE ?? ""): 
   };
 };
 
+/** How long `board_submit` waits for the verdict before it returns "still in review". */
+const SUBMIT_WAIT_MS = Number(process.env.VERSTAS_SUBMIT_WAIT_MS) || 9 * 60_000;
+const SUBMIT_POLL_MS = Number(process.env.VERSTAS_SUBMIT_POLL_MS) || 3_000;
+
+type TicketView = { id: string; state: string; attempts?: number; notes?: { by: string; text: string; at: string }[] };
+
+/** Submit, then wait for the judge: the verdict and the harness's notes since the submit. */
+export const submitAndWait = async (id: string, waitMs = SUBMIT_WAIT_MS, pollMs = SUBMIT_POLL_MS): Promise<unknown> => {
+  const path = `/tickets/${encodeURIComponent(id)}`;
+  const before = ((await api("GET", path)) as TicketView).notes?.length ?? 0;
+  await api("POST", `${path}/submit`, {});
+  const until = Date.now() + waitMs;
+  for (;;) {
+    await new Promise((r) => setTimeout(r, pollMs));
+    const t = (await api("GET", path)) as TicketView;
+    if (t.state !== "review") {
+      const verdict = t.state === "done" ? "accepted" : t.state === "ready" ? "not done yet: read the notes, then claim it again or leave it for later" : t.state === "blocked" ? "blocked" : t.state;
+      return { id, state: t.state, verdict, attempts: t.attempts, notes: (t.notes ?? []).slice(before).filter((n) => n.by !== "agent").map((n) => n.text) };
+    }
+    if (Date.now() >= until) return { id, state: "review", verdict: "still in review", note: "The reviewer is still working. Call board_get_ticket on it later; do not claim another ticket until it leaves review." };
+  }
+};
+
 export const TOOLS: Tool[] = [
   {
     name: "budget",
@@ -71,6 +96,30 @@ export const TOOLS: Tool[] = [
       "Your running totals in this worker: turns used and left, minutes used and left, the size of your current context in tokens (what the model was last sent), and the dollar cap. Check it before starting something long, and when deciding whether to file your report now.",
     inputSchema: obj({}, []),
     call: () => readBudget(),
+  },
+  {
+    name: "board_claim",
+    leadOnly: true,
+    description:
+      "Take a ready ticket whose dependencies are done: it moves to in_progress and is yours. Hold one ticket at a time: submit it (or park it with a request) before claiming the next. Claim before you change files for it.",
+    inputSchema: obj({ id: str("Ticket id", 20) }, ["id"]),
+    call: (a) => api("POST", `/tickets/${encodeURIComponent(String(a.id))}/claim`, {}),
+  },
+  {
+    name: "board_submit",
+    leadOnly: true,
+    description:
+      "Submit the ticket you hold for judgment once its work is finished and your report is filed with board_report. The harness runs the checks and an independent reviewer, commits, and moves it to done, back to ready with notes, or to blocked. Waits for the verdict and returns it with the reviewer's notes.",
+    inputSchema: obj({ id: str("Ticket id", 20) }, ["id"]),
+    call: (a) => submitAndWait(String(a.id)),
+  },
+  {
+    name: "handoff",
+    leadOnly: true,
+    description:
+      "End this conversation and hand the work to a fresh lead, whose context starts from your note, the notes directory and the board. Use it when your context has become noise: the session has moved on from what you first read, you keep re-reading the same files, or the budget tool shows a large context. The note says what is in flight, what you tried, what you learned that is not in the notes yet, and what to do next. Then stop.",
+    inputSchema: obj({ note: str("The handoff note", 20_000) }, ["note"]),
+    call: (a) => api("POST", `/handoff`, { note: a.note }),
   },
   {
     name: "board_list_tickets",
@@ -189,6 +238,9 @@ const send = (msg: Rpc): void => {
 const reply = (id: Rpc["id"], result: unknown): void => send({ jsonrpc: "2.0", id, result });
 const fail = (id: Rpc["id"], code: number, message: string): void => send({ jsonrpc: "2.0", id, error: { code, message } });
 
+/** The tools for this worker's role: a lead also drives the board. */
+export const visibleTools = (role = process.env.VERSTAS_ROLE ?? ""): Tool[] => TOOLS.filter((t) => !t.leadOnly || role === "lead");
+
 export const handle = async (msg: Rpc): Promise<void> => {
   const { id, method, params = {} } = msg;
   if (!method) return;
@@ -204,11 +256,11 @@ export const handle = async (msg: Rpc): Promise<void> => {
   if (method === "notifications/initialized" || method.startsWith("notifications/")) return;
   if (method === "ping") return reply(id, {});
   if (method === "tools/list") {
-    return reply(id, { tools: TOOLS.map(({ name, description, inputSchema }) => ({ name, description, inputSchema })) });
+    return reply(id, { tools: visibleTools().map(({ name, description, inputSchema }) => ({ name, description, inputSchema })) });
   }
   if (method === "tools/call") {
     const name = String(params.name ?? "");
-    const tool = TOOLS.find((t) => t.name === name);
+    const tool = visibleTools().find((t) => t.name === name);
     if (!tool) return fail(id, -32602, `Unknown tool ${name}`);
     const args = (params.arguments ?? {}) as Record<string, unknown>;
     try {

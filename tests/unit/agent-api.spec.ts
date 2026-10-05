@@ -156,3 +156,95 @@ test("a revoked token stops working at once", async () => {
     await s.close();
   }
 });
+
+test("a lead claims a ready ticket, submits it with a report, and hands off; workers and missing runs are refused", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "verstas-api-lead-"));
+  const id = "2026-10-05-lead";
+  const paths = sessionPaths(root, id);
+  await fs.mkdir(paths.workspace, { recursive: true });
+  await writeJsonAtomic(paths.session, sessionSchema.parse({ id, name: "l", goal: "g", createdAt: "2026-10-05T00:00:00.000Z" }));
+  await saveBoard(
+    paths.dir,
+    importBoard(emptyBoard("g"), {
+      tickets: [
+        { id: "T-1", title: "Schema", state: "ready" },
+        { id: "T-2", title: "Engine", state: "ready", deps: ["T-1"] },
+        { id: "T-3", title: "Docs", state: "ready" },
+        { id: "T-4", title: "Later", state: "backlog" },
+      ],
+    }).board,
+  );
+  await writeJsonAtomic(paths.inbox, inboxSchema.parse({}));
+  const hub = new SessionHub(root);
+  const tokens = new RunTokens();
+  const submitted: string[] = [];
+  const handoffs: string[] = [];
+  const lead = tokens.issue({ sessionId: id, runId: 1, role: "lead" });
+  const worker = tokens.issue({ sessionId: id, runId: 1, role: "worker", currentTicket: "T-3" });
+  const servers = [createAgentApi(hub, tokens, { submitted: (_r, t) => submitted.push(t), handoff: (_r, n) => handoffs.push(n) }), createAgentApi(hub, tokens)].map((app) => app.listen(0, "127.0.0.1"));
+  const ports = await Promise.all(servers.map((s) => new Promise<number>((r) => (s.listening ? r((s.address() as net.AddressInfo).port) : s.on("listening", () => r((s.address() as net.AddressInfo).port))))));
+  const call = async (method: string, p: string, body: unknown, token: string, port = ports[0]) => {
+    const res = await fetch(`http://127.0.0.1:${port}/agent${p}`, { method, headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify(body) });
+    return { status: res.status, json: (await res.json()) as Record<string, unknown> };
+  };
+  const state = async (t: string) => (await hub.get(id)).board.tickets.find((x) => x.id === t)!.state;
+  try {
+    // Workers do not drive the board, and without a run nothing can judge.
+    expect((await call("POST", "/tickets/T-3/claim", {}, worker)).status).toBe(403);
+    expect((await call("POST", "/tickets/T-1/claim", {}, lead, ports[1])).status).toBe(409);
+    // Only ready tickets with their dependencies done.
+    expect((await call("POST", "/tickets/T-4/claim", {}, lead)).json.error).toContain("backlog, not ready");
+    expect((await call("POST", "/tickets/T-2/claim", {}, lead)).json.error).toContain("waits on T-1");
+    expect(await call("POST", "/tickets/T-1/claim", {}, lead)).toMatchObject({ status: 200, json: { state: "in_progress" } });
+    expect(tokens.lookup(lead)!.currentTicket).toBe("T-1");
+    expect((await hub.get(id)).board.tickets[0]!.notes.at(-1)).toMatchObject({ by: "agent", text: expect.stringContaining("Claimed by the lead") });
+    // One at a time.
+    expect((await call("POST", "/tickets/T-3/claim", {}, lead)).json.error).toContain("You hold T-1");
+    // Submit needs the ticket held and a report.
+    expect((await call("POST", "/tickets/T-3/submit", {}, lead)).json.error).toContain("do not hold T-3");
+    expect((await call("POST", "/tickets/T-1/submit", {}, lead)).json.error).toContain("board_report");
+    await call("POST", "/tickets/T-1/report", { report: "schema added, tests pass" }, lead);
+    expect(await call("POST", "/tickets/T-1/submit", {}, lead)).toMatchObject({ status: 200, json: { state: "review" } });
+    expect(submitted).toEqual(["T-1"]);
+    expect(await state("T-1")).toBe("review");
+    // Still held while in review: no second claim until the verdict.
+    expect((await call("POST", "/tickets/T-3/claim", {}, lead)).json.error).toContain("You hold T-1 (review)");
+    // The judge settles it; the lead may claim again.
+    const h = await hub.get(id);
+    await h.mutate((d) => ({ next: { board: transition(d.board, "T-1", "done") } }));
+    expect((await call("POST", "/tickets/T-3/claim", {}, lead)).status).toBe(200);
+    // Handoff passes the note to the run.
+    expect((await call("POST", "/handoff", { note: "T-3 half done: see notes/state.md" }, lead)).json.next).toContain("Stop now");
+    expect(handoffs).toEqual(["T-3 half done: see notes/state.md"]);
+    expect((await call("POST", "/handoff", { note: "x" }, worker)).status).toBe(403);
+  } finally {
+    for (const s of servers) s.close();
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a lead may propose feature tickets; they land in the backlog", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "verstas-api-feat-"));
+  const id = "2026-10-05-feat";
+  const paths = sessionPaths(root, id);
+  await fs.mkdir(paths.workspace, { recursive: true });
+  await writeJsonAtomic(paths.session, sessionSchema.parse({ id, name: "f", goal: "g", createdAt: "2026-10-05T00:00:00.000Z" }));
+  await saveBoard(paths.dir, emptyBoard("g"));
+  await writeJsonAtomic(paths.inbox, inboxSchema.parse({}));
+  const hub = new SessionHub(root);
+  const tokens = new RunTokens();
+  const lead = tokens.issue({ sessionId: id, runId: 1, role: "lead" });
+  const worker = tokens.issue({ sessionId: id, runId: 1, role: "worker" });
+  const server = createAgentApi(hub, tokens).listen(0, "127.0.0.1");
+  const port = await new Promise<number>((r) => server.on("listening", () => r((server.address() as net.AddressInfo).port)));
+  const create = (token: string) => fetch(`http://127.0.0.1:${port}/agent/tickets`, { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify({ title: "Export as CSV", kind: "feature", spec: "x" }) });
+  try {
+    expect((await create(worker)).status).toBe(403);
+    const res = await create(lead);
+    expect(res.status).toBe(201);
+    expect(await res.json()).toMatchObject({ state: "backlog" });
+  } finally {
+    server.close();
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});

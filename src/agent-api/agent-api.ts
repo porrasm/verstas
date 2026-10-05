@@ -13,7 +13,7 @@ import {
   type Inbox,
   type Ticket,
 } from "../core/types.js";
-import { addNote, agentAddDep, agentSetPriority, BoardError, getTicket, importBoard, replaceTicket, validateRepos } from "../board/board.js";
+import { addNote, agentAddDep, agentSetPriority, BoardError, canStart, getTicket, importBoard, replaceTicket, transition, validateRepos, type AgentRole } from "../board/board.js";
 import type { SessionHub } from "../sessions/hub.js";
 
 /**
@@ -23,7 +23,22 @@ import type { SessionHub } from "../sessions/hub.js";
  * other runs, or the inbox's decisions.
  */
 
-export type RunToken = { sessionId: string; runId: number; role: "worker" | "planner"; currentTicket?: string };
+export type RunToken = { sessionId: string; runId: number; role: AgentRole; currentTicket?: string };
+
+/**
+ * What the run behind a lead's token does when the lead drives the board
+ * (src/harness/run.ts implements it). Without it, claim, submit and
+ * handoff are refused: there is no run to judge or hand over.
+ */
+export type AgentRunHooks = {
+  /** The lead submitted the ticket it holds; the run judges it (gates, reviewer, commit, the move out of review). */
+  submitted(run: RunToken, ticketId: string): void;
+  /** The lead asked to end its worker and hand over to a fresh one with this note. */
+  handoff(run: RunToken, note: string): void;
+};
+
+/** States in which a ticket still belongs to the lead that claimed it. */
+const HELD = new Set(["in_progress", "review"]);
 
 export class RunTokens {
   private tokens = new Map<string, RunToken>();
@@ -64,7 +79,7 @@ const summary = (t: Ticket) => ({
   pinned: t.pinned,
 });
 
-export const createAgentApi = (hub: SessionHub, tokens: RunTokens): express.Express => {
+export const createAgentApi = (hub: SessionHub, tokens: RunTokens, hooks?: AgentRunHooks): express.Express => {
   const app = express();
   app.disable("x-powered-by");
   app.use(express.json({ limit: "256kb" }));
@@ -262,6 +277,73 @@ export const createAgentApi = (hub: SessionHub, tokens: RunTokens): express.Expr
         return { next: { inbox: { ...d.inbox, ideas: [...d.inbox.ideas, i] } }, result: i.id };
       });
       res.status(201).json({ ok: true, id, note: "Kept in the ideas list for the user. Do not implement it." });
+    }),
+  );
+
+
+  // --- A lead drives the board: claim, submit, hand off ----------------------
+  // Only a lead's token may; a worker's ticket is chosen and judged by the loop.
+
+  const leadOnly = (req: AgentRequestWithRun, res: Response): boolean => {
+    if (req.run.role !== "lead") {
+      res.status(403).json({ error: "Only a lead claims, submits and hands off; the harness moves your ticket for you" });
+      return false;
+    }
+    if (!hooks) {
+      res.status(409).json({ error: "No run is attached to this API; nothing can judge or hand over" });
+      return false;
+    }
+    return true;
+  };
+
+  r.post(
+    "/tickets/:id/claim",
+    wrap(async (req, res) => {
+      if (!leadOnly(req, res)) return;
+      const id = ticketIdSchema.parse(req.params.id);
+      const token = (req.headers.authorization ?? "").slice(7);
+      const h = await hub.get(req.run.sessionId);
+      await h.mutate((d) => {
+        const held = req.run.currentTicket ? d.board.tickets.find((t) => t.id === req.run.currentTicket && HELD.has(t.state)) : undefined;
+        if (held && held.id !== id) throw new BoardError(`You hold ${held.id} (${held.state}); submit it, or note why it is stuck, before claiming another`, "forbidden_move");
+        const t = getTicket(d.board, id);
+        if (t.state !== "ready") throw new BoardError(`${id} is ${t.state}, not ready`, "illegal_transition");
+        if (!canStart(d.board, t)) {
+          const open = t.deps.filter((dep) => !d.board.tickets.some((x) => x.id === dep && x.state === "done"));
+          throw new BoardError(`${id} waits on ${open.join(", ")}, not done yet`, "illegal_transition");
+        }
+        return { next: { board: transition(d.board, id, "in_progress", { by: "agent", text: `Claimed by the lead (judged attempts so far: ${t.attempts})` }) } };
+      });
+      tokens.update(token, { currentTicket: id });
+      res.json({ ok: true, id, state: "in_progress" });
+    }),
+  );
+
+  r.post(
+    "/tickets/:id/submit",
+    wrap(async (req, res) => {
+      if (!leadOnly(req, res)) return;
+      const id = ticketIdSchema.parse(req.params.id);
+      if (req.run.currentTicket !== id) throw new BoardError(`You do not hold ${id}; claim it first`, "forbidden_move");
+      const h = await hub.get(req.run.sessionId);
+      await h.mutate((d) => {
+        const t = getTicket(d.board, id);
+        if (t.state !== "in_progress") throw new BoardError(`${id} is ${t.state}, not in progress`, "illegal_transition");
+        if (!t.report?.trim()) throw new BoardError(`File your report for ${id} with board_report before submitting`, "forbidden_move");
+        return { next: { board: transition(d.board, id, "review", { by: "agent", text: "Submitted for review by the lead" }) } };
+      });
+      hooks!.submitted(req.run, id);
+      res.json({ ok: true, id, state: "review" });
+    }),
+  );
+
+  r.post(
+    "/handoff",
+    wrap(async (req, res) => {
+      if (!leadOnly(req, res)) return;
+      const { note } = z.object({ note: z.string().min(1).max(20_000) }).parse(req.body);
+      hooks!.handoff(req.run, note);
+      res.json({ ok: true, next: "Stop now: end your turn with one line. A fresh lead starts with your note and the board." });
     }),
   );
 
