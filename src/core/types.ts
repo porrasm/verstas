@@ -263,7 +263,14 @@ export const attachmentSchema = z.object({
   dir: z.string().min(1).max(200),
   bytes: z.number().int().nonnegative(),
   skipped: z.array(z.string()).default([]),
+  /** What it is and what it is for, in your words ("the spec; tickets cite its sections"). Shown to every worker beside its path. */
+  description: z.string().max(1000).optional(),
 });
+export type Attachment = z.infer<typeof attachmentSchema>;
+
+/** One line per attachment for the agents: its path and, when you gave one, your description. */
+export const attachmentLines = (attachments: readonly Attachment[], indent = ""): string =>
+  attachments.map((a) => `${indent}- \`/workspace/attachments/${a.dir}\`${a.description?.trim() ? `: ${a.description.trim().replace(/\s+/g, " ")}` : ""}`).join("\n");
 
 export const capsSchema = z.object({
   workerMinutes: z.number().int().min(1).max(600).default(25),

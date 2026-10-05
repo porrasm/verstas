@@ -49,7 +49,7 @@ export type Session = {
   model?: string;
   agents?: SessionAgents;
   repos: { name: string; sourcePath: string; branch: string; runBranch: string; baseCommit?: string }[];
-  attachments: { name: string; dir: string; bytes: number; skipped: string[] }[];
+  attachments: { name: string; dir: string; bytes: number; skipped: string[]; description?: string }[];
   allowlist: string[];
   packs: string[];
   caps: { workerMinutes: number; workerTurns: number; runTickets: number; budgetUsd: number; ticketAttempts: number; reviewer: boolean; resumeWorker?: boolean; leadMinutes?: number; leadTurns?: number };

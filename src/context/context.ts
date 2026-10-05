@@ -1,4 +1,4 @@
-import { capsSchema, type Session } from "../core/types.js";
+import { attachmentLines, capsSchema, type Session } from "../core/types.js";
 import type { Config } from "../config.js";
 import type { SetupScript } from "../scripts/library.js";
 import type { DockerRunner } from "../sandbox/docker.js";
@@ -102,7 +102,7 @@ export const buildContext = (i: ContextInput): string => {
     out.push(`- Name: ${s.name}`);
     if (s.goal) out.push(`- Goal: ${s.goal.replace(/\s+/g, " ").slice(0, 2000)}`);
     out.push(`- Repositories: ${s.repos.length ? s.repos.map((r) => `/workspace/${r.name} (branch ${r.branch})`).join(", ") : "none"}`);
-    out.push(`- Attachments: ${s.attachments.length ? s.attachments.map((a) => `/workspace/attachments/${a.dir}`).join(", ") : "none"}`);
+    out.push(`- Attachments:${s.attachments.length ? `\n${attachmentLines(s.attachments, "  ")}` : " none"}`);
     out.push(`- Network allowlist: ${s.allowlist.join(", ") || "none"}`);
     out.push(`- Setup scripts chosen: ${s.setupScripts.length ? s.setupScripts.map((x) => x.name).join(", ") : "none"}`);
     out.push(`- Caps per worker: ${s.caps.workerMinutes} min, ${s.caps.workerTurns} turns, ${s.caps.budgetUsd} USD; model ${s.model ?? "token default"}; reviewer ${s.caps.reviewer ? "on" : "off"}.`);

@@ -665,6 +665,20 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
     }),
   );
 
+  /** Your description of an attachment; empty clears it. Read by the workers of the next run. */
+  api.put(
+    "/sessions/:id/attachments/:dir",
+    wrap(async (req, res) => {
+      const { description } = z.object({ description: z.string().max(1000) }).parse(req.body);
+      const h = await d.hub.get(param(req, "id"));
+      const dir = param(req, "dir");
+      if (!h.session.attachments.some((a) => a.dir === dir)) throw Object.assign(new Error(`No attachment ${dir}`), { status: 404 });
+      const text = description.trim() || undefined;
+      await h.mutate((docs) => ({ next: { session: { ...docs.session, attachments: docs.session.attachments.map((a) => (a.dir === dir ? { ...a, description: text } : a)) } } }));
+      res.json({ ok: true, description: text ?? null });
+    }),
+  );
+
   api.delete(
     "/sessions/:id/attachments/:dir",
     wrap(async (req, res) => {

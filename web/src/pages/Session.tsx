@@ -751,6 +751,31 @@ const RepoSection = ({ env, bare }: { env: Env; bare?: boolean }) => {
   );
 };
 
+/** What an attachment is for, in your words; saved when the field loses focus or on Enter. */
+const AttachmentDescription = ({ value, disabled, onSave }: { value: string; disabled: boolean; onSave: (v: string) => Promise<unknown> }) => {
+  const [text, setText] = useState(value);
+  useEffect(() => setText(value), [value]);
+  const save = () => {
+    if (text.trim() !== value.trim()) void onSave(text).catch(() => setText(value));
+  };
+  return (
+    <input
+      value={text}
+      maxLength={1000}
+      disabled={disabled}
+      placeholder="What it is and what it is for, e.g. the spec; tickets cite its sections"
+      title="Every worker sees this next to the attachment's path, from the next run on."
+      onChange={(e) => setText(e.target.value)}
+      onBlur={save}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+        if (e.key === "Escape") setText(value);
+      }}
+      style={{ marginTop: 4, width: "100%" }}
+    />
+  );
+};
+
 /** Zips extracted into the workspace for the workers to read. */
 const AttachmentSection = ({ env }: { env: Env }) => {
   const { session, base, active, busy, act } = env;
@@ -767,9 +792,12 @@ const AttachmentSection = ({ env }: { env: Env }) => {
     <div className="small">
       <strong>Attachments</strong> <span className="muted">zips extracted into workspace/attachments: specs, designs, sample data</span>
       {session.attachments.map((a) => (
-        <div className="row" key={a.dir} style={{ justifyContent: "space-between", marginTop: 4 }}>
-          <span><strong>{a.dir}</strong> <span className="muted mono">{fmtBytes(a.bytes)}</span>{a.skipped.length ? <span className="muted"> · {a.skipped.length} skipped</span> : null}</span>
-          <button className="quiet sm" onClick={() => removeAttachment(a.dir)} disabled={busy || active}>remove</button>
+        <div key={a.dir} style={{ marginTop: 6 }}>
+          <div className="row" style={{ justifyContent: "space-between" }}>
+            <span><strong>{a.dir}</strong> <span className="muted mono">{fmtBytes(a.bytes)}</span>{a.skipped.length ? <span className="muted"> · {a.skipped.length} skipped</span> : null}</span>
+            <button className="quiet sm" onClick={() => removeAttachment(a.dir)} disabled={busy || active}>remove</button>
+          </div>
+          <AttachmentDescription value={a.description ?? ""} disabled={busy} onSave={(description) => act(() => api("PUT", `${base}/attachments/${encodeURIComponent(a.dir)}`, { description }))} />
         </div>
       ))}
       <input type="file" accept=".zip,application/zip" multiple onChange={(e) => { void addZips(e.target.files); e.target.value = ""; }} disabled={busy || active} style={{ marginTop: 6 }} />

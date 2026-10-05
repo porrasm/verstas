@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { verstasHome } from "../config.js";
-import type { Board, Session, Ticket } from "../core/types.js";
+import { attachmentLines, type Board, type Session, type Ticket } from "../core/types.js";
 import { NETWORK_PACKS } from "../network/packs.js";
 
 /**
@@ -21,7 +21,7 @@ board and the log later. Facts about this box:
   but are not in the workspace.
 - Repositories, fresh clones on branch \`verstas/${session.id}\`:
 ${session.repos.map((r) => `  - \`/workspace/${r.name}\` (from \`${r.branch}\`)`).join("\n") || "  - (none)"}
-- Attachments the user added: ${session.attachments.length ? session.attachments.map((a) => `\`/workspace/attachments/${a.dir}\``).join(", ") : "none"}.
+- Attachments the user added${session.attachments.length ? `, with what the user said they are:\n${attachmentLines(session.attachments, "  ")}` : ": none."}
 - Notes for future workers: \`/workspace/notes/\`. Read \`INDEX.md\` first;
   append what the next worker should know to \`learnings.md\`.
 - The environment: \`/workspace/notes/env.md\` says what is installed, which
@@ -218,7 +218,7 @@ ${session.requirements.trim() || "(none)"}
 
 # Repositories
 ${session.repos.map((r) => `- /workspace/${r.name} (branch ${r.branch})`).join("\n") || "- none"}
-
+${session.attachments.length ? `\n# Attachments (what the user said they are)\n${attachmentLines(session.attachments)}\n` : ""}
 # Board
 ${board.tickets.length ? board.tickets.map((t) => `- ${t.id} [${t.state}] ${t.title} (${t.kind}, ${t.size}${t.repo ? `, ${t.repo}` : ""})${t.spec ? `: ${t.spec.replace(/\s+/g, " ").slice(0, 300)}` : ""}`).join("\n") : "- empty"}
 ${answers.length ? `\n# Your earlier setup requests were answered\n${answers.map((a) => `- ${a}`).join("\n")}\n` : ""}
