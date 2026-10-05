@@ -93,11 +93,14 @@ Role: implementer. Definition of done for your ticket:
 5. You left notes for the next worker, who starts with a fresh context and knows only what is written down: a trap, a command, a decision, a slow test goes into /workspace/notes/learnings.md (one line each); a wrong line in brief.md or env.md gets fixed.
 Then reply with one line and stop. If you cannot finish within the caps, file the report with what is done and what is left; the harness will requeue the ticket if the reviewer thinks it is fixable.`,
     reviewer: `
-Role: reviewer. You did not write this change. Read the ticket, its acceptance criteria and the diff the prompt gives you, run the tests yourself, and decide. Your reply must start with exactly one of:
+Role: reviewer. You did not write this change. Two passes, both required.
+1. Acceptance: read the ticket and its criteria, run the tests and the commands the criteria name yourself, and check each criterion.
+2. Code: read every hunk of the diff, not only the tests. Look for a test that mirrors the implementation or a threshold tuned until a fixture passes; user input that can throw, recurse or grow memory without bound; a loop that allocates or does string work per element where the design asks for a hot path; a contract document (a DESIGN or README the repository treats as its spec) that the change contradicts or should have updated; copied code where a call would do; a decision the ticket did not ask for and the report does not mention.
+Name at least one concrete finding with file and line, or write "code pass: nothing found" and the number of hunks you read. A finding that does not block the ticket becomes a bug or followup ticket with \`board_create_ticket\`, and the verdict stays ok. Your reply must start with exactly one of:
 VERDICT: ok
 VERDICT: fixable
 VERDICT: blocked
-followed by your reasons in a few lines. "fixable" means another implementer attempt with your notes would likely finish it; "blocked" means the ticket as written cannot be done or the change is harmful. Add specific notes with \`board_add_note\`. Do not fix the code yourself.`,
+followed by your reasons in a few lines, the code pass included. "fixable" means another implementer attempt with your notes would likely finish it; "blocked" means the ticket as written cannot be done or the change is harmful. Add specific notes with \`board_add_note\`. Do not fix the code yourself.`,
     setup: `
 Role: setup (the environment and the project brief). No ticket work.
 
@@ -208,7 +211,7 @@ ${diffStat || "(empty: no files changed. That is fine when the ticket's delivera
 ${diff.length > 60_000 ? diff.slice(0, 60_000) + "\n… (truncated; read the files for the rest)" : diff}
 \`\`\`
 
-Run the tests yourself if the gates did not. Reply starting with VERDICT: ok | fixable | blocked.`;
+Run the tests yourself if the gates did not. Do the code pass over every hunk above (read the files when the diff is truncated). Reply starting with VERDICT: ok | fixable | blocked.`;
 
 export const setupPrompt = (session: Session, board: Board, answers: string[], mode: "setup" | "brief"): string => `${mode === "brief" ? "# Brief only\nRefresh /workspace/notes/brief.md (and env.md if it is out of date) against the repositories and the board as they are today. Install nothing unless a command you need to verify is missing. Still reply with a SETUP line.\n\n" : ""}# Set up the environment
 Make this box a sensible place to develop the repositories below: their toolchains at the versions they pin, their dependencies installed from their lockfiles, the services their tests need, their own build and test commands verified by running them, and env.md written for the workers. Work out what is needed from the repositories and the board; do not implement any ticket, and do not install things only one later ticket would need.
