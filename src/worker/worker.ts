@@ -80,10 +80,15 @@ export const runJob = async (job: Job): Promise<number> => {
   // The running totals the agent reads through the board server's `budget`
   // tool. Context is the last turn's input tokens: what the model was sent.
   const budget = { turns: 0, seconds: 0, contextTokens: 0, outputTokens: 0, caps: job.caps, resumed: Boolean(job.agentSession?.resume) };
+  // One write at a time, each to a temporary file renamed over the last, so
+  // the board server never reads a half-written or interleaved file.
+  let budgetWrites: Promise<void> = Promise.resolve();
   const writeBudget = () => {
-    if (!job.budgetFile) return;
+    const file = job.budgetFile;
+    if (!file) return;
     budget.seconds = Math.round((Date.now() - t0) / 1000);
-    void fs.writeFile(job.budgetFile, JSON.stringify(budget)).catch(() => undefined);
+    const text = JSON.stringify(budget);
+    budgetWrites = budgetWrites.then(() => fs.writeFile(`${file}.tmp`, text).then(() => fs.rename(`${file}.tmp`, file))).catch(() => undefined);
   };
   writeBudget();
   const env = { ...spawned.env, VERSTAS_ROLE: job.role, ...(job.budgetFile ? { VERSTAS_BUDGET_FILE: job.budgetFile } : {}) };
@@ -153,6 +158,7 @@ export const runJob = async (job: Job): Promise<number> => {
   }
   const code = await exited;
   clearTimeout(timer);
+  await budgetWrites;
   if (!result) result = translator.end();
 
   const after = await driver.finish?.(job).catch(() => undefined);

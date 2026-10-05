@@ -236,7 +236,6 @@ test("worker: the budget file tracks turns and the context size, and the agent i
     expect(process.env.VERSTAS_ROLE).toBe("implementer");
     if (savedEnv.role === undefined) delete process.env.VERSTAS_ROLE; else process.env.VERSTAS_ROLE = savedEnv.role;
     if (savedEnv.budget === undefined) delete process.env.VERSTAS_BUDGET_FILE; else process.env.VERSTAS_BUDGET_FILE = savedEnv.budget;
-    await new Promise((r) => setTimeout(r, 50)); // the last write is fire-and-forget
     const budget = JSON.parse(await fs.readFile(budgetFile, "utf8")) as Record<string, unknown>;
     expect(budget).toMatchObject({ turns: 2, contextTokens: 4010, outputTokens: 10, caps: { turns: 20 }, resumed: false });
   } finally {

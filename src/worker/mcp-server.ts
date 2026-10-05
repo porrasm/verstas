@@ -51,7 +51,13 @@ export const readBudget = async (file = process.env.VERSTAS_BUDGET_FILE ?? ""): 
   if (!file) return { available: false, note: "This agent does not report a budget." };
   const raw = await fs.readFile(file, "utf8").catch(() => "");
   if (!raw) return { available: false, note: "No totals yet." };
-  const b = JSON.parse(raw) as { turns: number; seconds: number; contextTokens: number; outputTokens: number; caps: { minutes: number; turns: number; budgetUsd: number }; resumed?: boolean; control?: unknown };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { available: false, note: "The totals are being written; ask again." };
+  }
+  const b = parsed as { turns: number; seconds: number; contextTokens: number; outputTokens: number; caps: { minutes: number; turns: number; budgetUsd: number }; resumed?: boolean; control?: unknown };
   return {
     available: true,
     turns: b.turns,
