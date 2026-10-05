@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   api,
   type RemoteSettings,
@@ -251,7 +251,40 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
   const lastActivity = lastEventAt && lastEventAt > (totals?.lastActivityAt ?? "") ? lastEventAt : totals?.lastActivityAt;
   const pausedBanner = !active && run && (run.state === "paused" || run.state === "halted" || run.state === "failed") && session.state !== "finished";
   const initialized = isInitialized(session);
-  const readyCount = counts.ready ?? 0;
+  /** The setup worker left the box short of ready and nobody accepted it: the one state that needs a decision before anything else. */
+  const initNeeds = !initialized && !active && session.readiness?.verdict === "needs" && !session.readiness.confirmedAt;
+  const saveSettings = async (patch: SettingsPatch) => {
+    if (patch.allowlist || patch.packs) await api("PUT", `${base}/allowlist`, { allowlist: patch.allowlist, packs: patch.packs });
+    if (patch.caps || patch.limits) await api("PUT", `${base}/caps`, { caps: patch.caps, limits: patch.limits });
+    await refreshRun();
+  };
+  const bodyProps: BodyProps = {
+    session,
+    board,
+    inbox,
+    base,
+    active,
+    busy,
+    run,
+    runs,
+    counts,
+    ticketId,
+    events,
+    eventsRun,
+    pickedRun,
+    setPickedRun,
+    logTicket,
+    setLogTicket,
+    openTicket,
+    tryAct,
+    refreshRun,
+    onImport: () => setImportText(""),
+    onNewTicket: () => setNewTicket(true),
+    onExport: doExport,
+    onPlan: () => setPlanning(true),
+    onInit: init,
+    saveSettings,
+  };
 
   return (
     <div className="stack" style={{ gap: 16 }}>
@@ -260,39 +293,41 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
           <h1>{session.name}</h1>
           <span className={`pill ${status.tone}`}>{active ? <span className="dot run" /> : null}{status.label}</span>
           <div className="actions">
-            {!active && !initialized && <button className="pri" onClick={() => init(false)} disabled={Boolean(busy)} title="Clone the repositories, create the container, run the recipes and the setup worker">{session.readiness ? "Initialize again" : "Initialize"}</button>}
-            {!active && !initialized && <button onClick={() => init(true)} disabled={Boolean(busy) || !readyCount} title={readyCount ? "Initialize, and work through the ready tickets when it succeeds" : "No ready tickets to start on"}>Initialize and start</button>}
-            {!active && initialized && <button className="pri" onClick={() => runAction("start")} disabled={Boolean(busy)} title="Work through the ready tickets">Start run</button>}
-            {!active && initialized && <button onClick={() => setPlanning(true)} disabled={Boolean(busy)} title="Describe what to build; a planner worker turns it into backlog tickets">Plan tickets…</button>}
+            {initialized && !active && <button className="pri" onClick={() => runAction("start")} disabled={Boolean(busy)} title="Work through the ready tickets">Start run</button>}
+            {initialized && !active && <button onClick={() => setPlanning(true)} disabled={Boolean(busy)} title="Describe what to build; a planner worker turns it into backlog tickets">Plan tickets…</button>}
             {active && <button onClick={() => runAction("pause")} disabled={Boolean(busy)} title="Finish the current ticket, then stop">Pause after ticket</button>}
             {active && <button className="warn" onClick={() => runAction("stop")} disabled={Boolean(busy)} title="Stop the worker now; its ticket goes back to ready">Stop now</button>}
-            <button onClick={() => setNewTicket(true)} disabled={Boolean(busy)} title="Write a ticket by hand">New ticket</button>
+            {initialized && <button onClick={() => setNewTicket(true)} disabled={Boolean(busy)} title="Write a ticket by hand">New ticket</button>}
             <MoreMenu
               items={[
                 { label: "Import board…", onClick: () => setImportText("") },
                 { label: "Export board (JSON)", href: `/api${base}/board/export` },
-                { label: active ? "Export bundles (stop the run first)" : "Export bundles…", onClick: doExport, disabled: active },
-                { label: sandbox?.container === "running" ? "Stop container" : "Stop container (not running)", onClick: () => runSandbox("stop"), disabled: active || sandbox?.container !== "running" },
-                { label: "Remove sandbox (keeps the home volume)", onClick: () => runSandbox("remove"), disabled: active || !sandbox || sandbox.container === "absent" },
+                ...(initialized
+                  ? [
+                      { label: active ? "Export bundles (stop the run first)" : "Export bundles…", onClick: doExport, disabled: active },
+                      { label: sandbox?.container === "running" ? "Stop container" : "Stop container (not running)", onClick: () => runSandbox("stop"), disabled: active || sandbox?.container !== "running" },
+                      { label: "Remove sandbox (keeps the home volume)", onClick: () => runSandbox("remove"), disabled: active || !sandbox || sandbox.container === "absent" },
+                    ]
+                  : []),
               ]}
             />
           </div>
         </div>
         <div className="facts">
-          <span><b>{done}/{board.tickets.length}</b> done</span>
-          <span><b>{fmtUsd(totals?.usd ?? 0)}</b> spent{totals && totals.runs > 1 ? ` over ${totals.runs} runs` : ""}{active && run?.cost.usd ? ` · ${fmtUsd(run.cost.usd)} this run` : ""}</span>
+          {initialized && <span><b>{done}/{board.tickets.length}</b> done</span>}
+          {initialized && <span><b>{fmtUsd(totals?.usd ?? 0)}</b> spent{totals && totals.runs > 1 ? ` over ${totals.runs} runs` : ""}{active && run?.cost.usd ? ` · ${fmtUsd(run.cost.usd)} this run` : ""}</span>}
           {run && active && <span>running for <b>{fmtDuration(run.startedAt, undefined, now)}</b></span>}
-          {lastActivity && !active && <span>last activity <b title={fmtDateTime(lastActivity)}>{fmtAgo(lastActivity, now)}</b></span>}
+          {initialized && lastActivity && !active && <span>last activity <b title={fmtDateTime(lastActivity)}>{fmtAgo(lastActivity, now)}</b></span>}
           <span>created <b title={fmtDateTime(session.createdAt)}>{fmtAgo(session.createdAt, now)}</b></span>
-          <span className={sb.tone === "good" ? "ok" : ""}>{sb.text}</span>
-          <span>{session.repos.length ? <>repos <span className="mono">{session.repos.map((r) => r.name).join(", ")}</span></> : "no repositories"}</span>
+          {initialized && <span className={sb.tone === "good" ? "ok" : ""}>{sb.text}</span>}
+          {initialized && <span>{session.repos.length ? <>repos <span className="mono">{session.repos.map((r) => r.name).join(", ")}</span></> : "no repositories"}</span>}
           {dir && <SessionDir dir={dir} />}
-          <AgentOptionsButton compact agents={session.agents ?? {}} legacyModel={session.model} reviewerOn={session.caps.reviewer} title="Applies to the next worker that starts; a running worker keeps its agent" onChange={(agents) => tryAct("agents", () => api("PUT", `${base}/caps`, { agents }))} />
+          {initialized && <AgentOptionsButton compact agents={session.agents ?? {}} legacyModel={session.model} reviewerOn={session.caps.reviewer} title="Applies to the next worker that starts; a running worker keeps its agent" onChange={(agents) => tryAct("agents", () => api("PUT", `${base}/caps`, { agents }))} />}
           <NotifyToggle />
           <RemoteToggle session={session} onSet={(remote) => tryAct("remote", () => api("PUT", `${base}/remote`, { remote }))} />
           <span className={live ? "" : "err"} title={live ? "Live updates connected" : "Reconnecting to the host app"}><span className={`dot ${live ? "good" : "bad"}`} /> {live ? "live" : "reconnecting…"}</span>
         </div>
-        {board.tickets.length > 0 && <ProgressStrip counts={counts} total={board.tickets.length} />}
+        {initialized && board.tickets.length > 0 && <ProgressStrip counts={counts} total={board.tickets.length} />}
       </header>
 
       {pausedBanner && run && (
@@ -300,7 +335,7 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
           <strong>Run {run.id} {run.state}</strong>
           <span>{run.pauseReason ? PAUSE_REASON[run.pauseReason] ?? run.pauseReason : ""}{run.resumeAt ? ` · resumes ${fmtAgo(run.resumeAt, now).replace(" ago", "")} (${fmtDateTime(run.resumeAt)})` : ""}</span>
           {run.endedAt && <span className="muted">ended {fmtAgo(run.endedAt, now)}</span>}
-          <button className="pri sm end" onClick={() => runAction("start")} disabled={Boolean(busy)}>Resume</button>
+          {initialized && <button className="pri sm end" onClick={() => runAction("start")} disabled={Boolean(busy)}>Resume</button>}
         </div>
       )}
       {err && <div className="banner warn"><span>{err}</span><button className="quiet sm end" onClick={() => setErr("")}>Dismiss</button></div>}
@@ -316,6 +351,8 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
           </div>
         </section>
       )}
+
+      {initNeeds && <InitNeedsCard session={session} now={now} busy={Boolean(busy)} onInit={() => init(false)} onAccept={() => tryAct("accepting", () => api("POST", `${base}/setup/confirm`, { start: false }))} />}
 
       {exportInfo && (
         <section className="card stack tight">
@@ -354,47 +391,7 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
         />
       )}
 
-      <div className="sess-body">
-        <div className="main">
-          {board.tickets.length === 0 ? (
-            <div className="card empty-state">
-              <h3>No tickets yet</h3>
-              <p>Paste a board, write tickets by hand, or describe what to build and let the planner draft them{initialized ? "" : " (once the session is initialized: the planner reads the repositories)"}.</p>
-              <div className="row">
-                <button onClick={() => setImportText("")}>Import board…</button>
-                <button className="pri" onClick={() => setPlanning(true)} disabled={active || Boolean(busy) || !initialized} title={initialized ? "" : "Initialize the session first"}>Plan tickets…</button>
-              </div>
-            </div>
-          ) : (
-            <BoardView board={board} inbox={inbox} run={run} active={active} openId={ticketId} onOpen={openTicket} onRetry={(tid) => tryAct("retrying", () => api("POST", `${base}/tickets/${tid}/state`, { state: "ready" }))} onApprove={(tid) => tryAct("approving", () => api("POST", `${base}/tickets/${tid}/state`, { state: "ready", note: "Approved" }))} onShowLog={setLogTicket} />
-          )}
-          <LogPanel
-            events={events}
-            runs={runs}
-            liveRun={active ? run : undefined}
-            shownRun={eventsRun}
-            picked={pickedRun}
-            onPick={setPickedRun}
-            ticket={logTicket}
-            onTicket={setLogTicket}
-            tickets={board.tickets.map((t) => t.id)}
-          />
-        </div>
-        <aside className="side">
-          <InboxPanel inbox={inbox} onRead={(mid) => tryAct("read", () => api("POST", `${base}/messages/${mid}/read`))} onPromote={(iid) => tryAct("promote", () => api("POST", `${base}/ideas/${iid}/promote`))} onOpenTicket={openTicket} />
-          <EnvironmentPanel session={session} base={base} active={active} onDone={refreshRun} />
-          <WorkPanel session={session} base={base} active={active} done={done} onExport={doExport} />
-          <PromptBox session={session} base={base} active={active} onDone={refreshRun} />
-          <SessionSettings
-            session={session}
-            onSave={async (patch) => {
-              if (patch.allowlist || patch.packs) await api("PUT", `${base}/allowlist`, { allowlist: patch.allowlist, packs: patch.packs });
-              if (patch.caps || patch.limits) await api("PUT", `${base}/caps`, { caps: patch.caps, limits: patch.limits });
-              await refreshRun();
-            }}
-          />
-        </aside>
-      </div>
+      {initialized ? <RunBody {...bodyProps} /> : <PlanBody {...bodyProps} />}
 
       {ticketId && !ticket && <div className="banner warn"><span>No ticket {ticketId} on this board.</span><button className="quiet sm end" onClick={() => openTicket(null)}>Close</button></div>}
       {ticket && (
@@ -416,6 +413,173 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
   );
 };
 
+// --- the two bodies: a plan to configure, a box to oversee -----------------------
+
+/** What both bodies need from the page: the loaded session, the log state, and the page's actions. */
+type BodyProps = {
+  session: Session;
+  board: Board;
+  inbox: Inbox;
+  base: string;
+  active: boolean;
+  busy: string;
+  run?: Run;
+  runs: Run[];
+  counts: Record<string, number>;
+  ticketId: string | null;
+  events: VEvent[];
+  eventsRun: number | null;
+  pickedRun: number | null;
+  setPickedRun: (r: number | null) => void;
+  logTicket: string;
+  setLogTicket: (t: string) => void;
+  openTicket: (tid: string | null) => void;
+  tryAct: (label: string, fn: () => Promise<unknown>) => Promise<unknown>;
+  refreshRun: () => Promise<void>;
+  onImport: () => void;
+  onNewTicket: () => void;
+  onExport: () => void;
+  onPlan: () => void;
+  onInit: (start: boolean) => void;
+  saveSettings: (patch: SettingsPatch) => Promise<void>;
+};
+
+const useBoardActions = (p: BodyProps) => ({
+  onRetry: (tid: string) => void p.tryAct("retrying", () => api("POST", `${p.base}/tickets/${tid}/state`, { state: "ready" })),
+  onApprove: (tid: string) => void p.tryAct("approving", () => api("POST", `${p.base}/tickets/${tid}/state`, { state: "ready", note: "Approved" })),
+});
+
+const SessionLog = (p: BodyProps) => (
+  <LogPanel
+    events={p.events}
+    runs={p.runs}
+    liveRun={p.active ? p.run : undefined}
+    shownRun={p.eventsRun}
+    picked={p.pickedRun}
+    onPick={p.setPickedRun}
+    ticket={p.logTicket}
+    onTicket={p.setLogTicket}
+    tickets={p.board.tickets.map((t) => t.id)}
+  />
+);
+
+/**
+ * The box exists: the board and the live log in front, the inbox and the
+ * work beside them. The environment and the settings fold away; they
+ * still apply to the next worker.
+ */
+const RunBody = (p: BodyProps) => {
+  const { session, board, inbox, base, active, run, counts } = p;
+  const env = useEnvironment(session, base, active, p.refreshRun);
+  const { onRetry, onApprove } = useBoardActions(p);
+  return (
+    <div className="sess-body">
+      <div className="main">
+        {board.tickets.length === 0 ? (
+          <div className="card empty-state">
+            <h3>No tickets yet</h3>
+            <p>Paste a board, write tickets by hand, or describe what to build and let the planner draft them from the repositories.</p>
+            <div className="row">
+              <button onClick={p.onImport}>Import board…</button>
+              <button className="pri" onClick={p.onPlan} disabled={active || Boolean(p.busy)}>Plan tickets…</button>
+            </div>
+          </div>
+        ) : (
+          <BoardView board={board} inbox={inbox} run={run} active={active} openId={p.ticketId} onOpen={p.openTicket} onRetry={onRetry} onApprove={onApprove} onShowLog={p.setLogTicket} />
+        )}
+        <SessionLog {...p} />
+      </div>
+      <aside className="side">
+        <InboxPanel inbox={inbox} onRead={(mid) => void p.tryAct("read", () => api("POST", `${base}/messages/${mid}/read`))} onPromote={(iid) => void p.tryAct("promote", () => api("POST", `${base}/ideas/${iid}/promote`))} onOpenTicket={p.openTicket} />
+        <WorkPanel session={session} base={base} active={active} done={counts.done ?? 0} onExport={p.onExport} />
+        <PromptBox session={session} base={base} active={active} onDone={p.refreshRun} />
+        <EnvironmentPanel env={env} />
+        <SessionSettings session={session} onSave={p.saveSettings} />
+      </aside>
+    </div>
+  );
+};
+
+/**
+ * The session is a plan: a setup sheet, section by section in the order
+ * that matters at initialization, with the launch panel beside it. While
+ * the box is being made the sheet gives way to the log.
+ */
+const PlanBody = (p: BodyProps) => {
+  const { session, board, inbox, base, active, run, counts } = p;
+  const env = useEnvironment(session, base, active, p.refreshRun);
+  const { onRetry, onApprove } = useBoardActions(p);
+  const total = board.tickets.length;
+  const ready = counts.ready ?? 0;
+  const worker = session.setupMode !== "skip";
+  return (
+    <div className="sess-body">
+      <div className="main">
+        {active ? (
+          <>
+            <InitProgress session={session} />
+            <SessionLog {...p} />
+          </>
+        ) : (
+          <>
+            <section className="card stack" style={{ gap: 10 }}>
+              <SheetHead title="Repositories" mark={session.repos.length ? `${session.repos.length} to clone` : "none yet"} tone={session.repos.length ? "good" : "warn"} />
+              <p className="lead" style={{ margin: 0 }}>Cloned fresh at initialization, at the branch chosen here. The workers commit on a branch of their own; Apply brings it back to your checkout.</p>
+              <RepoSection env={env} bare />
+            </section>
+
+            <section className="stack tight">
+              <SheetHead title="Board" mark={total ? `${total} ticket${total === 1 ? "" : "s"} · ${ready} ready` : "empty"} tone={ready ? "good" : total ? "info" : "quiet"}>
+                <button className="sm" onClick={p.onImport} disabled={Boolean(p.busy)}>Import board…</button>
+                <button className="sm" onClick={p.onNewTicket} disabled={Boolean(p.busy)}>New ticket</button>
+              </SheetHead>
+              {total === 0 ? (
+                <div className="card empty-state">
+                  <h3>No tickets yet</h3>
+                  <p>Paste a board or write tickets by hand. Or initialize first and let the planner draft them: it reads the repositories, so it needs the box.</p>
+                </div>
+              ) : (
+                <BoardView board={board} inbox={inbox} run={run} active={active} openId={p.ticketId} onOpen={p.openTicket} onRetry={onRetry} onApprove={onApprove} onShowLog={p.setLogTicket} />
+              )}
+            </section>
+
+            <section className="card stack" style={{ gap: 10 }}>
+              <SheetHead title="Environment" mark={worker ? `setup worker · ${session.setupScripts.length} recipe${session.setupScripts.length === 1 ? "" : "s"}` : `setup skipped · ${session.setupScripts.length} recipe${session.setupScripts.length === 1 ? "" : "s"}`} tone="quiet" />
+              <SetupSection env={env} />
+              <Divider />
+              <RecipeSection env={env} />
+              <Divider />
+              <AttachmentSection env={env} />
+              {hasNotes(env) && (
+                <>
+                  <Divider />
+                  <div className="muted small">Left from an earlier box; the next setup worker rewrites them.</div>
+                  <NotesSection env={env} />
+                </>
+              )}
+            </section>
+
+            <section className="card stack" style={{ gap: 10 }}>
+              <SheetHead title="Network" mark={session.packs.length ? `${session.packs.length} pack${session.packs.length === 1 ? "" : "s"}` : "agents' backends only"} tone="quiet" />
+              <SessionSettings session={session} onSave={p.saveSettings} part="network" />
+            </section>
+
+            <section className="card stack" style={{ gap: 10 }}>
+              <SheetHead title="Agents, caps and limits" mark="every worker" tone="quiet" />
+              <AgentOptionsButton agents={session.agents ?? {}} legacyModel={session.model} reviewerOn={session.caps.reviewer} onChange={(agents) => void p.tryAct("agents", () => api("PUT", `${base}/caps`, { agents }))} />
+              <SessionSettings session={session} onSave={p.saveSettings} part="caps" />
+            </section>
+
+            {p.runs.length > 0 && <SessionLog {...p} />}
+          </>
+        )}
+      </div>
+      <aside className="side sticky">
+        <LaunchPanel env={env} counts={counts} total={total} busy={Boolean(p.busy)} onInit={p.onInit} />
+      </aside>
+    </div>
+  );
+};
 // --- taking the work back --------------------------------------------------------
 
 const WorkPanel = ({ session, base, active, done, onExport }: { session: Session; base: string; active: boolean; done: number; onExport: () => void }) => {
@@ -473,31 +637,29 @@ const WorkPanel = ({ session, base, active, done, onExport }: { session: Session
 
 type SetupInfo = { requirements: string; readiness: Readiness | null; env: string; recipe: string; recipeLog: string; logs: Record<string, string> };
 type RepoChoice = { target: string; path: string; branches: string[]; current: string };
+type Brief = { text: string; updatedAt: string | null; words: number };
 
 /**
- * Everything the box is made of, and the Initialize step that makes it.
- * Before initialization the repositories can change; everything else can
- * change at any time (recipes re-run on request, instructions apply to the
- * next setup worker).
+ * Everything the box is made of, shared by the sections below. While the
+ * session is a plan the sections are cards of the setup sheet; once the
+ * box exists they fold into one Environment panel in the sidebar. Before
+ * initialization the repositories can change; everything else can change
+ * at any time (recipes re-run on request, instructions apply to the next
+ * setup worker).
  */
-const EnvironmentPanel = ({ session, base, active, onDone }: { session: Session; base: string; active: boolean; onDone: () => Promise<void> }) => {
+const useEnvironment = (session: Session, base: string, active: boolean, onDone: () => Promise<void>) => {
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
-  const [openLog, setOpenLog] = useState<string | null>(null);
   const [info, setInfo] = useState<SetupInfo | null>(null);
-  const [brief, setBrief] = useState<{ text: string; updatedAt: string | null; words: number } | null>(null);
-  const [show, setShow] = useState<"" | "brief" | "env" | "recipe" | "sudo" | "checks">("");
+  const [brief, setBrief] = useState<Brief | null>(null);
   const [sudo, setSudo] = useState<{ count: number; commands: string[] } | null>(null);
-  const [editing, setEditing] = useState<string | null>(null);
-  const [recipeName, setRecipeName] = useState<string | null>(null);
   const [library, setLibrary] = useState<SetupScript[]>([]);
   const [choices, setChoices] = useState<RepoChoice[]>([]);
-  const [adding, setAdding] = useState<{ target: string; branch: string; as: string } | null>(null);
   const initialized = isInitialized(session);
   const now = useNow();
   useEffect(() => {
     api<SetupInfo>("GET", `${base}/setup`).then(setInfo).catch(() => setInfo(null));
-    api<{ text: string; updatedAt: string | null; words: number }>("GET", `${base}/brief`).then(setBrief).catch(() => setBrief(null));
+    api<Brief>("GET", `${base}/brief`).then(setBrief).catch(() => setBrief(null));
     api<{ count: number; commands: string[] }>("GET", `${base}/sudo-log`).then(setSudo).catch(() => setSudo(null));
   }, [base, session.readiness?.at, session.readiness?.confirmedAt, session.requirements, session.initializedAt, active]);
   useEffect(() => {
@@ -529,12 +691,25 @@ const EnvironmentPanel = ({ session, base, active, onDone }: { session: Session;
       await onDone();
     }
   };
-  const saveInstructions = () =>
-    act(async () => {
-      await api("PUT", `${base}/requirements`, { requirements: editing ?? "" });
-      setEditing(null);
-    }, initialized ? "Saved. They apply to the next environment check." : "Saved. They apply when you initialize.");
-  const setMode = (setupMode: "agentic" | "skip") => act(() => api("PUT", `${base}/requirements`, { setupMode }));
+  const copyContext = async () => {
+    const md = await fetch(`/api/context?tail=free&session=${encodeURIComponent(session.id)}`).then((r) => r.text());
+    await copyText(md);
+    setMsg("Session context copied for an assistant.");
+  };
+  return { session, base, active, busy, msg, info, brief, sudo, library, choices, initialized, now, act, copyContext };
+};
+type Env = ReturnType<typeof useEnvironment>;
+
+/** The repositories: added and removed while the session is a plan, fresh clones once it is a box. */
+const RepoSection = ({ env, bare }: { env: Env; bare?: boolean }) => {
+  const { session, base, active, busy, choices, initialized, act } = env;
+  const [adding, setAdding] = useState<{ target: string; branch: string; as: string } | null>(null);
+  const free = choices.filter((c) => !session.repos.some((x) => x.name === c.target && x.sourcePath === c.path));
+  const startAdd = () => {
+    const c = free[0];
+    if (c) setAdding({ target: c.target, branch: c.current, as: "" });
+  };
+  const chosen = adding ? choices.find((c) => c.target === adding.target) : undefined;
   const addRepo = () =>
     adding &&
     act(async () => {
@@ -542,6 +717,43 @@ const EnvironmentPanel = ({ session, base, active, onDone }: { session: Session;
       setAdding(null);
     }, "Repository added; it is cloned when you initialize.");
   const removeRepo = (name: string) => act(() => api("DELETE", `${base}/repos/${encodeURIComponent(name)}`));
+  return (
+    <div className="small">
+      {!bare && <><strong>Repositories</strong> <span className="muted">{initialized ? "fresh clones under /workspace" : "cloned fresh at initialization, at the branch chosen here"}</span></>}
+      {session.repos.length === 0 && <div className="muted" style={{ marginTop: 4 }}>None yet{initialized ? "" : ": add the ones the tickets touch. Without one the workers have nothing to change"}.</div>}
+      {session.repos.map((x) => (
+        <div className="row" key={x.name} style={{ justifyContent: "space-between", marginTop: 4 }}>
+          <span><strong>{x.name}</strong> <span className="muted mono">{x.branch}</span> <span className="muted mono" title={x.sourcePath}>{x.sourcePath.replace(/^\/Users\/[^/]+/, "~")}</span>{x.baseCommit ? <span className="muted mono"> · {x.baseCommit.slice(0, 7)}</span> : null}</span>
+          {!initialized && <button className="quiet sm" onClick={() => removeRepo(x.name)} disabled={busy || active}>remove</button>}
+        </div>
+      ))}
+      {!initialized && adding === null && free.length > 0 && <button className="sm" style={{ marginTop: 6 }} onClick={startAdd} disabled={busy || active}>Add repository</button>}
+      {!initialized && adding === null && free.length === 0 && choices.length === 0 && <div className="muted" style={{ marginTop: 4 }}>No work targets: add repositories in <a href="#/settings">Settings</a>.</div>}
+      {adding && (
+        <div className="stack" style={{ gap: 6, marginTop: 6 }}>
+          <div className="row">
+            <select value={adding.target} onChange={(e) => { const c = choices.find((x) => x.target === e.target.value); setAdding({ target: e.target.value, branch: c?.current ?? "", as: "" }); }}>
+              {free.concat(chosen && !free.includes(chosen) ? [chosen] : []).map((c) => <option key={c.target} value={c.target}>{c.target}</option>)}
+            </select>
+            <select value={adding.branch} onChange={(e) => setAdding({ ...adding, branch: e.target.value })}>
+              {(chosen?.branches ?? []).map((b) => <option key={b} value={b}>{b}</option>)}
+            </select>
+            <input value={adding.as} onChange={(e) => setAdding({ ...adding, as: e.target.value })} placeholder={`as ${adding.target}`} title="Directory name under /workspace, when it should differ from the target name" style={{ maxWidth: 160 }} />
+          </div>
+          <div className="row">
+            <button className="pri sm" onClick={addRepo} disabled={busy || !adding.branch}>Add</button>
+            <button className="sm" onClick={() => setAdding(null)}>Cancel</button>
+            <span className="muted">{chosen?.path.replace(/^\/Users\/[^/]+/, "~")}</span>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+/** Zips extracted into the workspace for the workers to read. */
+const AttachmentSection = ({ env }: { env: Env }) => {
+  const { session, base, active, busy, act } = env;
   const addZips = async (files: FileList | null) => {
     if (!files?.length) return;
     await act(async () => {
@@ -551,149 +763,112 @@ const EnvironmentPanel = ({ session, base, active, onDone }: { session: Session;
     }, "Attachments extracted into workspace/attachments.");
   };
   const removeAttachment = (dir: string) => act(() => api("DELETE", `${base}/attachments/${encodeURIComponent(dir)}`));
-  const setRecipes = (names: string[]) => act(() => api("PUT", `${base}/recipes`, { names }), initialized ? "Recipes saved; press Re-run recipes to apply them to this box." : "Recipes saved; they run when the container is created.");
-  const toggle = (k: typeof show) => setShow(show === k ? "" : k);
-  const copyContext = async () => {
-    const md = await fetch(`/api/context?tail=free&session=${encodeURIComponent(session.id)}`).then((r) => r.text());
-    await copyText(md);
-    setMsg("Session context copied for an assistant.");
-  };
-  const r = session.readiness;
-  const picked = new Set(session.setupScripts.map((sc) => sc.name));
-  const free = choices.filter((c) => !session.repos.some((x) => x.name === c.target && x.sourcePath === c.path));
-  const startAdd = () => {
-    const c = free[0];
-    if (c) setAdding({ target: c.target, branch: c.current, as: "" });
-  };
-  const chosen = adding ? choices.find((c) => c.target === adding.target) : undefined;
   return (
-    <section className="card stack" style={{ gap: 10 }}>
-      <div className="row" style={{ justifyContent: "space-between" }}>
-        <h3>Environment</h3>
-        <button className="quiet sm" onClick={copyContext} title="Markdown describing this box and session, to paste into any assistant">Copy context for an LLM</button>
-      </div>
-
-      <div className="small">
-        {initialized ? (
-          <>
-            <span className="dot good" /> <strong>Initialized</strong> <span className="muted" title={fmtDateTime(session.initializedAt!)}>{fmtAgo(session.initializedAt!, now)}</span>{" "}
-            <ConfirmButton className="quiet sm" label="Reset environment" confirm="Remove the container, its home volume, the snapshot and the clones? The board, notes and settings stay; initialize again afterwards." onConfirm={() => void act(() => api("POST", `${base}/reset`), "Reset. The session is a plan again.")} disabled={busy || active} />
-          </>
-        ) : (
-          <>
-            <span className="dot" /> <strong>Not initialized</strong> <span className="muted">a plan: pressing Initialize clones the repositories, creates the container, runs the recipes{session.setupMode === "skip" ? "" : " and a setup worker"}.</span>
-          </>
-        )}
-      </div>
-
-      <div className="small" style={{ borderTop: "1px solid var(--line)", paddingTop: 8 }}>
-        <strong>Repositories</strong> <span className="muted">{initialized ? "fresh clones under /workspace" : "cloned fresh at initialization, at the branch chosen here"}</span>
-        {session.repos.length === 0 && <div className="muted" style={{ marginTop: 4 }}>None yet{initialized ? "" : ": add the ones the tickets touch"}.</div>}
-        {session.repos.map((x) => (
-          <div className="row" key={x.name} style={{ justifyContent: "space-between", marginTop: 4 }}>
-            <span><strong>{x.name}</strong> <span className="muted mono">{x.branch}</span> <span className="muted mono" title={x.sourcePath}>{x.sourcePath.replace(/^\/Users\/[^/]+/, "~")}</span>{x.baseCommit ? <span className="muted mono"> · {x.baseCommit.slice(0, 7)}</span> : null}</span>
-            {!initialized && <button className="quiet sm" onClick={() => removeRepo(x.name)} disabled={busy || active}>remove</button>}
-          </div>
-        ))}
-        {!initialized && adding === null && free.length > 0 && <button className="sm" style={{ marginTop: 6 }} onClick={startAdd} disabled={busy || active}>Add repository</button>}
-        {!initialized && adding === null && free.length === 0 && choices.length === 0 && <div className="muted" style={{ marginTop: 4 }}>No work targets: add repositories in <a href="#/settings">Settings</a>.</div>}
-        {adding && (
-          <div className="stack" style={{ gap: 6, marginTop: 6 }}>
-            <div className="row">
-              <select value={adding.target} onChange={(e) => { const c = choices.find((x) => x.target === e.target.value); setAdding({ target: e.target.value, branch: c?.current ?? "", as: "" }); }}>
-                {free.concat(chosen && !free.includes(chosen) ? [chosen] : []).map((c) => <option key={c.target} value={c.target}>{c.target}</option>)}
-              </select>
-              <select value={adding.branch} onChange={(e) => setAdding({ ...adding, branch: e.target.value })}>
-                {(chosen?.branches ?? []).map((b) => <option key={b} value={b}>{b}</option>)}
-              </select>
-              <input value={adding.as} onChange={(e) => setAdding({ ...adding, as: e.target.value })} placeholder={`as ${adding.target}`} title="Directory name under /workspace, when it should differ from the target name" style={{ maxWidth: 160 }} />
-            </div>
-            <div className="row">
-              <button className="pri sm" onClick={addRepo} disabled={busy || !adding.branch}>Add</button>
-              <button className="sm" onClick={() => setAdding(null)}>Cancel</button>
-              <span className="muted">{chosen?.path.replace(/^\/Users\/[^/]+/, "~")}</span>
-            </div>
-          </div>
-        )}
-      </div>
-
-      <div className="small" style={{ borderTop: "1px solid var(--line)", paddingTop: 8 }}>
-        <strong>Attachments</strong> <span className="muted">zips extracted into workspace/attachments: specs, designs, sample data</span>
-        {session.attachments.map((a) => (
-          <div className="row" key={a.dir} style={{ justifyContent: "space-between", marginTop: 4 }}>
-            <span><strong>{a.dir}</strong> <span className="muted mono">{fmtBytes(a.bytes)}</span>{a.skipped.length ? <span className="muted"> · {a.skipped.length} skipped</span> : null}</span>
-            <button className="quiet sm" onClick={() => removeAttachment(a.dir)} disabled={busy || active}>remove</button>
-          </div>
-        ))}
-        <input type="file" accept=".zip,application/zip" multiple onChange={(e) => { void addZips(e.target.files); e.target.value = ""; }} disabled={busy || active} style={{ marginTop: 6 }} />
-      </div>
-
-      <div className="small" style={{ borderTop: "1px solid var(--line)", paddingTop: 8 }}>
-        <strong>Setup</strong> <span className="muted">what happens at initialization, after the container and the recipes</span>
-        <div className="stack" style={{ gap: 4, marginTop: 6 }}>
-          <label className="chk"><input type="radio" name="setupMode" checked={session.setupMode !== "skip"} onChange={() => void setMode("agentic")} disabled={busy || active} /> <strong>Setup worker</strong> <span className="muted">reads the repositories and the board, installs toolchains and dependencies, starts the services the tests need, verifies the build and test commands, writes env.md and the recipe. Implements nothing.</span></label>
-          <label className="chk"><input type="radio" name="setupMode" checked={session.setupMode === "skip"} onChange={() => void setMode("skip")} disabled={busy || active} /> <strong>Skip</strong> <span className="muted">the container and the recipes only; the workers find out what is missing.</span></label>
+    <div className="small">
+      <strong>Attachments</strong> <span className="muted">zips extracted into workspace/attachments: specs, designs, sample data</span>
+      {session.attachments.map((a) => (
+        <div className="row" key={a.dir} style={{ justifyContent: "space-between", marginTop: 4 }}>
+          <span><strong>{a.dir}</strong> <span className="muted mono">{fmtBytes(a.bytes)}</span>{a.skipped.length ? <span className="muted"> · {a.skipped.length} skipped</span> : null}</span>
+          <button className="quiet sm" onClick={() => removeAttachment(a.dir)} disabled={busy || active}>remove</button>
         </div>
-        {session.setupMode !== "skip" && (
-          <div style={{ marginTop: 6 }}>
-            <span className="muted">Instructions for the setup worker, on top of what it works out itself</span>{" "}
-            {editing === null && <button className="quiet sm" onClick={() => setEditing(session.requirements)} disabled={active}>{session.requirements.trim() ? "edit" : "add"}</button>}
-            {editing !== null ? (
-              <div className="stack" style={{ gap: 6, marginTop: 6 }}>
-                <textarea value={editing} onChange={(e) => setEditing(e.target.value)} placeholder={"Postgres 17 reachable, migrations applied\nThe e2e suite runs"} style={{ minHeight: 80 }} />
-                <div className="row">
-                  <button className="pri sm" onClick={saveInstructions} disabled={busy}>Save</button>
-                  <button className="sm" onClick={() => setEditing(null)}>Cancel</button>
-                </div>
-              </div>
-            ) : session.requirements.trim() ? (
-              <pre className="mono" style={{ whiteSpace: "pre-wrap", marginTop: 6 }}>{session.requirements}</pre>
-            ) : null}
-          </div>
-        )}
-        {r && (
-          <div style={{ marginTop: 8 }}>
-            <span className={`dot ${r.verdict === "ready" ? "good" : "bad"}`} /> <strong>{r.verdict === "ready" ? "Ready" : "Needs attention"}</strong> <span className="muted">{fmtAgo(r.at, now)}{r.confirmedAt ? " · accepted" : ""}</span>{" "}
-            {r.checks.length > 0 && <button className="quiet sm" onClick={() => toggle("checks")}>{show === "checks" ? "hide checks" : `${r.checks.filter((c) => c.ok).length}/${r.checks.length} checks`}</button>}
-            {show === "checks" && <ul className="checks">{r.checks.map((c, i) => <li key={i} className={c.ok ? "ok" : "err"}>{c.ok ? "✓" : "✗"} {c.text}</li>)}</ul>}
-            {r.summary && <div className="muted" style={{ marginTop: 4, whiteSpace: "pre-wrap" }}>{r.summary}</div>}
-            {!initialized && r.verdict === "needs" && (
-              <div className="row" style={{ marginTop: 6 }}>
-                <button className="sm" onClick={() => act(() => api("POST", `${base}/setup/confirm`, { start: false }), "Accepted; the session is initialized.")} disabled={busy || active} title="Count the environment as good enough: you dealt with the rest by hand, or it does not matter">Accept as is</button>
+      ))}
+      <input type="file" accept=".zip,application/zip" multiple onChange={(e) => { void addZips(e.target.files); e.target.value = ""; }} disabled={busy || active} style={{ marginTop: 6 }} />
+    </div>
+  );
+};
+
+/** The setup worker's verdict: its checks, its summary, and when it was. */
+const ReadinessView = ({ r, now, open = false }: { r: Readiness; now: number; open?: boolean }) => {
+  const [show, setShow] = useState(open);
+  return (
+    <div className="small">
+      <span className={`dot ${r.verdict === "ready" ? "good" : "bad"}`} /> <strong>{r.verdict === "ready" ? "Ready" : "Needs attention"}</strong> <span className="muted">{fmtAgo(r.at, now)}{r.confirmedAt ? " · accepted" : ""}</span>{" "}
+      {r.checks.length > 0 && <button className="quiet sm" onClick={() => setShow(!show)}>{show ? "hide checks" : `${r.checks.filter((c) => c.ok).length}/${r.checks.length} checks`}</button>}
+      {show && <ul className="checks">{r.checks.map((c, i) => <li key={i} className={c.ok ? "ok" : "err"}>{c.ok ? "✓" : "✗"} {c.text}</li>)}</ul>}
+      {r.summary && <div className="muted" style={{ marginTop: 4, whiteSpace: "pre-wrap" }}>{r.summary}</div>}
+    </div>
+  );
+};
+
+/** What happens at initialization after the container and the recipes: a setup worker with your instructions, or nothing. */
+const SetupSection = ({ env }: { env: Env }) => {
+  const { session, base, active, busy, initialized, now, act } = env;
+  const [draft, setDraft] = useState(session.requirements);
+  useEffect(() => setDraft(session.requirements), [session.requirements]);
+  const dirty = draft !== session.requirements;
+  const saveInstructions = () => act(() => api("PUT", `${base}/requirements`, { requirements: draft }), initialized ? "Saved. They apply to the next environment check." : "Saved. They apply when you initialize.");
+  const setMode = (setupMode: "agentic" | "skip") => act(() => api("PUT", `${base}/requirements`, { setupMode }));
+  const r = session.readiness;
+  return (
+    <div className="small">
+      <strong>Setup</strong> <span className="muted">what happens at initialization, after the container and the recipes</span>
+      <div className="stack" style={{ gap: 4, marginTop: 6 }}>
+        <label className="chk"><input type="radio" name="setupMode" checked={session.setupMode !== "skip"} onChange={() => void setMode("agentic")} disabled={busy || active} /> <strong>Setup worker</strong> <span className="muted">reads the repositories and the board, installs toolchains and dependencies, starts the services the tests need, verifies the build and test commands, writes env.md and the recipe. Implements nothing.</span></label>
+        <label className="chk"><input type="radio" name="setupMode" checked={session.setupMode === "skip"} onChange={() => void setMode("skip")} disabled={busy || active} /> <strong>Skip</strong> <span className="muted">the container and the recipes only; the workers find out what is missing.</span></label>
+      </div>
+      {session.setupMode !== "skip" && (
+        <label style={{ marginTop: 8 }}>
+          Instructions for the setup worker <span className="help">optional, on top of what it works out itself</span>
+          <textarea value={draft} onChange={(e) => setDraft(e.target.value)} disabled={active} placeholder={"Run the app but do not run the tests\nSet up the env and check that you can POST to /api/somepath\nPostgres 17 reachable, migrations applied"} style={{ minHeight: 72 }} />
+        </label>
+      )}
+      {session.setupMode !== "skip" && dirty && (
+        <div className="row" style={{ marginTop: 6 }}>
+          <button className="pri sm" onClick={saveInstructions} disabled={busy}>Save instructions</button>
+          <button className="sm" onClick={() => setDraft(session.requirements)}>Discard</button>
+        </div>
+      )}
+      {/* Before initialization a "needs" verdict is the attention card at the top of the page. */}
+      {r && initialized && <div style={{ marginTop: 8 }}><ReadinessView r={r} now={now} /></div>}
+      {initialized && <button className="quiet sm" style={{ marginTop: 6 }} onClick={() => act(() => api("POST", `${base}/run`, { action: "setup" }), "Setup worker started.")} disabled={busy || active} title="Run the setup worker again against this box">Check the environment again</button>}
+    </div>
+  );
+};
+
+/** Recipes from the library, ticked for this session; their results once the container ran them. */
+const RecipeSection = ({ env }: { env: Env }) => {
+  const { session, base, active, busy, info, library, initialized, now, act } = env;
+  const [openLog, setOpenLog] = useState<string | null>(null);
+  const picked = new Set(session.setupScripts.map((sc) => sc.name));
+  const setRecipes = (names: string[]) => act(() => api("PUT", `${base}/recipes`, { names }), initialized ? "Recipes saved; press Re-run recipes to apply them to this box." : "Recipes saved; they run when the container is created.");
+  return (
+    <div className="small">
+      <strong>Recipes</strong> <span className="muted">from the library, run as root when the container is created, in this order</span>
+      {library.length === 0 && session.setupScripts.length === 0 && <div className="muted" style={{ marginTop: 4 }}>The library is empty; write one under <a href="#/scripts">Recipes</a>.</div>}
+      {library.map((sc) => {
+        const res = session.setup.find((x) => x.name === sc.name);
+        const on = picked.has(sc.name);
+        return (
+          <div key={sc.name} style={{ marginTop: 4 }}>
+            <label className="chk">
+              <input type="checkbox" checked={on} disabled={busy || active} onChange={(e) => void setRecipes(e.target.checked ? [...session.setupScripts.map((x) => x.name), sc.name] : session.setupScripts.map((x) => x.name).filter((n) => n !== sc.name))} />
+              <strong>{sc.name}</strong> <span className="muted">{sc.description}</span>
+            </label>
+            {on && res && (
+              <div style={{ marginLeft: 22 }}>
+                <span className={`dot ${res.ok ? "good" : "bad"}`} /> <span className="muted">{res.ok ? `ok · ${fmtAgo(res.at, now)}` : `failed, exit ${res.code} · ${fmtAgo(res.at, now)}`}</span>{" "}
+                <button className="quiet sm" onClick={() => setOpenLog(openLog === sc.name ? null : sc.name)}>{openLog === sc.name ? "hide log" : "log"}</button>
+                {openLog === sc.name && <pre className="mono" style={{ whiteSpace: "pre-wrap", maxHeight: 240, overflow: "auto", marginTop: 6 }}>{info?.logs[sc.name] || res.tail || "(empty)"}</pre>}
               </div>
             )}
           </div>
-        )}
-        {initialized && <button className="quiet sm" style={{ marginTop: 6 }} onClick={() => act(() => api("POST", `${base}/run`, { action: "setup" }), "Setup worker started.")} disabled={busy || active} title="Run the setup worker again against this box">Check the environment again</button>}
-      </div>
+        );
+      })}
+      {session.setupScripts.filter((sc) => !library.some((l) => l.name === sc.name)).map((sc) => <div key={sc.name} style={{ marginTop: 4 }}><span className="dot" /> {sc.name} <span className="muted">no longer in the library; still runs here</span></div>)}
+      {initialized && session.setupScripts.length > 0 && <button className="sm" style={{ marginTop: 6 }} onClick={() => act(() => api("POST", `${base}/setup/rerun`), "Recipes ran again.")} disabled={busy || active} title={active ? "Pause or stop the run first" : "Run every recipe again in this box"}>Re-run recipes</button>}
+    </div>
+  );
+};
 
-      <div className="small" style={{ borderTop: "1px solid var(--line)", paddingTop: 8 }}>
-        <strong>Recipes</strong> <span className="muted">from the library, run as root when the container is created, in this order</span>
-        {library.length === 0 && session.setupScripts.length === 0 && <div className="muted" style={{ marginTop: 4 }}>The library is empty; write one under <a href="#/scripts">Recipes</a>.</div>}
-        {library.map((sc) => {
-          const res = session.setup.find((x) => x.name === sc.name);
-          const on = picked.has(sc.name);
-          return (
-            <div key={sc.name} style={{ marginTop: 4 }}>
-              <label className="chk">
-                <input type="checkbox" checked={on} disabled={busy || active} onChange={(e) => void setRecipes(e.target.checked ? [...session.setupScripts.map((x) => x.name), sc.name] : session.setupScripts.map((x) => x.name).filter((n) => n !== sc.name))} />
-                <strong>{sc.name}</strong> <span className="muted">{sc.description}</span>
-              </label>
-              {on && res && (
-                <div style={{ marginLeft: 22 }}>
-                  <span className={`dot ${res.ok ? "good" : "bad"}`} /> <span className="muted">{res.ok ? `ok · ${fmtAgo(res.at, now)}` : `failed, exit ${res.code} · ${fmtAgo(res.at, now)}`}</span>{" "}
-                  <button className="quiet sm" onClick={() => setOpenLog(openLog === sc.name ? null : sc.name)}>{openLog === sc.name ? "hide log" : "log"}</button>
-                  {openLog === sc.name && <pre className="mono" style={{ whiteSpace: "pre-wrap", maxHeight: 240, overflow: "auto", marginTop: 6 }}>{info?.logs[sc.name] || res.tail || "(empty)"}</pre>}
-                </div>
-              )}
-            </div>
-          );
-        })}
-        {session.setupScripts.filter((sc) => !library.some((l) => l.name === sc.name)).map((sc) => <div key={sc.name} style={{ marginTop: 4 }}><span className="dot" /> {sc.name} <span className="muted">no longer in the library; still runs here</span></div>)}
-        {initialized && session.setupScripts.length > 0 && <button className="sm" style={{ marginTop: 6 }} onClick={() => act(() => api("POST", `${base}/setup/rerun`), "Recipes ran again.")} disabled={busy || active} title={active ? "Pause or stop the run first" : "Run every recipe again in this box"}>Re-run recipes</button>}
-      </div>
-
-      <div className="small" style={{ borderTop: "1px solid var(--line)", paddingTop: 8 }}>
+/** What the setup worker wrote (env.md, setup.sh, the brief) and what ran as root. Nothing to show while the session is a plan. */
+const NotesSection = ({ env }: { env: Env }) => {
+  const { session, base, active, busy, info, brief, sudo, initialized, now, act } = env;
+  const [show, setShow] = useState<"" | "brief" | "env" | "recipe" | "sudo">("");
+  const [recipeName, setRecipeName] = useState<string | null>(null);
+  const toggle = (k: typeof show) => setShow(show === k ? "" : k);
+  return (
+    <div className="stack tight">
+      <div className="small">
         <span className={`dot ${info?.env ? "good" : ""}`} /> <strong>env.md</strong> <span className="muted">{info?.env ? "what is installed and how to run it; every worker reads it" : "written by the setup worker"}</span>{" "}
         {info?.env && <button className="quiet sm" onClick={() => toggle("env")}>{show === "env" ? "hide" : "view"}</button>}
         {show === "env" && <pre className="mono" style={{ whiteSpace: "pre-wrap", maxHeight: 360, overflow: "auto", marginTop: 6 }}>{info?.env}</pre>}
@@ -724,10 +899,125 @@ const EnvironmentPanel = ({ session, base, active, onDone }: { session: Session;
         {Boolean(sudo?.count) && <button className="quiet sm" onClick={() => toggle("sudo")}>{show === "sudo" ? "hide" : "view"}</button>}
         {show === "sudo" && sudo && <pre className="mono" style={{ whiteSpace: "pre-wrap", maxHeight: 240, overflow: "auto", marginTop: 6 }}>{sudo.commands.join("\n")}</pre>}
       </div>
+    </div>
+  );
+};
+
+/** Has the setup worker left anything to read? After a reset the notes stay, so a plan can have them too. */
+const hasNotes = (env: Env): boolean => Boolean(env.info?.env || env.info?.recipe || env.brief?.text || env.sudo?.count);
+
+const Divider = () => <div style={{ borderTop: "1px solid var(--line)" }} />;
+
+/**
+ * The run view's Environment panel: the box as it is, folded, with the
+ * sections that still matter once it exists. Reset makes the session a
+ * plan again.
+ */
+const EnvironmentPanel = ({ env }: { env: Env }) => {
+  const { session, base, active, busy, msg, now, act, copyContext } = env;
+  return (
+    <details className="card">
+      <summary><strong>Environment</strong><span className="muted small">initialized {fmtAgo(session.initializedAt!, now)} · {session.repos.length} repositor{session.repos.length === 1 ? "y" : "ies"} · {session.setupScripts.length} recipe{session.setupScripts.length === 1 ? "" : "s"}</span></summary>
+      <div className="stack tight" style={{ marginTop: 12 }}>
+        <div className="row small" style={{ justifyContent: "space-between" }}>
+          <span><span className="dot good" /> <strong>Initialized</strong> <span className="muted" title={fmtDateTime(session.initializedAt!)}>{fmtAgo(session.initializedAt!, now)}</span></span>
+          <button className="quiet sm" onClick={copyContext} title="Markdown describing this box and session, to paste into any assistant">Copy context for an LLM</button>
+        </div>
+        <Divider />
+        <RepoSection env={env} />
+        <Divider />
+        <AttachmentSection env={env} />
+        <Divider />
+        <SetupSection env={env} />
+        <Divider />
+        <RecipeSection env={env} />
+        <Divider />
+        <NotesSection env={env} />
+        <Divider />
+        <div className="small">
+          <ConfirmButton className="quiet sm" label="Reset environment" confirm="Remove the container, its home volume, the snapshot and the clones? The board, notes and settings stay; initialize again afterwards." onConfirm={() => void act(() => api("POST", `${base}/reset`), "Reset. The session is a plan again.")} disabled={busy || active} />
+        </div>
+        {msg && <div className="muted small">{msg}</div>}
+      </div>
+    </details>
+  );
+};
+
+// --- the plan: the setup sheet and the launch panel -----------------------------
+
+/** A sheet section's head: the title and a mark saying how far along it is. */
+const SheetHead = ({ title, mark, tone, children }: { title: string; mark: string; tone: Tone; children?: ReactNode }) => (
+  <div className="row" style={{ justifyContent: "space-between" }}>
+    <h3>{title}</h3>
+    <span className="row" style={{ gap: 8 }}>{children}<span className={`pill ${tone}`}>{mark}</span></span>
+  </div>
+);
+
+/**
+ * The sidebar of a plan: what Initialize will do with this setup, and the
+ * buttons that do it. Every line mirrors a section of the sheet.
+ */
+const LaunchPanel = ({ env, counts, total, busy, onInit }: { env: Env; counts: Record<string, number>; total: number; busy: boolean; onInit: (start: boolean) => void }) => {
+  const { session, active, msg, copyContext } = env;
+  const ready = counts.ready ?? 0;
+  const worker = session.setupMode !== "skip";
+  return (
+    <section className="card stack launch" style={{ gap: 10 }}>
+      <h3>{active ? "Initializing…" : "Ready to initialize?"}</h3>
+      <p className="lead" style={{ margin: 0 }}>Initialize clones the repositories, creates the container and runs the recipes{worker ? ", then a setup worker makes the box ready" : ""}. Nothing runs before that; come back to this plan over hours if you like.</p>
+      <ul className="launch-list">
+        <li><span className={`dot ${session.repos.length ? "good" : "bad"}`} />{session.repos.length ? <span><b>{session.repos.length}</b> repositor{session.repos.length === 1 ? "y" : "ies"}: <span className="mono">{session.repos.map((r) => r.name).join(", ")}</span></span> : <span>No repositories: the workers would have nothing to change.</span>}</li>
+        <li><span className={`dot ${ready ? "good" : total ? "info" : ""}`} />{total ? <span><b>{total}</b> ticket{total === 1 ? "" : "s"}, <b>{ready}</b> ready{counts.backlog ? `, ${counts.backlog} in the backlog` : ""}</span> : <span>No tickets yet. Fine: the planner drafts them once the box exists.</span>}</li>
+        <li><span className={`dot ${session.setupScripts.length ? "good" : ""}`} />{session.setupScripts.length ? <span>Recipes: {session.setupScripts.map((s) => s.name).join(", ")}</span> : <span>No recipes; the box starts from the plain image.</span>}</li>
+        <li><span className={`dot ${worker ? "good" : ""}`} />{worker ? <span>Setup worker{session.requirements.trim() ? ", with your instructions" : ""}</span> : <span>Setup skipped: the workers find out what is missing.</span>}</li>
+        <li><span className={`dot ${session.packs.length || session.allowlist.length ? "good" : ""}`} />{session.packs.length ? <span>Packs: {session.packs.join(", ")}</span> : <span>No packs: only the agents' backends{session.allowlist.length ? " and the allowlist" : ""}.</span>}</li>
+        {session.attachments.length > 0 && <li><span className="dot good" /><span>{session.attachments.length} attachment{session.attachments.length === 1 ? "" : "s"}</span></li>}
+      </ul>
+      {active ? (
+        <div className="small"><span className="dot run" /> The box is being made. The log on the left shows each step.</div>
+      ) : (
+        <div className="stack tight">
+          <button className="pri" onClick={() => onInit(false)} disabled={busy} title="Clone the repositories, create the container, run the recipes and the setup worker">{session.readiness ? "Initialize again" : "Initialize"}</button>
+          <button onClick={() => onInit(true)} disabled={busy || !ready} title={ready ? "Initialize, and work through the ready tickets when it succeeds" : "No ready tickets to start on"}>Initialize and start</button>
+        </div>
+      )}
+      <button className="quiet sm" onClick={copyContext} title="Markdown describing this session, to paste into any assistant that helps you plan it">Copy context for an LLM</button>
       {msg && <div className="muted small">{msg}</div>}
     </section>
   );
 };
+
+/** While the box is being made: the steps, with the log under it telling the whole story. */
+const InitProgress = ({ session }: { session: Session }) => {
+  const cloned = session.repos.filter((r) => r.baseCommit);
+  return (
+    <section className="card stack tight">
+      <h3><span className="dot run" /> Initializing the environment</h3>
+      <ul className="checks small">
+        <li className={cloned.length === session.repos.length ? "ok" : ""}>{session.repos.length ? `Repositories cloned: ${session.repos.map((r) => r.name).join(", ")}` : "No repositories to clone"}</li>
+        <li>Container created from <span className="mono">{session.image}</span></li>
+        {session.setupScripts.map((sc) => {
+          const res = session.setup.find((x) => x.name === sc.name);
+          return <li key={sc.name} className={res ? (res.ok ? "ok" : "err") : ""}>Recipe {sc.name}{res ? (res.ok ? ": ok" : `: failed, exit ${res.code}`) : ""}</li>;
+        })}
+        <li>{session.setupMode === "skip" ? "Setup worker skipped" : "Setup worker: reads the repositories and the board, installs what is missing, verifies the build and test commands, then reports"}</li>
+      </ul>
+    </section>
+  );
+};
+
+/** The setup worker said the box needs you: the report, and the two ways on. */
+const InitNeedsCard = ({ session, now, busy, onInit, onAccept }: { session: Session; now: number; busy: boolean; onInit: () => void; onAccept: () => void }) => (
+  <section className="card attention stack tight">
+    <h3>Initialization needs you</h3>
+    <p className="lead" style={{ margin: 0 }}>The setup worker could not make the box ready on its own. Fix what it names (instructions, recipes, repositories) and initialize again, or accept the box as it is and start anyway.</p>
+    <ReadinessView r={session.readiness!} now={now} open />
+    <div className="row">
+      <button className="pri" onClick={onInit} disabled={busy}>Initialize again</button>
+      <button onClick={onAccept} disabled={busy} title="Count the environment as good enough: you dealt with the rest by hand, or it does not matter">Accept as is</button>
+    </div>
+  </section>
+);
 
 // --- plan tickets ---------------------------------------------------------
 
@@ -1375,7 +1665,12 @@ const CAP_HELP: Record<string, string> = {
   ticketAttempts: "Tries before a ticket is blocked",
 };
 
-const SessionSettings = ({ session, onSave }: { session: Session; onSave: (patch: SettingsPatch) => Promise<void> }) => {
+/**
+ * Network, caps and limits. The run view folds them into one details card;
+ * the plan's setup sheet shows the network and the caps as separate cards,
+ * each saving its own half.
+ */
+const SessionSettings = ({ session, onSave, part = "all" }: { session: Session; onSave: (patch: SettingsPatch) => Promise<void>; part?: "all" | "network" | "caps" }) => {
   const fromSession = () => ({
     allow: session.allowlist.join("\n"),
     packs: session.packs,
@@ -1408,10 +1703,13 @@ const SessionSettings = ({ session, onSave }: { session: Session; onSave: (patch
     setState("saving");
     try {
       await onSave({
-        allowlist: f.allow.split(/\n/).map((s) => s.trim()).filter(Boolean),
-        packs: f.packs,
-        caps: { workerMinutes: Number(f.workerMinutes), workerTurns: Number(f.workerTurns), budgetUsd: Number(f.budgetUsd), runTickets: Number(f.runTickets), ticketAttempts: Number(f.ticketAttempts), reviewer: f.reviewer },
-        limits: { memory: f.memory, cpus: Number(f.cpus) },
+        ...(part !== "caps" ? { allowlist: f.allow.split(/\n/).map((s) => s.trim()).filter(Boolean), packs: f.packs } : {}),
+        ...(part !== "network"
+          ? {
+              caps: { workerMinutes: Number(f.workerMinutes), workerTurns: Number(f.workerTurns), budgetUsd: Number(f.budgetUsd), runTickets: Number(f.runTickets), ticketAttempts: Number(f.ticketAttempts), reviewer: f.reviewer },
+              limits: { memory: f.memory, cpus: Number(f.cpus) },
+            }
+          : {}),
       });
       setState("saved");
       setMsg("");
@@ -1420,10 +1718,9 @@ const SessionSettings = ({ session, onSave }: { session: Session; onSave: (patch
       setMsg((e as Error).message);
     }
   };
-  return (
-    <details className="card">
-      <summary><strong>Session settings</strong><span className="muted small">network, caps, limits</span></summary>
-      <div className="stack" style={{ marginTop: 12 }}>
+  const body = (
+    <div className="stack" style={{ marginTop: part === "all" ? 12 : 0 }}>
+      {part !== "caps" && (
         <div>
           <div className="small"><strong>Network packs</strong> <span className="muted">the toolchains the box may download from; the chosen agents' backends are always on</span></div>
           <div className="packs" style={{ marginTop: 6 }}>
@@ -1435,10 +1732,14 @@ const SessionSettings = ({ session, onSave }: { session: Session; onSave: (patch
             ))}
           </div>
         </div>
+      )}
+      {part !== "caps" && (
         <label>
           Network allowlist <span className="help">Every host the proxy allows, one per line, HTTPS only; *.suffix allowed. Applies live. Packs rebuild their part on save.</span>
           <textarea id="allow" className="mono" value={f.allow} onChange={(e) => set("allow", e.target.value)} />
         </label>
+      )}
+      {part !== "network" && (
         <div className="two">
           {(["workerMinutes", "workerTurns", "budgetUsd", "runTickets", "ticketAttempts"] as const).map((k) => (
             <label key={k}>
@@ -1451,17 +1752,25 @@ const SessionSettings = ({ session, onSave }: { session: Session; onSave: (patch
           <label>Memory <span className="help">Container limit, e.g. 4g</span><input value={f.memory} onChange={(e) => set("memory", e.target.value)} /></label>
           <label>CPUs<input type="number" step="0.5" min={0.5} value={f.cpus} onChange={(e) => set("cpus", e.target.value)} /></label>
         </div>
-        <div className="save-row">
+      )}
+      <div className="save-row">
           <button className="pri" onClick={save} disabled={state !== "dirty" && state !== "error"}>Save</button>
           {state === "dirty" && <button className="quiet" onClick={() => { setF(fromSession()); setState("clean"); }}>Discard</button>}
           <span className={`state ${state === "saved" ? "ok" : state === "error" ? "err" : ""}`}>{state === "saving" ? "Saving…" : state === "saved" ? "Saved" : state === "error" ? msg : state === "dirty" ? "Unsaved changes" : ""}</span>
         </div>
-        {session.rootScripts.length > 0 && (
-          <div className="small muted">
-            Root scripts approved before the agent had sudo: {session.rootScripts.map((c) => <code key={c.at} style={{ marginRight: 6 }}>{c.script.split("\n")[0]!.slice(0, 60)}</code>)}. Replayed if the container is recreated without a snapshot.
-          </div>
-        )}        <div className="small faint mono">{session.image} · {session.id}</div>
-      </div>
+      {part !== "network" && session.rootScripts.length > 0 && (
+        <div className="small muted">
+          Root scripts approved before the agent had sudo: {session.rootScripts.map((c) => <code key={c.at} style={{ marginRight: 6 }}>{c.script.split("\n")[0]!.slice(0, 60)}</code>)}. Replayed if the container is recreated without a snapshot.
+        </div>
+      )}
+      {part !== "network" && <div className="small faint mono">{session.image} · {session.id}</div>}
+    </div>
+  );
+  if (part !== "all") return body;
+  return (
+    <details className="card">
+      <summary><strong>Session settings</strong><span className="muted small">network, caps, limits</span></summary>
+      {body}
     </details>
   );
 };

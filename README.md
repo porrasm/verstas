@@ -64,20 +64,25 @@ Then, in the web app:
    (**Connect an assistant** on the New session page, `docs/DRAFTS.md`);
    creating from its review page brings its repositories, packs, recipes
    and board along.
-3. **Session page, while it is a plan**: add repositories (cloned fresh at
-   initialization, at the branch you pick), attachments, recipes, network
-   packs, agents and caps, write or import tickets. Come back to it over
-   hours if you like. Then press **Initialize** (or **Initialize and
-   start**, which goes on to the ready tickets when initialization
-   succeeds). Initialization clones the repositories, creates the
-   container, runs the recipes and, unless you chose to skip it, a setup
-   worker (step 5). After that: approve tickets by moving them from backlog
-   to ready, start the run, watch the live log, answer requests in the
-   inbox, pause or stop at any time. **Plan tickets…** takes a request
-   ("build the mapping engine, done means …") and runs a planner that
-   drafts backlog tickets from it and the repositories. **Reset
-   environment** removes the container and the clones and makes the
-   session a plan again; the board and the notes stay.
+3. **Session page, while it is a plan**: a setup sheet, section by
+   section: repositories (cloned fresh at initialization, at the branch
+   you pick), the board (write or import tickets), the environment (setup
+   mode, instructions, recipes, attachments), network packs, agents and
+   caps. Come back to it over hours if you like. The launch panel beside
+   the sheet sums up what Initialize will do; press **Initialize** there
+   (or **Initialize and start**, which goes on to the ready tickets when
+   initialization succeeds). Initialization clones the repositories,
+   creates the container, runs the recipes and, unless you chose to skip
+   it, a setup worker (step 5); while it runs the page shows its steps
+   and the log. After that the page turns to overseeing: approve tickets
+   by moving them from backlog to ready, start the run, watch the live
+   log, answer requests in the inbox, pause or stop at any time. **Plan
+   tickets…** takes a request ("build the mapping engine, done means …")
+   and runs a planner that drafts backlog tickets from it and the
+   repositories. The environment and the session settings fold away in
+   the sidebar; **Reset environment** there removes the container and the
+   clones and makes the session a plan again; the board and the notes
+   stay.
 4. **Recipes** (own tab): bash that runs once when a session's container
    is created, so the box starts set up. After a session's setup worker
    built an environment, "Save as recipe" on the session page puts its
@@ -86,7 +91,8 @@ Then, in the web app:
    to paste are in `docs/examples/scripts/` (Postgres, Chromium). "Copy
    context for an LLM" gives any assistant the facts of the box so it can
    write one, or a board.
-5. **Setup** (Environment panel on the session page): what happens at
+5. **Setup** (the Environment section of the setup sheet, the Environment
+   panel once the box exists): what happens at
    initialization after the container and the recipes. Two modes. **Setup
    worker** (the default): an agent reads the repositories and the board
    and makes the box a sensible place to develop them: toolchains at the
@@ -97,8 +103,9 @@ Then, in the web app:
    e2e suite runs") go on top of that. It asks you in one request for
    what it cannot do and runs again once you answer; a "ready" verdict
    completes initialization (and starts the tickets, with Initialize and
-   start). "Needs" leaves the session uninitialized with the report;
-   **Accept as is** completes it by hand. **Skip**: the container and the
+   start). "Needs" leaves the session uninitialized and puts the report
+   at the top of the page with the two ways on: fix what it names and
+   **Initialize again**, or **Accept as is**, which completes it by hand. **Skip**: the container and the
    recipes only. The setup worker writes three notes every later worker
    reads: `notes/brief.md` (the project brief), `notes/env.md` (what is
    installed, services, verified commands) and `notes/setup.sh` (the
