@@ -97,8 +97,22 @@ export const createAgentApi = (hub: SessionHub, tokens: RunTokens, hooks?: Agent
       res.status(401).json({ error: "Missing or unknown run token" });
       return;
     }
-    (req as AgentRequestWithRun).run = run;
-    next();
+    if (run.role !== "lead" || !run.currentTicket) {
+      (req as AgentRequestWithRun).run = run;
+      next();
+      return;
+    }
+    // A lead's token keeps the last ticket it claimed. Once that ticket is
+    // settled (done, back to ready, parked, blocked) the lead holds nothing,
+    // and what it files next must not be attached to that ticket.
+    hub
+      .get(run.sessionId)
+      .then((h) => {
+        const t = h.board.tickets.find((x) => x.id === run.currentTicket);
+        (req as AgentRequestWithRun).run = t && HELD.has(t.state) ? run : { ...run, currentTicket: undefined };
+        next();
+      })
+      .catch(next);
   };
 
   const r = express.Router();

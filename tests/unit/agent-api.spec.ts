@@ -248,3 +248,33 @@ test("a lead may propose feature tickets; they land in the backlog", async () =>
     await fs.rm(root, { recursive: true, force: true });
   }
 });
+
+test("what a lead files after its ticket is settled is not attached to that ticket", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "verstas-api-held-"));
+  const id = "2026-10-05-held";
+  const paths = sessionPaths(root, id);
+  await fs.mkdir(paths.workspace, { recursive: true });
+  await writeJsonAtomic(paths.session, sessionSchema.parse({ id, name: "h", goal: "g", createdAt: "2026-10-05T00:00:00.000Z" }));
+  await saveBoard(paths.dir, transition(transition(importBoard(emptyBoard("g"), { tickets: [{ id: "T-1", title: "Schema", state: "ready" }] }).board, "T-1", "in_progress"), "T-1", "review"));
+  await writeJsonAtomic(paths.inbox, inboxSchema.parse({}));
+  const hub = new SessionHub(root);
+  const tokens = new RunTokens();
+  const lead = tokens.issue({ sessionId: id, runId: 1, role: "lead", currentTicket: "T-1" });
+  const parked: string[] = [];
+  const server = createAgentApi(hub, tokens, { submitted: () => undefined, handoff: () => undefined, requested: (_r, t) => parked.push(t) }).listen(0, "127.0.0.1");
+  const port = await new Promise<number>((r) => server.on("listening", () => r((server.address() as net.AddressInfo).port)));
+  const post = (p: string, body: unknown) => fetch(`http://127.0.0.1:${port}/agent${p}`, { method: "POST", headers: { authorization: `Bearer ${lead}`, "content-type": "application/json" }, body: JSON.stringify(body) });
+  try {
+    const h = await hub.get(id);
+    await h.mutate((d) => ({ next: { board: transition(d.board, "T-1", "done") } }));
+    expect((await post("/requests", { summary: "which license?", actions: [{ kind: "question", text: "MIT or Apache?" }] })).status).toBe(201);
+    expect((await post("/messages", { text: "fyi" })).status).toBe(201);
+    const after = await hub.get(id);
+    expect(after.inbox.requests[0]!.ticketId).toBeUndefined();
+    expect(after.inbox.messages[0]!.ticketId).toBeUndefined();
+    expect(parked).toEqual([]);
+  } finally {
+    server.close();
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
