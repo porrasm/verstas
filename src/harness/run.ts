@@ -179,7 +179,14 @@ export class RunManager implements AgentRunHooks {
   /** Judge the submitted ticket while the lead waits for the verdict. */
   submitted(r: RunToken, ticketId: string): void {
     const c = this.leadFor(r);
-    if (!c) return;
+    if (!c) {
+      // The lead's run ended while the submit was in flight: nothing will judge it, so put it back.
+      void this.deps.hub
+        .get(r.sessionId)
+        .then((h) => h.mutate((docs) => (getTicket(docs.board, ticketId).state === "review" ? { next: { board: transition(docs.board, ticketId, "ready", { by: "harness", text: "Submitted after the run ended; requeued with the work kept" }) } } : {})))
+        .catch(() => undefined);
+      return;
+    }
     c.queue = c.queue.then(async () => {
       c.run.currentTicket = ticketId;
       try {
@@ -192,7 +199,7 @@ export class RunManager implements AgentRunHooks {
       } finally {
         if (!c.signal.aborted) c.run.currentTicket = undefined;
       }
-    });
+    }).catch(() => undefined);
   }
 
   /** Park the held ticket on its request so the lead can move on. */
@@ -203,7 +210,9 @@ export class RunManager implements AgentRunHooks {
       if (getTicket(c.h.board, ticketId).state !== "in_progress") return;
       const parked = await this.parkOnRequests(c.h, ticketId, c.log);
       if (parked === "halted") c.halted = true;
-    }).catch((e: Error) => c.log({ kind: "error", t: (this.deps.now ?? now)(), ticket: ticketId, text: `parking failed: ${e.message}` }));
+    })
+      .catch((e: Error) => c.log({ kind: "error", t: (this.deps.now ?? now)(), ticket: ticketId, text: `parking failed: ${e.message}` }))
+      .catch(() => undefined);
   }
 
   /** End this lead; the loop starts a fresh one with the note. */
@@ -220,6 +229,7 @@ export class RunManager implements AgentRunHooks {
     if (!c) return "This run has ended; stop.";
     if (c.handoff) return "You handed off; stop now and reply with one line.";
     if (c.halted) return "The run halts after you finish; stop now and reply with what you found.";
+    if (c.rateLimited) return "The reviewer is rate limited: stop now and reply with one line. The run sleeps and a lead continues afterwards.";
     if (c.isPause()) return "The user asked the run to pause: do not claim another ticket. Submit or park what you hold, then reply with one line and stop.";
     if (c.run.ticketsDone >= c.h.session.caps.runTickets) return `This run's cap of ${c.h.session.caps.runTickets} tickets is reached; reply with one line and stop.`;
     return undefined;
@@ -416,7 +426,9 @@ export class RunManager implements AgentRunHooks {
       }
 
       let lastDenialCheck = clock();
-      if (proceed && h.session.mode === "lead") {
+      // Read once: the setting may change while the run is on, and the stop below must match how it ran.
+      const mode = h.session.mode;
+      if (proceed && mode === "lead") {
         await this.leadLoop(h, run, ctl, log, saveRun, setSessionState);
         proceed = false;
       }
@@ -506,7 +518,7 @@ export class RunManager implements AgentRunHooks {
         run.state = "stopped";
         // A stopped worker leaves its ticket in progress; put it back. A lead
         // may have claimed tickets the run never saw; every held one goes back.
-        const held = h.session.mode === "lead" ? h.board.tickets.filter((t) => t.state === "in_progress" || t.state === "review").map((t) => t.id) : run.currentTicket ? [run.currentTicket] : [];
+        const held = mode === "lead" ? h.board.tickets.filter((t) => t.state === "in_progress" || t.state === "review").map((t) => t.id) : run.currentTicket ? [run.currentTicket] : [];
         for (const id of held) {
           await h.mutate((docs) => {
             const t = getTicket(docs.board, id);
@@ -601,6 +613,7 @@ export class RunManager implements AgentRunHooks {
         const leadAbort = new AbortController();
         const onStop = () => leadAbort.abort();
         ctl.signal.addEventListener("abort", onStop, { once: true });
+        if (ctl.signal.aborted) break;
         ctx.leadAbort = leadAbort;
         ctx.handoff = undefined;
         run.currentTicket = holds?.id;
@@ -665,6 +678,15 @@ export class RunManager implements AgentRunHooks {
     } finally {
       await ctx.queue;
       this.leads.delete(h.id);
+      // A pause, a halt or an idle lead can end the run while the lead holds
+      // a ticket it never submitted. Put it back so any later run, in either
+      // mode, can take it; its changes stay in the working tree. A stop
+      // requeues in the caller.
+      if (!ctl.isStop()) {
+        for (const t of h.board.tickets.filter((x) => x.state === "in_progress")) {
+          await h.mutate((docs) => (getTicket(docs.board, t.id).state === "in_progress" ? { next: { board: transition(docs.board, t.id, "ready", { by: "harness", text: "The lead's run ended while it held this ticket; requeued with the work kept" }) } } : {})).catch(() => undefined);
+        }
+      }
     }
   }
 
@@ -753,6 +775,7 @@ export class RunManager implements AgentRunHooks {
     const ticket = getTicket(h.board, ticketId);
     const move = (to: TicketState, note: string) => this.move(h, ticketId, to, note, log);
 
+    if (signal.aborted) return "requeued";
     // Gates, diff, review.
     const repoDir = ticket.repo && h.session.repos.some((r) => r.name === ticket.repo) ? `/workspace/${ticket.repo}` : h.session.repos[0] ? `/workspace/${h.session.repos[0].name}` : "/workspace";
     const gates = await this.runGates(h.id, repoDir, log, ticketId);
@@ -772,6 +795,7 @@ export class RunManager implements AgentRunHooks {
     let verdict: "ok" | "fixable" | "blocked";
     let verdictNote = "";
     if (caps.reviewer) {
+      if (signal.aborted) return "requeued";
       const rev = await this.runJob(h, run, { role: "reviewer", ticket: ticketId, promptText: await this.withNotes(h, reviewerPrompt(getTicket(h.board, ticketId), stat, diff, gates, { ok: impl.ok, stopReason: impl.stopReason })) }, log, signal);
       addCost(run, rev.costUsd);
       await this.writeTicketReport(h, run, ticketId, "reviewer", rev);
@@ -846,6 +870,13 @@ export class RunManager implements AgentRunHooks {
     log: (e: VerstasEvent) => Promise<void>,
     signal: AbortSignal,
   ): Promise<WorkerDone> {
+    // A stop that came while the loop was between workers: start nothing,
+    // since a listener added to an already aborted signal never fires.
+    if (signal.aborted) {
+      const done: WorkerDone = { kind: "worker_done", t: (this.deps.now ?? now)(), ticket: job.ticket, role: job.role, ok: false, stopReason: "aborted", rateLimited: false, costUsd: 0, turns: 0, seconds: 0, text: "", stderr: "" };
+      await log(done);
+      return done;
+    }
     const name = `${run.id}-${++this.jobSeq}-${job.role}`;
     const rel = `${WORKSPACE_FILES}/jobs/${name}`;
     const dir = path.join(h.paths.workspace, rel);

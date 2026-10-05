@@ -174,7 +174,7 @@ export const withContext = (brief: string | null, env: string | null, prompt: st
 export const implementerPrompt = (board: Board, ticket: Ticket, answer?: string, continuing = false): string =>
   continuing
     ? `# Next ticket
-You are continuing in the same conversation: what you learned about the repositories and the box still holds, so do not re-read what you already know. The previous ticket is finished; its changes were committed. Check the board or the files only where this ticket needs something new.
+You are continuing in the same conversation: what you learned about the repositories and the box still holds, so do not re-read what you already know. The harness has taken the previous ticket from you (judged, parked or requeued) and committed what there was. Check the board or the files only where this ticket needs something new.
 
 ${ticketBlock(ticket)}
 ${answer ? `## The user answered your request\n${answer}\n` : ""}

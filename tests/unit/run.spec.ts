@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { createAgentApi, RunTokens } from "../../src/agent-api/agent-api.js";
 import type net from "node:net";
-import { importBoard, emptyBoard, getTicket, replaceTicket } from "../../src/board/board.js";
+import { importBoard, emptyBoard, getTicket, replaceTicket, transition } from "../../src/board/board.js";
 import { saveBoard, writeJsonAtomic } from "../../src/board/store.js";
 import { inboxSchema, now, requestSchema, sessionSchema, type VerstasEvent } from "../../src/core/types.js";
 import { describeBlockers, parseSetup, parseVerdict, RunManager, type Shell, type WorkerDone, type WorkerRunner } from "../../src/harness/run.js";
@@ -837,7 +837,7 @@ type LeadScript = (api: Api, job: Job, n: number, signal: AbortSignal) => Promis
  * server inside the box would call it. The reviewer is scripted; the lead
  * script gets an API client bound to that lead's own run token.
  */
-const leadRun = async (s: Awaited<ReturnType<typeof makeSession>>, lead: LeadScript, opts: { verdict?: (ticket: string) => string } = {}) => {
+const leadRun = async (s: Awaited<ReturnType<typeof makeSession>>, lead: LeadScript, opts: { verdict?: (ticket: string) => string; reviewerRateLimited?: boolean; heal?: (mgr: RunManager) => Promise<string[]> } = {}) => {
   const tokens = new RunTokens();
   const shell = fakeShell();
   const jobs: Job[] = [];
@@ -848,7 +848,7 @@ const leadRun = async (s: Awaited<ReturnType<typeof makeSession>>, lead: LeadScr
     async run(job, _onEvent, signal, o) {
       jobs.push(job);
       const base = { kind: "worker_done" as const, t: now(), ticket: job.ticket, role: job.role, ok: true, stopReason: "success", rateLimited: false, costUsd: 0.1, turns: 3, seconds: 1, text: "", stderr: "" };
-      if (job.role === "reviewer") return { ...base, text: opts.verdict?.(job.ticket!) ?? "VERDICT: ok" };
+      if (job.role === "reviewer") return opts.reviewerRateLimited ? { ...base, ok: false, rateLimited: true, stopReason: "error" } : { ...base, text: opts.verdict?.(job.ticket!) ?? "VERDICT: ok" };
       prompts.push(await fs.readFile(onHost(s, job.promptFile), "utf8"));
       const api: Api = async (method, p, body) => {
         const res = await fetch(`http://127.0.0.1:${port}/agent${p}`, { method, headers: { authorization: `Bearer ${o!.runToken}`, "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
@@ -858,7 +858,7 @@ const leadRun = async (s: Awaited<ReturnType<typeof makeSession>>, lead: LeadScr
       return { ...base, stopReason: signal.aborted ? "aborted" : "success", ...out };
     },
   };
-  const mgr = new RunManager({ hub: s.hub, tokens, shell: () => shell, worker: () => worker, ensureSandbox: async () => undefined, agentApiUrl: "http://x/agent", rateLimitSleepMs: 20, handoffGraceMs: 50 });
+  const mgr: RunManager = new RunManager({ hub: s.hub, tokens, shell: () => shell, worker: () => worker, ensureSandbox: async () => undefined, agentApiUrl: "http://x/agent", rateLimitSleepMs: 20, handoffGraceMs: 50, healSandbox: opts.heal ? () => opts.heal!(mgr) : undefined });
   const server = createAgentApi(s.hub, tokens, mgr).listen(0, "127.0.0.1");
   port = await new Promise<number>((r) => server.on("listening", () => r((server.address() as net.AddressInfo).port)));
   return { mgr, jobs, prompts, shell, close: () => server.close() };
@@ -1080,5 +1080,84 @@ test("the lead's rules can be replaced by a file, read for every new lead; an em
     expect(systemMd("lead")).toContain("Claim a ticket with");
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("lead mode: a stop that comes before the lead starts starts no lead", async () => {
+  const s = await makeSession({ mode: "lead" });
+  const r = await leadRun(s, async () => ({}), {
+    heal: async (mgr) => {
+      mgr.stopNow(s.id);
+      return [];
+    },
+  });
+  try {
+    const run = await (await r.mgr.start(s.id)).done;
+    expect(run.state).toBe("stopped");
+    expect(r.jobs).toHaveLength(0);
+  } finally {
+    r.close();
+    await fs.rm(s.root, { recursive: true, force: true });
+  }
+});
+
+test("lead mode: a pause while the lead holds an unsubmitted ticket puts it back to ready", async () => {
+  const s = await makeSession({ mode: "lead" });
+  let mgr: RunManager;
+  const r = await leadRun(s, async (api) => {
+    expect((await api("POST", "/tickets/T-1/claim", {})).status).toBe(200);
+    mgr.pauseAfterTicket(s.id);
+    return { text: "stopping as asked" };
+  });
+  mgr = r.mgr;
+  try {
+    const run = await (await r.mgr.start(s.id)).done;
+    expect(run).toMatchObject({ state: "paused", pauseReason: "user" });
+    const h = await s.hub.get(s.id);
+    expect(h.board.tickets[0]!.state).toBe("ready");
+    expect(h.board.tickets[0]!.notes.at(-1)!.text).toContain("requeued with the work kept");
+  } finally {
+    r.close();
+    await fs.rm(s.root, { recursive: true, force: true });
+  }
+});
+
+test("lead mode: a rate-limited reviewer stops further claims, and the run sleeps before the next lead", async () => {
+  const s = await makeSession({ mode: "lead" });
+  const refusals: string[] = [];
+  const r = await leadRun(
+    s,
+    async (api, _job, n) => {
+      if (n === 1) {
+        expect(await finishTicket(api, "T-1")).toMatchObject({ state: "ready", attempts: 0 });
+        refusals.push(String((await api("POST", "/tickets/T-1/claim", {})).json.error));
+        return {};
+      }
+      return { text: "nothing to do" };
+    },
+    { reviewerRateLimited: true },
+  );
+  try {
+    await (await r.mgr.start(s.id)).done;
+    expect(refusals[0]).toContain("rate limited");
+    expect(r.jobs.filter((j) => j.role === "reviewer")).toHaveLength(1);
+  } finally {
+    r.close();
+    await fs.rm(s.root, { recursive: true, force: true });
+  }
+});
+
+test("lead mode: a submit that lands after the run ended is put back, never left in review", async () => {
+  const s = await makeSession({ mode: "lead" });
+  const r = await leadRun(s, async () => ({}));
+  try {
+    const h = await s.hub.get(s.id);
+    await h.mutate((d) => ({ next: { board: transition(transition(d.board, "T-1", "in_progress"), "T-1", "review") } }));
+    r.mgr.submitted({ sessionId: s.id, runId: 99, role: "lead", currentTicket: "T-1" }, "T-1");
+    for (let i = 0; i < 100 && (await s.hub.get(s.id)).board.tickets[0]!.state === "review"; i++) await new Promise((res) => setTimeout(res, 5));
+    expect((await s.hub.get(s.id)).board.tickets[0]!.state).toBe("ready");
+  } finally {
+    r.close();
+    await fs.rm(s.root, { recursive: true, force: true });
   }
 });
