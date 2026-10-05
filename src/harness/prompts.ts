@@ -150,7 +150,15 @@ export const withContext = (brief: string | null, env: string | null, prompt: st
     .filter(Boolean)
     .join("\n\n---\n\n");
 
-export const implementerPrompt = (board: Board, ticket: Ticket, answer?: string): string => `${ticketBlock(ticket)}
+export const implementerPrompt = (board: Board, ticket: Ticket, answer?: string, continuing = false): string =>
+  continuing
+    ? `# Next ticket
+You are continuing in the same conversation: what you learned about the repositories and the box still holds, so do not re-read what you already know. The previous ticket is finished; its changes were committed. Check the board or the files only where this ticket needs something new.
+
+${ticketBlock(ticket)}
+${answer ? `## The user answered your request\n${answer}\n` : ""}
+Do the ticket. Finish with \`board_report\` and one line.`
+    : `${ticketBlock(ticket)}
 ${answer ? `## The user answered your request\n${answer}\n` : ""}
 ## Recent reports from other workers
 ${recentReports(board, ticket.id)}

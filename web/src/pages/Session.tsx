@@ -1680,6 +1680,7 @@ const SessionSettings = ({ session, onSave, part = "all" }: { session: Session; 
     runTickets: String(session.caps.runTickets),
     ticketAttempts: String(session.caps.ticketAttempts),
     reviewer: session.caps.reviewer,
+    resumeWorker: session.caps.resumeWorker ?? false,
     memory: session.limits.memory,
     cpus: String(session.limits.cpus),
   });
@@ -1706,7 +1707,7 @@ const SessionSettings = ({ session, onSave, part = "all" }: { session: Session; 
         ...(part !== "caps" ? { allowlist: f.allow.split(/\n/).map((s) => s.trim()).filter(Boolean), packs: f.packs } : {}),
         ...(part !== "network"
           ? {
-              caps: { workerMinutes: Number(f.workerMinutes), workerTurns: Number(f.workerTurns), budgetUsd: Number(f.budgetUsd), runTickets: Number(f.runTickets), ticketAttempts: Number(f.ticketAttempts), reviewer: f.reviewer },
+              caps: { workerMinutes: Number(f.workerMinutes), workerTurns: Number(f.workerTurns), budgetUsd: Number(f.budgetUsd), runTickets: Number(f.runTickets), ticketAttempts: Number(f.ticketAttempts), reviewer: f.reviewer, resumeWorker: f.resumeWorker },
               limits: { memory: f.memory, cpus: Number(f.cpus) },
             }
           : {}),
@@ -1749,6 +1750,7 @@ const SessionSettings = ({ session, onSave, part = "all" }: { session: Session; 
             </label>
           ))}
           <label className="chk" style={{ alignSelf: "end" }}><input type="checkbox" checked={f.reviewer} onChange={(e) => set("reviewer", e.target.checked)} /> Reviewer pass after each ticket</label>
+          <label className="chk" style={{ alignSelf: "end" }} title="Claude Code only. The next ticket's implementer continues the previous one's conversation instead of re-reading the repositories. The reviewer always starts fresh."><input type="checkbox" checked={f.resumeWorker} onChange={(e) => set("resumeWorker", e.target.checked)} /> Implementers continue one conversation</label>
           <label>Memory <span className="help">Container limit, e.g. 4g</span><input value={f.memory} onChange={(e) => set("memory", e.target.value)} /></label>
           <label>CPUs<input type="number" step="0.5" min={0.5} value={f.cpus} onChange={(e) => set("cpus", e.target.value)} /></label>
         </div>

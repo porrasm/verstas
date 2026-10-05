@@ -18,7 +18,7 @@ export const claudeArgs = (job: Job): string[] => [
   "--strict-mcp-config",
   "--max-budget-usd",
   String(job.caps.budgetUsd),
-  "--no-session-persistence",
+  ...(job.agentSession ? [job.agentSession.resume ? "--resume" : "--session-id", job.agentSession.id] : ["--no-session-persistence"]),
   "--append-system-prompt",
   "@SYSTEM@", // replaced with the file's text at spawn time
   ...(job.model ? ["--model", job.model] : []),

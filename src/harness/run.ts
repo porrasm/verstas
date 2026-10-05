@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
@@ -337,6 +338,8 @@ export class RunManager {
       }
 
       let lastDenialCheck = clock();
+      // With caps.resumeWorker, the implementers of this run share one agent conversation.
+      const convo: { id?: string } = {};
       while (proceed && !ctl.isStop()) {
         if (ctl.isPause()) {
           run.state = "paused";
@@ -389,7 +392,7 @@ export class RunManager {
           continue;
         }
 
-        const outcome = await this.workTicket(h, run, ticket, token, log, ctl.signal);
+        const outcome = await this.workTicket(h, run, ticket, token, log, ctl.signal, convo);
         await saveRun();
         if (outcome === "rate_limited") {
           run.state = "paused";
@@ -455,6 +458,7 @@ export class RunManager {
     token: string,
     log: (e: VerstasEvent) => Promise<void>,
     signal: AbortSignal,
+    convo: { id?: string } = {},
   ): Promise<"done" | "requeued" | "waiting" | "blocked" | "rate_limited" | "halted"> {
     const d = this.deps;
     const clock = d.now ?? now;
@@ -470,7 +474,11 @@ export class RunManager {
     run.currentTicket = ticket.id;
     d.tokens.update(token, { currentTicket: ticket.id, role: "worker" });
 
-    const impl = await this.runJob(h, run, { role: "implementer", ticket: ticket.id, promptText: await this.withNotes(h, implementerPrompt(h.board, getTicket(h.board, ticket.id), answer)) }, log, signal, token);
+    const agentSession = caps.resumeWorker ? (convo.id ? { id: convo.id, resume: true } : { id: randomUUID(), resume: false }) : undefined;
+    const freshPrompt = () => this.withNotes(h, implementerPrompt(h.board, getTicket(h.board, ticket.id), answer));
+    const promptText = agentSession?.resume ? implementerPrompt(h.board, getTicket(h.board, ticket.id), answer, true) : await freshPrompt();
+    const impl = await this.runJob(h, run, { role: "implementer", ticket: ticket.id, agentSession, promptText, freshPrompt }, log, signal, token);
+    if (impl.agentSession && impl.turns > 0) convo.id = impl.agentSession;
     addCost(run, impl.costUsd);
     await this.writeTicketReport(h, run, ticket.id, "implementer", impl);
 
@@ -569,7 +577,7 @@ export class RunManager {
   private async runJob(
     h: SessionHandle,
     run: Run,
-    job: { role: Job["role"]; ticket?: string; promptText: string },
+    job: { role: Job["role"]; ticket?: string; promptText: string; agentSession?: Job["agentSession"]; /** The prompt for a fresh conversation when a resume fails. */ freshPrompt?: () => Promise<string> },
     log: (e: VerstasEvent) => Promise<void>,
     signal: AbortSignal,
     token: string,
@@ -589,11 +597,24 @@ export class RunManager {
       caps: { minutes: h.session.caps.workerMinutes, turns: h.session.caps.workerTurns, budgetUsd: h.session.caps.budgetUsd },
       mcpConfigFile: `/workspace/${WORKSPACE_FILES}/mcp.json`,
       model: agent.model || undefined,
+      budgetFile: `/workspace/${WORKSPACE_FILES}/budget.json`,
     };
+    if (job.agentSession && agent.driver === "claude") spec.agentSession = job.agentSession;
     if (DEBUG) spec.debug = true;
     await fs.writeFile(path.join(dir, "job.json"), JSON.stringify(spec, null, 2));
     const rawLog = DEBUG ? path.join(h.paths.runs, String(run.id), `worker-${job.ticket ?? "planner"}-${job.role}-${Date.now()}.raw.jsonl`) : undefined;
-    const done = await this.deps.worker(h.id).run(spec, (e) => void log(e), signal, { rawLog, runToken: token });
+    let done = await this.deps.worker(h.id).run(spec, (e) => void log(e), signal, { rawLog, runToken: token });
+    // A conversation that cannot be resumed (pruned, written by another CLI
+    // version) fails before its first turn; start a fresh one under a new id.
+    if (spec.agentSession?.resume && !done.ok && done.turns === 0 && !done.rateLimited && !signal.aborted) {
+      await log(done);
+      await log({ kind: "status", t: (this.deps.now ?? now)(), ticket: job.ticket, text: `could not resume the agent conversation (${done.stopReason}); starting a fresh one` });
+      if (job.freshPrompt) await fs.writeFile(path.join(dir, "prompt.md"), await job.freshPrompt());
+      const fresh: Job = { ...spec, agentSession: { id: randomUUID(), resume: false } };
+      await fs.writeFile(path.join(dir, "job.json"), JSON.stringify(fresh, null, 2));
+      done = await this.deps.worker(h.id).run(fresh, (e) => void log(e), signal, { rawLog, runToken: token });
+      done = { ...done, agentSession: fresh.agentSession!.id };
+    } else if (spec.agentSession) done = { ...done, agentSession: spec.agentSession.id };
     await log(done);
     return done;
   }

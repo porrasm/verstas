@@ -52,7 +52,7 @@ export type Session = {
   attachments: { name: string; dir: string; bytes: number; skipped: string[] }[];
   allowlist: string[];
   packs: string[];
-  caps: { workerMinutes: number; workerTurns: number; runTickets: number; budgetUsd: number; ticketAttempts: number; reviewer: boolean };
+  caps: { workerMinutes: number; workerTurns: number; runTickets: number; budgetUsd: number; ticketAttempts: number; reviewer: boolean; resumeWorker?: boolean };
   limits: { memory: string; cpus: number; pids: number; workspaceMb: number };
   rootScripts: { script: string; cwd?: string; at: string; requestId?: string }[];
   setupScripts: { name: string; description: string; hosts: string[]; note: string; script: string; runAs: "root" | "agent" }[];

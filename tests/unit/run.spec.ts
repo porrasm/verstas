@@ -21,6 +21,7 @@ const makeSession = async (
   opts: {
     reviewer?: boolean;
     attempts?: number;
+    resume?: boolean;
     requirements?: string;
     /** false: a plan that still needs Initialize (the default is an initialized session). */
     initialized?: boolean;
@@ -44,7 +45,7 @@ const makeSession = async (
       requirements: opts.requirements ?? "",
       setupMode: opts.setupMode ?? "agentic",
       agents: opts.agents ?? {},
-      caps: { reviewer: opts.reviewer ?? true, ticketAttempts: opts.attempts ?? 2, runTickets: 10 },
+      caps: { reviewer: opts.reviewer ?? true, ticketAttempts: opts.attempts ?? 2, runTickets: 10, resumeWorker: opts.resume ?? false },
     }),
   );
   await saveBoard(paths.dir, importBoard(emptyBoard("g"), { tickets: [{ id: "T-1", title: "Schema", state: "ready", repo: "app" }, { id: "T-2", title: "Engine", state: "ready", deps: ["T-1"] }] }).board);
@@ -727,6 +728,64 @@ test("a change that contains the Claude token is never committed; the ticket is 
     expect(shell.calls).toContainEqual(["git", "reset", "-q"]);
     // The token never went into a command the box would see.
     expect(shell.calls.some((c) => c.join(" ").includes(token))).toBe(false);
+  } finally {
+    await fs.rm(s.root, { recursive: true, force: true });
+  }
+});
+
+test("with resumeWorker, implementers of a run continue one conversation; the reviewer and a failed resume start fresh", async () => {
+  const s = await makeSession({ resume: true });
+  try {
+    let failResume = false;
+    const prompts: string[] = [];
+    const worker = fakeWorker(s.hub, s.id, async (job, hub, id) => {
+      if (job.role === "implementer") {
+        prompts.push(await fs.readFile(path.join(s.paths.workspace, ".verstas", "prompt.md"), "utf8"));
+        if (job.agentSession?.resume && failResume) {
+          failResume = false;
+          return { ok: false, turns: 0, stopReason: "error_during_execution" };
+        }
+        await fileReport(hub, id, job.ticket!, "did it");
+      }
+      if (job.role === "reviewer") return { text: "VERDICT: ok" };
+      return {};
+    });
+    const ctl = await manager(s, fakeShell(), worker).start(s.id);
+    expect((await ctl.done).ticketsDone).toBe(2);
+    const impl = worker.jobs.filter((j) => j.role === "implementer");
+    expect(impl[0]!.agentSession).toMatchObject({ resume: false });
+    expect(impl[1]!.agentSession).toEqual({ id: impl[0]!.agentSession!.id, resume: true });
+    expect(worker.jobs.filter((j) => j.role === "reviewer").every((j) => !j.agentSession)).toBe(true);
+    expect(impl.every((j) => j.budgetFile === "/workspace/.verstas/budget.json")).toBe(true);
+    expect(prompts[1]).toContain("continuing in the same conversation");
+    expect(prompts[1]).not.toContain("Recent reports from other workers");
+
+    // A resume that fails before its first turn falls back to a fresh conversation with the full prompt.
+    const h = await s.hub.get(s.id);
+    await h.mutate((d) => ({ next: { board: importBoard(d.board, { tickets: [{ id: "T-3", title: "Cache", state: "ready" }, { id: "T-4", title: "Docs", state: "ready" }] }).board } }));
+    failResume = true;
+    worker.jobs.length = 0;
+    prompts.length = 0;
+    const again = await manager(s, fakeShell(), worker).start(s.id);
+    expect((await again.done).ticketsDone).toBe(2);
+    const impl2 = worker.jobs.filter((j) => j.role === "implementer");
+    expect(impl2.map((j) => j.agentSession?.resume)).toEqual([false, true, false]);
+    expect(impl2[2]!.agentSession!.id).not.toBe(impl2[1]!.agentSession!.id);
+    expect(prompts[2]).toContain("Recent reports from other workers");
+  } finally {
+    await fs.rm(s.root, { recursive: true, force: true });
+  }
+});
+
+test("without resumeWorker every implementer is a throwaway conversation", async () => {
+  const s = await makeSession();
+  try {
+    const worker = fakeWorker(s.hub, s.id, async (job, hub, id) => {
+      if (job.role === "implementer") await fileReport(hub, id, job.ticket!, "ok");
+      return job.role === "reviewer" ? { text: "VERDICT: ok" } : {};
+    });
+    await (await manager(s, fakeShell(), worker).start(s.id)).done;
+    expect(worker.jobs.every((j) => !j.agentSession)).toBe(true);
   } finally {
     await fs.rm(s.root, { recursive: true, force: true });
   }

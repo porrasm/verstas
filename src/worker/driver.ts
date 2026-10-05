@@ -33,6 +33,15 @@ export type Job = {
   cwd?: string;
   /** Keep full tool output in events and echo the raw agent stream as `raw` lines. */
   debug?: boolean;
+  /**
+   * Keep the agent's conversation on disk under this id. `resume: false`
+   * starts a new conversation with the id; `resume: true` continues it.
+   * Absent: a throwaway conversation, as before. Drivers that cannot
+   * resume ignore it.
+   */
+  agentSession?: { id: string; resume: boolean };
+  /** Where the worker writes its running totals for the agent's `budget` tool. */
+  budgetFile?: string;
 };
 
 export type Spawned = {

@@ -272,6 +272,12 @@ export const capsSchema = z.object({
   budgetUsd: z.number().min(0).max(10_000).default(50),
   ticketAttempts: z.number().int().min(1).max(5).default(2),
   reviewer: z.boolean().default(true),
+  /**
+   * Implementers of one run continue one agent conversation instead of
+   * starting fresh per ticket (Claude Code only; others start fresh). The
+   * reviewer always starts fresh.
+   */
+  resumeWorker: z.boolean().default(false),
 });
 export type Caps = z.infer<typeof capsSchema>;
 
@@ -509,6 +515,8 @@ export const eventSchema = z.discriminatedUnion("kind", [
     seconds: z.number().int(),
     text: z.string(),
     stderr: z.string().default(""),
+    /** The agent conversation this worker ran in, when the harness kept one (caps.resumeWorker, lead mode). */
+    agentSession: z.string().optional(),
   }),
 ]);
 export type VerstasEvent = z.infer<typeof eventSchema>;

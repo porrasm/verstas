@@ -11,6 +11,7 @@
  * Environment: VERSTAS_AGENT_API (e.g. http://host.docker.internal:4701/agent),
  * VERSTAS_RUN_TOKEN, and HTTP_PROXY when inside the box.
  */
+import { promises as fs } from "node:fs";
 import readline from "node:readline";
 import { request } from "./http.js";
 
@@ -43,7 +44,34 @@ const api = async (method: string, path: string, json?: unknown): Promise<unknow
   return parsed;
 };
 
+/** The worker's running totals (src/worker/worker.ts), with the caps turned into what is left. */
+export const readBudget = async (file = process.env.VERSTAS_BUDGET_FILE ?? ""): Promise<unknown> => {
+  if (!file) return { available: false, note: "This agent does not report a budget." };
+  const raw = await fs.readFile(file, "utf8").catch(() => "");
+  if (!raw) return { available: false, note: "No totals yet." };
+  const b = JSON.parse(raw) as { turns: number; seconds: number; contextTokens: number; outputTokens: number; caps: { minutes: number; turns: number; budgetUsd: number }; resumed?: boolean; control?: unknown };
+  return {
+    available: true,
+    turns: b.turns,
+    turnsLeft: Math.max(0, b.caps.turns - b.turns),
+    minutes: Math.floor(b.seconds / 60),
+    minutesLeft: Math.max(0, b.caps.minutes - Math.floor(b.seconds / 60)),
+    contextTokens: b.contextTokens,
+    outputTokens: b.outputTokens,
+    budgetUsd: b.caps.budgetUsd,
+    resumedConversation: Boolean(b.resumed),
+    ...(b.control ? { control: b.control } : {}),
+  };
+};
+
 export const TOOLS: Tool[] = [
+  {
+    name: "budget",
+    description:
+      "Your running totals in this worker: turns used and left, minutes used and left, the size of your current context in tokens (what the model was last sent), and the dollar cap. Check it before starting something long, and when deciding whether to file your report now.",
+    inputSchema: obj({}, []),
+    call: () => readBudget(),
+  },
   {
     name: "board_list_tickets",
     description: "List the board's tickets (id, title, state, kind, size, priority, deps, repo). Optionally filter by state.",

@@ -57,7 +57,7 @@ test("board MCP server speaks JSON-RPC and forwards tool calls with the run toke
     const list = await call("tools/list");
     const names = (list.result!.tools as { name: string; inputSchema: { required: string[] } }[]).map((t) => t.name);
     expect(names).toEqual([
-      "board_list_tickets", "board_get_ticket", "board_add_note", "board_report", "board_create_ticket",
+      "budget", "board_list_tickets", "board_get_ticket", "board_add_note", "board_report", "board_create_ticket",
       "board_set_priority", "board_add_dep", "request", "halt", "message", "idea",
     ]);
 
@@ -81,5 +81,22 @@ test("board MCP server speaks JSON-RPC and forwards tool calls with the run toke
     child.stdin.end();
     child.kill();
     api.close();
+  }
+});
+
+test("the budget tool turns the worker's totals into what is left, and says so when there are none", async () => {
+  const { readBudget } = await import("../../src/worker/mcp-server.js");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const { promises: fs } = await import("node:fs");
+  expect(await readBudget("")).toMatchObject({ available: false });
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "verstas-budget-"));
+  try {
+    const file = path.join(dir, "budget.json");
+    expect(await readBudget(file)).toMatchObject({ available: false });
+    await fs.writeFile(file, JSON.stringify({ turns: 12, seconds: 600, contextTokens: 84_000, outputTokens: 9_000, caps: { minutes: 25, turns: 60, budgetUsd: 5 }, resumed: true }));
+    expect(await readBudget(file)).toEqual({ available: true, turns: 12, turnsLeft: 48, minutes: 10, minutesLeft: 15, contextTokens: 84_000, outputTokens: 9_000, budgetUsd: 5, resumedConversation: true });
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
   }
 });

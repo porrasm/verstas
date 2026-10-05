@@ -72,7 +72,18 @@ export const runJob = async (job: Job): Promise<number> => {
   let stopReason = "";
   let result: Translated["result"];
 
-  const child = spawn(spawned.bin, spawned.args, { cwd: spawned.cwd, stdio: ["pipe", "pipe", "pipe"], env: spawned.env });
+  // The running totals the agent reads through the board server's `budget`
+  // tool. Context is the last turn's input tokens: what the model was sent.
+  const budget = { turns: 0, seconds: 0, contextTokens: 0, outputTokens: 0, caps: job.caps, resumed: Boolean(job.agentSession?.resume) };
+  const writeBudget = () => {
+    if (!job.budgetFile) return;
+    budget.seconds = Math.round((Date.now() - t0) / 1000);
+    void fs.writeFile(job.budgetFile, JSON.stringify(budget)).catch(() => undefined);
+  };
+  writeBudget();
+  const env = job.budgetFile ? { ...spawned.env, VERSTAS_BUDGET_FILE: job.budgetFile } : spawned.env;
+
+  const child = spawn(spawned.bin, spawned.args, { cwd: spawned.cwd, stdio: ["pipe", "pipe", "pipe"], env });
   child.stdin.end(spawned.stdin ?? "");
 
   const stop = () => {
@@ -116,10 +127,18 @@ export const runJob = async (job: Job): Promise<number> => {
   for await (const line of rl) {
     if (job.debug) emit({ kind: "raw", t: new Date().toISOString(), line });
     const out = translator.line(line);
-    for (const e of out.events) emit(e);
+    for (const e of out.events) {
+      emit(e);
+      if (e.kind === "cost") {
+        budget.contextTokens = e.cost.inputTokens;
+        budget.outputTokens += e.cost.outputTokens;
+      }
+    }
     if (out.result) result = out.result;
     if (out.assistantTurn) {
       turns++;
+      budget.turns = turns;
+      writeBudget();
       if (turns > job.caps.turns && !stopReason) {
         stopReason = "turn_cap";
         emit({ kind: "status", t: new Date().toISOString(), ticket: job.ticket, text: `turn cap of ${job.caps.turns} reached; stopping` });
