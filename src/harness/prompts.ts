@@ -1,3 +1,6 @@
+import { promises as fs } from "node:fs";
+import path from "node:path";
+import { verstasHome } from "../config.js";
 import type { Board, Session, Ticket } from "../core/types.js";
 import { NETWORK_PACKS } from "../network/packs.js";
 
@@ -60,7 +63,16 @@ ${session.setupScripts.length ? session.setupScripts.map((x) => `  - ${x.name}: 
   commit, do not rewrite history, do not create branches.
 `;
 
-export const systemMd = (role: "implementer" | "reviewer" | "planner" | "setup" | "prompt" | "lead"): string => {
+/** Where a lead's rules can be replaced without a rebuild: read for every new lead. */
+export const leadRulesFile = (): string => path.join(verstasHome(), "prompts", "lead.md");
+
+/** The lead's role rules: the override file when it exists and is not empty, else the built-in text. */
+export const readLeadRules = async (file = leadRulesFile()): Promise<string | undefined> => {
+  const text = await fs.readFile(file, "utf8").catch(() => "");
+  return text.trim() ? `\nRole: lead.\n${text.trim()}` : undefined;
+};
+
+export const systemMd = (role: "implementer" | "reviewer" | "planner" | "setup" | "prompt" | "lead", leadRules?: string): string => {
   const common = `You are one worker in a long-running Verstas session. Read /workspace/VERSTAS.md first.
 
 Rules that apply to every role:
@@ -124,7 +136,7 @@ Role: lead. You work this session's board until nothing you can start is left. N
     planner: `
 Role: planner. Turn the user's planning request into tickets with \`board_create_ticket\`: small (S) or medium (M) where possible, each with a clear spec, acceptance criteria that a reviewer can check, the repository it touches, and dependencies by id when order matters. You may create feature tickets; keep them within the request. Prefer ten good tickets over thirty vague ones. When the board already has tickets, add only what is missing and do not duplicate. Reply with a short summary of the plan and stop.`,
   };
-  return common + "\n" + byRole[role];
+  return common + "\n" + (role === "lead" && leadRules ? leadRules : byRole[role]);
 };
 
 const ticketBlock = (t: Ticket): string => `# ${t.id}: ${t.title}

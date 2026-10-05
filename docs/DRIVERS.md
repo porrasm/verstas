@@ -14,23 +14,39 @@ The harness runs, inside the container as the agent user, with
 `/workspace` as the working directory:
 
 ```
-<driver command> --job /workspace/.verstas/job.json
+<driver command> --job /workspace/.verstas/jobs/<run>-<n>-<role>/job.json
 ```
 
-`job.json`:
+Each worker has its own directory under `/workspace/.verstas/jobs`, so two
+workers of one run (a lead and the reviewer judging its ticket) never share
+a file. `job.json`:
 
 ```jsonc
 {
-  "role": "implementer",            // implementer | reviewer | planner
-  "ticket": "T-12",                 // absent for the planner
-  "promptFile": "/workspace/.verstas/prompt.md",         // the task
-  "systemPromptFile": "/workspace/.verstas/system.md",   // the rules
+  "role": "implementer",            // implementer | reviewer | planner | setup | prompt | lead
+  "ticket": "T-12",                 // absent for the planner and the lead
+  "promptFile": "/workspace/.verstas/jobs/4-7-implementer/prompt.md",   // the task
+  "systemPromptFile": "/workspace/.verstas/jobs/4-7-implementer/system.md", // the rules
   "caps": { "minutes": 25, "turns": 60, "budgetUsd": 5 },
   "mcpConfigFile": "/workspace/.verstas/mcp.json",       // board tools
   "driver": "claude",               // claude | codex | cursor; absent means claude
-  "model": "claude-fable-5-1"       // optional; any id the chosen CLI accepts
+  "model": "claude-fable-5-1",      // optional; any id the chosen CLI accepts
+  "budgetFile": "/workspace/.verstas/jobs/4-7-implementer/budget.json",  // optional
+  "agentSession": { "id": "…uuid…", "resume": false }   // optional
 }
 ```
+
+`agentSession` asks the driver to keep the agent's conversation on disk
+under that id (`resume: false`) or to continue it (`resume: true`). The
+Claude driver passes `--session-id` or `--resume`; a driver that cannot
+resume ignores it and starts fresh. A resume that fails before its first
+turn makes the harness retry once with a fresh conversation.
+
+`budgetFile`: write the running totals there after every turn (`turns`,
+`seconds`, `contextTokens` as the last call's input tokens, `outputTokens`,
+`caps`), atomically. The board server's `budget` tool reads it. Set
+`VERSTAS_ROLE` (the job's role) and `VERSTAS_BUDGET_FILE` in the board
+server's environment: the role decides which tools it shows.
 
 The driver must:
 
@@ -57,7 +73,8 @@ Exit code 0 means `ok`.
 
 The harness, not the driver, decides what happens to the ticket: it reads
 `worker_done`, runs the gates, starts the reviewer, commits, and moves the
-card.
+card. A lead submits its tickets itself (`board_submit`), and the harness
+judges each one the same way while the lead waits.
 
 ## The board MCP server
 

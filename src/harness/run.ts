@@ -8,7 +8,7 @@ import { writeJsonAtomic } from "../board/store.js";
 import type { SessionHandle, SessionHub } from "../sessions/hub.js";
 import type { AgentRunHooks, RunToken, RunTokens } from "../agent-api/agent-api.js";
 import { workspaceSizeMb } from "../sessions/sessions.js";
-import { implementerPrompt, leadContinuePrompt, leadPrompt, mcpConfig, notesIndexMd, plannerPrompt, reviewerPrompt, setupPrompt, systemMd, userPrompt, verstasMd, withContext, workspaceClaudeMd } from "./prompts.js";
+import { implementerPrompt, leadContinuePrompt, leadPrompt, mcpConfig, readLeadRules, notesIndexMd, plannerPrompt, reviewerPrompt, setupPrompt, systemMd, userPrompt, verstasMd, withContext, workspaceClaudeMd } from "./prompts.js";
 import type { Job } from "../worker/worker.js";
 
 /**
@@ -851,7 +851,7 @@ export class RunManager implements AgentRunHooks {
     const dir = path.join(h.paths.workspace, rel);
     await fs.mkdir(dir, { recursive: true });
     await fs.writeFile(path.join(dir, "prompt.md"), job.promptText);
-    await fs.writeFile(path.join(dir, "system.md"), systemMd(job.role));
+    await fs.writeFile(path.join(dir, "system.md"), systemMd(job.role, job.role === "lead" ? await readLeadRules() : undefined));
     // The reviewer may be a different agent than the worker (session.agents); everything else about the job is the same.
     const agent = agentFor(h.session, job.role);
     const spec: Job = {

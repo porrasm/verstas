@@ -174,9 +174,13 @@ so that the proxy container can reach it at `host.docker.internal:4701`
 (on Linux the proxy is started with `--add-host
 host.docker.internal:host-gateway`).
 
-- Every request carries a **run token**, random per run, in an
-  `Authorization` header. A token grants access to one run's board, its
-  notes and its request inbox, nothing else.
+- Every request carries a **run token**, random per worker, in an
+  `Authorization` header, issued when the worker starts and revoked when
+  it ends. A token grants access to one run's board, its notes and its
+  request inbox, nothing else. Its role limits it further: a worker
+  cannot move tickets at all; a lead may claim a ready ticket and submit
+  the one it holds, but never move one to `done`, which only the
+  harness's judge does after gates and an independent reviewer.
 - The proxy allows plain HTTP only to `host.docker.internal:4701` and only
   under the path prefix `/agent/`. The UI and the session management API
   live on **4700**, bound to `127.0.0.1`, which no container can reach.

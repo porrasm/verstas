@@ -118,14 +118,30 @@ Then, in the web app:
    answer the inbox from your phone through the `verstas` app in the apps
    monorepo. Off by default, and per session off until you tick it; see
    [docs/REMOTE.md](docs/REMOTE.md) for what is and is not sent.
-8. **Apply to repo** when you want the work: the session page's Work panel
+8. **How tickets are worked** (Session settings, per session). **One
+   worker per ticket**, the default: Verstas picks the next ready ticket,
+   starts a fresh implementer for it, then the reviewer. Tick
+   **Implementers continue one conversation** to have each implementer of
+   a run resume the previous one's Claude Code conversation instead of
+   re-reading the repositories. **A lead works the board**: one long-lived
+   agent chooses the order, claims and submits tickets itself, may use
+   subagents, and proposes new tickets to the backlog. Verstas still
+   judges and commits every ticket it submits, parks a ticket the moment
+   the lead asks you something, and keeps a lead running: it resumes the
+   lead's conversation when it stops early, and starts a fresh lead from
+   a handoff note (kept in `notes/state.md`) when the lead says its
+   context has become noise or it reaches its own caps. Every worker has
+   a `budget` tool showing its turns, minutes and context size. To change
+   the lead's rules without a rebuild, write them to
+   `~/.verstas/prompts/lead.md`; the next lead reads it.
+9. **Apply to repo** when you want the work: the session page's Work panel
    puts a repository's commits on the branch `verstas/<session>` in your
    real checkout, one commit per ticket, without touching the branch you
    have checked out. Merge, rebase or cherry-pick from there. Export
    bundles remain for moving work to another machine: one `git fetch` line per
    repository is shown. Bundles are pure data; nothing from the repository
    runs on your machine.
-9. **Delete** the session when done. Its containers, network and directory
+10. **Delete** the session when done. Its containers, network and directory
    go with it.
 
 Runs continue while Verstas is open (on macOS, also with the window

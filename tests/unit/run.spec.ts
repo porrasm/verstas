@@ -1062,3 +1062,23 @@ test("lead mode: a lead that ignores its handoff is stopped after the grace peri
     await fs.rm(s.root, { recursive: true, force: true });
   }
 });
+
+test("the lead's rules can be replaced by a file, read for every new lead; an empty file keeps the built-in rules", async () => {
+  const { readLeadRules, systemMd } = await import("../../src/harness/prompts.js");
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "verstas-rules-"));
+  try {
+    const file = path.join(dir, "lead.md");
+    expect(await readLeadRules(file)).toBeUndefined();
+    await fs.writeFile(file, "  \n");
+    expect(await readLeadRules(file)).toBeUndefined();
+    await fs.writeFile(file, "Work the highest priority ticket first. Always submit.");
+    const rules = await readLeadRules(file);
+    const sys = systemMd("lead", rules);
+    expect(sys).toContain("Always submit.");
+    expect(sys).not.toContain("Claim a ticket with");
+    expect(sys).toContain("Read /workspace/VERSTAS.md first"); // the box rules stay
+    expect(systemMd("lead")).toContain("Claim a ticket with");
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});

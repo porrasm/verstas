@@ -266,9 +266,11 @@ rate limit pauses the run as before.
 
 ## V-13 · Parallel tickets  (L)
 
-Two workers on independent tickets in two containers sharing one
-workspace; needs per-ticket worktrees or branch-per-ticket merges. Not
-before everything above is boring.
+In lead mode this shrinks to per-ticket git worktrees inside the one
+container: a lead may then hold several tickets, fork itself per ticket,
+and the judge commits from each ticket's worktree and merges into the
+session branch at done. Not before lead mode has run for a week on real
+boards.
 
 ## V-14 · Virtual machine sandbox backend  (L, out of MVP scope)
 
@@ -351,6 +353,20 @@ project needs it, with its resource cost accepted then.
 ---
 
 ## Done
+
+- 2026-10-05 · Lead mode, behind a per-session setting ("How tickets are
+  worked"; the default is unchanged). One long-lived lead claims and
+  submits tickets through the agent API; the harness judges and commits
+  each one, parks a ticket on a request at once, resumes the lead's
+  conversation when it stops early, and starts a fresh lead from a
+  handoff note (notes/state.md) or from its last words at a cap. Two idle
+  leads in a row pause the run. Also: implementers of a run may continue
+  one conversation (caps.resumeWorker), every worker has a `budget` tool
+  (turns, minutes, context size), and each worker has its own token and
+  job directory. Still open: worktrees so a lead can hold more than one
+  ticket (V-13), and the first overnight runs to compare the modes on
+  human touches, cost per done ticket and first-attempt pass rate before
+  lead becomes the default.
 
 - 2026-10-04 · Session lifetime: a session is created as a plan (name and
   board only) and initialized by hand. Repositories, attachments, recipes,

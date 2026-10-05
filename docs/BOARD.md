@@ -53,8 +53,13 @@ A bare array of tickets is accepted as well.
 
 `backlog` → `ready` → `in_progress` → `review` → `done`, with `waiting`
 (a request is open), `blocked` (gave up) and reopen (`done` → `ready`).
-Only the harness moves tickets through `in_progress`, `review` and `done`;
-you move between `backlog`, `ready`, `blocked`, and reopen.
+Only the harness moves tickets to `done`. In the default mode it also
+moves them through `in_progress` and `review`. In lead mode the lead does
+those two moves itself through the agent API: `board_claim` (`ready` to
+`in_progress`, dependencies done, one ticket at a time) and `board_submit`
+(`in_progress` to `review`, report filed), after which the harness judges
+the ticket and moves it to `done`, back to `ready` or to `blocked`. You move
+between `backlog`, `ready`, `blocked`, and reopen.
 
 ## Markdown
 
