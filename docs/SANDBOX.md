@@ -153,7 +153,7 @@ the default bridge, so it alone has egress.
   approve.
 - **Network packs.** The allowlist is built from named packs of toolchain
   download hosts (`src/network/packs.ts`: node, python, debian, github,
-  playwright, cypress, chromium, rust, go, jvm, ruby) plus extra hosts you
+  playwright, cypress, chromium, rust, go, jvm, ruby, dotnet) plus extra hosts you
   type. A new session gets node, python, debian and github; ticking a
   repository on the New session form ticks the packs its tracked manifests
   imply (read on the host as data, never run). `api.anthropic.com` is

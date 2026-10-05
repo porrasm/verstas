@@ -34,6 +34,10 @@ export const NETWORK_PACKS = [
   { name: "go", title: "Go toolchain and modules", hosts: ["go.dev", "dl.google.com", "proxy.golang.org", "sum.golang.org", "storage.googleapis.com"] },
   { name: "jvm", title: "Maven Central and Gradle", hosts: ["repo.maven.apache.org", "repo1.maven.org", "services.gradle.org", "plugins.gradle.org", "downloads.gradle.org"] },
   { name: "ruby", title: "RubyGems", hosts: ["rubygems.org", "index.rubygems.org"] },
+  // dotnet-install.sh lives at dot.net, resolves channels through aka.ms and downloads from builds.dotnet.microsoft.com (ci.dot.net for
+  // daily builds); dotnetcli.azureedge.net is the retired CDN the script still falls back to. packages.microsoft.com is the apt route.
+  // NuGet restore reads api.nuget.org only.
+  { name: "dotnet", title: ".NET SDK and NuGet", hosts: ["dot.net", "aka.ms", "builds.dotnet.microsoft.com", "ci.dot.net", "dotnetcli.azureedge.net", "packages.microsoft.com", "api.nuget.org"] },
 ] as const satisfies readonly NetworkPack[];
 
 export type PackName = (typeof NETWORK_PACKS)[number]["name"];
@@ -91,11 +95,12 @@ export const detectPacks = (files: { path: string; text: string }[]): PackName[]
     else if (b === "go.mod") found.add("go");
     else if (/^(pom\.xml|build\.gradle(\.kts)?|settings\.gradle(\.kts)?)$/.test(b)) found.add("jvm");
     else if (b === "Gemfile") found.add("ruby");
+    else if (/\.(cs|fs|vb)proj$|^global\.json$|^Directory\.(Build|Packages)\.props$|^nuget\.config$/i.test(b)) found.add("dotnet");
   }
   return PACK_NAMES.filter((n) => found.has(n));
 };
 
-const MANIFESTS = ["package.json", "pyproject.toml", "setup.py", "setup.cfg", "Pipfile", "requirements*.txt", "Cargo.toml", "go.mod", "pom.xml", "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts", "Gemfile"];
+const MANIFESTS = ["package.json", "pyproject.toml", "setup.py", "setup.cfg", "Pipfile", "requirements*.txt", "Cargo.toml", "go.mod", "pom.xml", "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts", "Gemfile", "*.csproj", "*.fsproj", "*.vbproj", "global.json", "Directory.Build.props", "Directory.Packages.props", "nuget.config", "NuGet.config", "NuGet.Config"];
 
 /** Detects packs in a git work tree on the host (your own repository): tracked manifests only, at most 60 files. */
 export const detectPacksInRepo = async (repoPath: string): Promise<PackName[]> => {
