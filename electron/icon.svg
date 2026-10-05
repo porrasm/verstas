@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- Verstas app icon: a claw hammer on a dark workshop tile. Source for
+       electron/icon.png and the launcher's .icns (scripts/render-icon.mjs). -->
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#343a43"/>
+      <stop offset="1" stop-color="#16181d"/>
+    </linearGradient>
+    <linearGradient id="tileEdge" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.18"/>
+      <stop offset="0.5" stop-color="#ffffff" stop-opacity="0.03"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="wood" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#e0a463"/>
+      <stop offset="0.55" stop-color="#b9773b"/>
+      <stop offset="1" stop-color="#8a5226"/>
+    </linearGradient>
+    <linearGradient id="grip" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#3b2a20"/>
+      <stop offset="0.5" stop-color="#2a1d16"/>
+      <stop offset="1" stop-color="#1c130e"/>
+    </linearGradient>
+    <linearGradient id="steel" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f4f6f9"/>
+      <stop offset="0.45" stop-color="#c3c9d2"/>
+      <stop offset="1" stop-color="#7d8591"/>
+    </linearGradient>
+    <linearGradient id="face" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#9aa2ad"/>
+      <stop offset="1" stop-color="#dfe3e9"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="18" stdDeviation="22" flood-color="#000" flood-opacity="0.45"/>
+    </filter>
+  </defs>
+
+  <rect x="100" y="100" width="824" height="824" rx="186" fill="url(#tile)"/>
+  <rect x="101.5" y="101.5" width="821" height="821" rx="185" fill="none" stroke="url(#tileEdge)" stroke-width="3"/>
+
+  <g transform="rotate(-38 512 512)" filter="url(#shadow)">
+    <!-- handle, wedged into the middle of the head -->
+    <rect x="478" y="410" width="68" height="440" rx="34" fill="url(#wood)"/>
+    <rect x="474" y="700" width="76" height="156" rx="38" fill="url(#grip)"/>
+    <rect x="474" y="726" width="76" height="6" fill="#000" opacity="0.28"/>
+    <rect x="474" y="756" width="76" height="6" fill="#000" opacity="0.28"/>
+    <rect x="474" y="786" width="76" height="6" fill="#000" opacity="0.28"/>
+    <!-- head: one piece, the striking face on the left, the claw curving down on the right -->
+    <path d="M296 332 Q296 312 316 312 L404 312 L404 300 Q404 292 412 292 L424 292 Q432 292 432 300 L432 322
+             L600 322 C680 322 744 360 786 440 C794 456 786 470 770 466 C756 462 750 452 744 444
+             C712 408 668 398 620 404 L596 446 L432 446 L432 468 Q432 476 424 476 L412 476 Q404 476 404 468
+             L404 456 L316 456 Q296 456 296 436 Z" fill="url(#steel)"/>
+    <!-- the face, a touch darker, and the split of the claw -->
+    <path d="M296 332 Q296 312 316 312 L404 312 L404 456 L316 456 Q296 456 296 436 Z" fill="url(#face)"/>
+    <path d="M640 392 C690 388 730 404 768 452" fill="none" stroke="#2a2f37" stroke-width="10" stroke-linecap="round"/>
+    <!-- eye of the head around the handle -->
+    <rect x="470" y="406" width="84" height="40" rx="8" fill="url(#steel)"/>
+    <rect x="470" y="440" width="84" height="6" fill="#000" opacity="0.22"/>
+    <!-- highlight along the top edge -->
+    <path d="M432 330 L600 330 C660 330 712 352 752 396" fill="none" stroke="#ffffff" stroke-opacity="0.6" stroke-width="5" stroke-linecap="round"/>
+  </g>
+</svg>
