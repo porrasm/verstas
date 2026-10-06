@@ -49,10 +49,12 @@ export type Session = {
   model?: string;
   agents?: SessionAgents;
   repos: { name: string; sourcePath: string; branch: string; runBranch: string; baseCommit?: string }[];
-  attachments: { name: string; dir: string; bytes: number; skipped: string[] }[];
+  attachments: { name: string; dir: string; bytes: number; skipped: string[]; description?: string }[];
   allowlist: string[];
   packs: string[];
-  caps: { workerMinutes: number; workerTurns: number; runTickets: number; budgetUsd: number; ticketAttempts: number; reviewer: boolean };
+  caps: { workerMinutes: number; workerTurns: number; runTickets: number; budgetUsd: number; ticketAttempts: number; reviewer: boolean; resumeWorker?: boolean; leadMinutes?: number; leadTurns?: number };
+  /** loop: a fresh implementer per ticket. lead: one long-lived agent works the board. */
+  mode?: "loop" | "lead";
   limits: { memory: string; cpus: number; pids: number; workspaceMb: number };
   rootScripts: { script: string; cwd?: string; at: string; requestId?: string }[];
   setupScripts: { name: string; description: string; hosts: string[]; note: string; script: string; runAs: "root" | "agent" }[];
@@ -86,7 +88,7 @@ export type SessionDetail = { session: Session; board: Board; inbox: Inbox; run?
 export type DriverName = "claude" | "codex" | "cursor";
 export type AgentSpec = { driver: DriverName; model?: string };
 export type SessionAgents = { worker?: AgentSpec; reviewer?: AgentSpec };
-export type WorkerRole = "implementer" | "reviewer" | "planner" | "setup" | "prompt";
+export type WorkerRole = "implementer" | "reviewer" | "planner" | "setup" | "prompt" | "lead";
 /** Mirrors src/core/types.ts agentFor: the reviewer defaults to the worker; sessions from before `agents` ran Claude with `model`. */
 export const agentFor = (s: { model?: string; agents?: SessionAgents }, role: WorkerRole): AgentSpec => {
   const worker: AgentSpec = s.agents?.worker ?? { driver: "claude", model: s.model || undefined };
@@ -107,7 +109,7 @@ export type Status = {
 export type Config = { sessionsRoot: string; workTargets: { name: string; path: string }[]; uiPort: number; agentApiPort: number; devboxImage: string; linuxHost: boolean };
 
 export class ApiError extends Error {
-  constructor(readonly status: number, message: string) {
+  constructor(readonly status: number, message: string, readonly body?: unknown) {
     super(message);
   }
 }
@@ -125,7 +127,7 @@ export const api = async <T,>(method: string, path: string, body?: unknown): Pro
   } catch {
     json = { raw: text };
   }
-  if (!res.ok) throw new ApiError(res.status, (json as { error?: string })?.error ?? `HTTP ${res.status}`);
+  if (!res.ok) throw new ApiError(res.status, (json as { error?: string })?.error ?? `HTTP ${res.status}`, json);
   return json as T;
 };
 

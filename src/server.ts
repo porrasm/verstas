@@ -107,7 +107,8 @@ export const startVerstas = async (): Promise<Verstas> => {
   // Agent API: all interfaces, token-protected, path-restricted by the proxy.
   const agentApp = express();
   agentApp.use(requestLog("agent"));
-  agentApp.use(createAgentApi(hub, tokens));
+  // The run manager judges what a lead submits and keeps leads alive (src/harness/run.ts).
+  agentApp.use(createAgentApi(hub, tokens, runs));
   const listenAgent = () => new Promise<Server>((resolve, reject) => {
     const s = agentApp.listen(config.agentApiPort, "0.0.0.0", () => {
       s.off("error", reject);

@@ -18,9 +18,12 @@ import type { Job } from "../worker/worker.js";
  * the in-image driver and streams its JSON lines back.
  */
 
-export const WORKER_COMMAND = ["node", "/opt/verstas/worker.js", "--job", "/workspace/.verstas/job.json"] as const;
-/** What pkill matches to stop a worker; the driver forwards the signal to the agent it runs. */
+export const DEFAULT_JOB_FILE = "/workspace/.verstas/job.json";
+export const workerCommand = (jobFile: string = DEFAULT_JOB_FILE): string[] => ["node", "/opt/verstas/worker.js", "--job", jobFile];
+/** What pkill matches to stop every worker; the driver forwards the signal to the agent it runs. */
 export const WORKER_PATTERN = "/opt/verstas/worker.js";
+/** What pkill matches to stop one worker: its job file is unique to it. */
+export const workerPattern = (jobFile: string): string => `${WORKER_PATTERN} --job ${jobFile}`;
 
 export const dockerShell = (cfg: SandboxConfig, sessionId: string): Shell => ({
   exec: (cmd, opts = {}) => runInSandbox(cfg, sessionId, cmd, { workdir: opts.workdir, timeoutMs: opts.timeoutMs, allowFailure: true, input: opts.input }),
@@ -81,7 +84,8 @@ const runWorkerExec = async (
   opts: NonNullable<Parameters<WorkerRunner["run"]>[3]>,
   store: CredentialStore,
 ): Promise<WorkerDone> => {
-  const child = execInSandbox(cfg, sessionId, WORKER_COMMAND, { secretEnv });
+  const jobFile = opts.jobFile ?? DEFAULT_JOB_FILE;
+  const child = execInSandbox(cfg, sessionId, workerCommand(jobFile), { secretEnv });
   child.stdin?.end();
   let stderr = "";
   const raw = opts.rawLog ? createWriteStream(opts.rawLog, { flags: "a" }) : null;
@@ -91,10 +95,11 @@ const runWorkerExec = async (
     if (process.env.VERSTAS_DEBUG) process.stderr.write(`[worker ${job.ticket ?? job.role} stderr] ${d}`);
   });
   const onAbort = () => {
-    // Stop the driver; the harness's `docker exec` child dies, and the
-    // driver's own SIGTERM handling stops the agent. The container stays up.
+    // Stop this driver only; the harness's `docker exec` child dies, and the
+    // driver's own SIGTERM handling stops the agent. Other workers of the
+    // session (a lead while its reviewer is stopped) and the container stay up.
     child.kill("SIGTERM");
-    void runInSandbox(cfg, sessionId, ["pkill", "-TERM", "-f", WORKER_PATTERN], { allowFailure: true, timeoutMs: 10_000 });
+    void runInSandbox(cfg, sessionId, ["pkill", "-TERM", "-f", workerPattern(jobFile)], { allowFailure: true, timeoutMs: 10_000 });
   };
   signal.addEventListener("abort", onAbort, { once: true });
   const t0 = Date.now();
@@ -164,9 +169,9 @@ export type RunManagerConfig = {
  * container is recreated only when image or limits change, and replays the
  * root commands the user approved earlier when a recreate does happen.
  */
-export const ensureSessionSandbox = async (c: RunManagerConfig, session: Session, envFile: string, runToken: string | undefined): Promise<void> => {
+export const ensureSessionSandbox = async (c: RunManagerConfig, session: Session, envFile: string, needsCredentials: boolean): Promise<void> => {
   // No secrets in the container's environment (see dockerWorker); fail early if a run will need a credential it does not have.
-  if (runToken) {
+  if (needsCredentials) {
     const missing = missingCredentials(await c.credentials.secrets(), session);
     if (missing.length) throw missingCredentialError(missing[0]!);
   }
@@ -247,7 +252,7 @@ export const createDockerRunManager = (c: RunManagerConfig): RunManager =>
     worker: (sessionId) => dockerWorker(c.sandbox, sessionId, c.credentials),
     secrets: async () => secretValues(await c.credentials.secrets()),
     proxyDenials: (sessionId, since) => proxyDenials(c.sandbox, sessionId)(since),
-    ensureSandbox: (session, envFile, token) => ensureSessionSandbox(c, session, envFile, token),
+    ensureSandbox: (session, envFile, needsCredentials) => ensureSessionSandbox(c, session, envFile, needsCredentials),
     snapshotSandbox: (session) => snapshotSandbox(c.sandbox, session),
     healSandbox: async (sessionId) => {
       const did = await healSandbox(c.sandbox, sessionId);

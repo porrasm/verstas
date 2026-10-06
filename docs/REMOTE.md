@@ -40,45 +40,50 @@ For testing against a local dashboard, use `https://localhost:3001` (the
 monorepo's dev backend). A self-signed certificate is accepted for
 loopback addresses only; `http://` is accepted only for loopback too.
 
-## What is sent, for a ticked session
+## Kept small on purpose
 
-Sent (texts capped): name, state, goal, repository names, requirements and
-the setup verdict, run state and costs, every ticket (title, kind, state,
-priority, spec, acceptance, last report, last notes, diff size), open
-requests and the last ten answered ones, the last twenty agent messages,
-the last five prompts and replies, and the run's last 80 activity lines.
+The dashboard is not a second Verstas UI. It does what a phone is for
+while a run goes on without you, and nothing that changes as Verstas
+grows: setup, agents, settings and planning stay in the app. A session
+appears there only once it is initialized; a plan has nothing to run or
+watch.
+
+## What is sent, for a ticked, initialized session
+
+Sent (texts capped): name, state, run state and costs, every ticket
+(title, kind, state, priority, spec, acceptance, last report, last notes,
+diff size), open requests and the last ten answered ones, the last five
+prompts you asked the box and their replies, and the run's last 80
+activity lines.
 
 Never sent: tool results (command output, file contents), diffs, worker
-stderr, the full worker report text of `worker_done` events, setup logs,
-the sudo log, notes files, secrets, the allowlist and settings of a
-session. A tool call shows as one line, e.g. `Bash: npm test`.
+stderr, the full worker report text of `worker_done` events, setup and
+its verdict, agent messages, notes files, secrets, the allowlist and the
+settings of a session. A tool call shows as one line, e.g. `Bash: npm test`.
 
 ## What the dashboard can do
 
 | Command | Becomes |
 |---|---|
-| `run` start, pause, stop, setup, plan, prompt | `POST /sessions/:id/run` |
+| `run` start, pause, stop, prompt (ask the box) | `POST /sessions/:id/run` |
 | `decide` approve/decline actions, answer | `POST /sessions/:id/requests/:rid` |
 | `ticket.create` | `POST /sessions/:id/tickets` |
-| `ticket.move` to backlog, ready, blocked, done | `POST /sessions/:id/tickets/:tid/state` |
-| `ticket.update` title, spec, priority | `PUT /sessions/:id/tickets/:tid` |
-| `ticket.note` | `POST /sessions/:id/tickets/:tid/notes` |
+| `ticket.approve` (backlog to ready) | `POST /sessions/:id/tickets/:tid/state` |
 | `tickets.approveAll` | `POST /sessions/:id/tickets/approve-all` |
-| `setup.confirm` | `POST /sessions/:id/setup/confirm` |
-| `message.read` | `POST /sessions/:id/messages/:mid/read` |
 
-Not possible remotely: creating or deleting sessions, settings, the
-allowlist, caps, recipes, secrets, export and apply, reading files or logs.
-Approving a network or pack request from the phone does widen that
-session's allowlist, exactly as it does locally.
+Not possible remotely: initializing, setup and planning, editing or
+moving tickets other than approving them, creating or deleting sessions,
+settings, the allowlist, caps, recipes, secrets, export and apply,
+reading files or logs. Approving a network or pack request from the phone
+does widen that session's allowlist, exactly as it does locally.
 
-## Protocol (version 1)
+## Protocol (version 2)
 
 All under `<base>/api/verstas/host`, with `Authorization: Bearer <token>`.
 A wrong token gets 404.
 
 - `GET /hello` → `{ ok, protocol, name }`: the settings page's test.
-- `POST /state` with `{ protocol: 1, host: { version, sentAt }, sessions: [...] }`
+- `POST /state` with `{ protocol: 2, host: { version, sentAt }, sessions: [...] }`
   a second after any change to a ticked session and every 15 s.
 - `GET /commands?wait=25` → `{ commands: [{ id, kind, payload }], needState }`.
   `needState` asks for a push at once (the dashboard restarted).

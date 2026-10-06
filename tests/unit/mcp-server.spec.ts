@@ -57,7 +57,7 @@ test("board MCP server speaks JSON-RPC and forwards tool calls with the run toke
     const list = await call("tools/list");
     const names = (list.result!.tools as { name: string; inputSchema: { required: string[] } }[]).map((t) => t.name);
     expect(names).toEqual([
-      "board_list_tickets", "board_get_ticket", "board_add_note", "board_report", "board_create_ticket",
+      "budget", "board_list_tickets", "board_get_ticket", "board_add_note", "board_report", "board_create_ticket",
       "board_set_priority", "board_add_dep", "request", "halt", "message", "idea",
     ]);
 
@@ -79,6 +79,79 @@ test("board MCP server speaks JSON-RPC and forwards tool calls with the run toke
     expect((await call("resources/list")).error?.code).toBe(-32601);
   } finally {
     child.stdin.end();
+    child.kill();
+    api.close();
+  }
+});
+
+test("the budget tool turns the worker's totals into what is left, and says so when there are none", async () => {
+  const { readBudget } = await import("../../src/worker/mcp-server.js");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const { promises: fs } = await import("node:fs");
+  expect(await readBudget("")).toMatchObject({ available: false });
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "verstas-budget-"));
+  try {
+    const file = path.join(dir, "budget.json");
+    expect(await readBudget(file)).toMatchObject({ available: false });
+    await fs.writeFile(file, JSON.stringify({ turns: 12, seconds: 600, contextTokens: 84_000, outputTokens: 9_000, caps: { minutes: 25, turns: 60, budgetUsd: 5 }, resumed: true }));
+    expect(await readBudget(file)).toEqual({ available: true, turns: 12, turnsLeft: 48, minutes: 10, minutesLeft: 15, contextTokens: 84_000, outputTokens: 9_000, budgetUsd: 5, resumedConversation: true });
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("claim, submit and handoff are shown to a lead only", async () => {
+  const { visibleTools } = await import("../../src/worker/mcp-server.js");
+  const lead = visibleTools("lead").map((t) => t.name);
+  const worker = visibleTools("implementer").map((t) => t.name);
+  for (const name of ["board_claim", "board_submit", "handoff"]) {
+    expect(lead).toContain(name);
+    expect(worker).not.toContain(name);
+  }
+  expect(worker).toContain("board_report");
+  expect(lead).toContain("board_report");
+});
+
+test("board_submit submits, waits for the verdict, and returns the harness's notes since the submit", async () => {
+  test.setTimeout(20_000);
+  let state = "in_progress";
+  let polls = 0;
+  const notes = [{ by: "agent", text: "my own note", at: "1" }];
+  const api = http.createServer((req, res) => {
+    let body = "";
+    req.on("data", (d) => (body += d));
+    req.on("end", () => {
+      res.setHeader("content-type", "application/json");
+      if (req.url === "/agent/tickets/T-1/submit") {
+        state = "review";
+        notes.push({ by: "agent", text: "Submitted for review by the lead", at: "2" });
+        return res.end(JSON.stringify({ ok: true }));
+      }
+      if (req.url === "/agent/tickets/T-1") {
+        if (state === "review" && ++polls === 2) {
+          state = "ready";
+          notes.push({ by: "harness", text: "Not done yet (missing test for the null case); attempt 1 of 2", at: "3" });
+        }
+        return res.end(JSON.stringify({ id: "T-1", state, attempts: polls >= 2 ? 1 : 0, notes }));
+      }
+      res.statusCode = 404;
+      res.end(JSON.stringify({ error: "no" }));
+    });
+  });
+  const port = await new Promise<number>((r) => api.listen(0, "127.0.0.1", () => r((api.address() as net.AddressInfo).port)));
+  const child = spawn(process.execPath, ["--import", "tsx", "-e", `import("./src/worker/mcp-server.ts").then(async (m) => { process.stdout.write(JSON.stringify(await m.submitAndWait("T-1", 5000, 20)) + "\\n"); const late = await m.submitAndWait("T-1", 60, 20); process.stdout.write(JSON.stringify(late) + "\\n"); })`], {
+    env: { ...process.env, VERSTAS_AGENT_API: `http://127.0.0.1:${port}/agent`, VERSTAS_RUN_TOKEN: "t", HTTP_PROXY: "", http_proxy: "" },
+    stdio: ["ignore", "pipe", "inherit"],
+  });
+  try {
+    const lines: string[] = [];
+    for await (const line of readline.createInterface({ input: child.stdout })) lines.push(line);
+    const first = JSON.parse(lines[0]!) as Record<string, unknown>;
+    expect(first).toEqual({ id: "T-1", state: "ready", verdict: expect.stringContaining("not done yet"), attempts: 1, notes: ["Not done yet (missing test for the null case); attempt 1 of 2"] });
+    // A verdict that takes longer than the wait comes back as "still in review" (the fake judges only once).
+    expect(JSON.parse(lines[1]!)).toMatchObject({ id: "T-1", state: "review", verdict: "still in review" });
+  } finally {
     child.kill();
     api.close();
   }

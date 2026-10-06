@@ -29,6 +29,8 @@ test("packs are detected from manifests as data", () => {
   expect(detectPacks([{ path: "requirements-dev.txt", text: "pytest\nplaywright==1.48\n" }])).toEqual(["python", "playwright"]);
   expect(detectPacks([{ path: "svc/go.mod", text: "module x" }, { path: "Cargo.toml", text: "" }, { path: "build.gradle.kts", text: "" }, { path: "Gemfile", text: "" }])).toEqual(["rust", "go", "jvm", "ruby"]);
   expect(detectPacks([{ path: "README.md", text: "playwright" }])).toEqual([]);
+  expect(detectPacks([{ path: "src/Floralin.Core/Floralin.Core.csproj", text: "<Project />" }, { path: "global.json", text: "{}" }])).toEqual(["dotnet"]);
+  expect(detectPacks([{ path: "docs/NuGet.Config", text: "" }])).toEqual(["dotnet"]);
 });
 
 test("detection reads tracked manifests of a git work tree and skips node_modules", async () => {
@@ -40,8 +42,10 @@ test("detection reads tracked manifests of a git work tree and skips node_module
     await fs.writeFile(path.join(dir, "package.json"), JSON.stringify({ workspaces: ["e2e"] }));
     await fs.writeFile(path.join(dir, "e2e", "package.json"), JSON.stringify({ devDependencies: { "@playwright/test": "1" } }));
     await fs.writeFile(path.join(dir, "untracked-Cargo.toml"), "");
-    git("add", "package.json", "e2e/package.json");
-    expect(await detectPacksInRepo(dir)).toEqual(["node", "playwright"]);
+    await fs.mkdir(path.join(dir, "src", "Lib"), { recursive: true });
+    await fs.writeFile(path.join(dir, "src", "Lib", "Lib.csproj"), "<Project />");
+    git("add", "package.json", "e2e/package.json", "src/Lib/Lib.csproj");
+    expect(await detectPacksInRepo(dir)).toEqual(["node", "playwright", "dotnet"]);
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }

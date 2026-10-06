@@ -153,7 +153,7 @@ the default bridge, so it alone has egress.
   approve.
 - **Network packs.** The allowlist is built from named packs of toolchain
   download hosts (`src/network/packs.ts`: node, python, debian, github,
-  playwright, cypress, chromium, rust, go, jvm, ruby) plus extra hosts you
+  playwright, cypress, chromium, rust, go, jvm, ruby, dotnet) plus extra hosts you
   type. A new session gets node, python, debian and github; ticking a
   repository on the New session form ticks the packs its tracked manifests
   imply (read on the host as data, never run). `api.anthropic.com` is
@@ -174,9 +174,13 @@ so that the proxy container can reach it at `host.docker.internal:4701`
 (on Linux the proxy is started with `--add-host
 host.docker.internal:host-gateway`).
 
-- Every request carries a **run token**, random per run, in an
-  `Authorization` header. A token grants access to one run's board, its
-  notes and its request inbox, nothing else.
+- Every request carries a **run token**, random per worker, in an
+  `Authorization` header, issued when the worker starts and revoked when
+  it ends. A token grants access to one run's board, its notes and its
+  request inbox, nothing else. Its role limits it further: a worker
+  cannot move tickets at all; a lead may claim a ready ticket and submit
+  the one it holds, but never move one to `done`, which only the
+  harness's judge does after gates and an independent reviewer.
 - The proxy allows plain HTTP only to `host.docker.internal:4701` and only
   under the path prefix `/agent/`. The UI and the session management API
   live on **4700**, bound to `127.0.0.1`, which no container can reach.
@@ -201,6 +205,12 @@ machine (`core.fsmonitor`, `core.sshCommand`, `pre-commit`). So:
   data) and writes into your own checkout, force-updating only the branch
   `verstas/<session>` and refusing if that branch is checked out. The
   workspace's `.git` is still never read by host git.
+- **A session archive** (Export session) carries each clone as a bundle
+  made the same way. Importing it runs host git only in a repository it
+  has just created empty (no template, nothing from the archive's `.git`),
+  fetching from the bundle: the same footing as the first clone. The
+  workspace's other files are read as files, never followed through a
+  symlink, and unpacked with the attachment checks.
 - Do not `git fetch` or `git pull` directly from `workspace/<repo>` on the
   host. The UI does not offer it and this document is why.
 

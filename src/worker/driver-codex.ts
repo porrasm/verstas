@@ -21,7 +21,7 @@ import { combinedPrompt, type DriverImpl, type Job } from "./driver.js";
 import { CODEX_RATE_LIMIT, createCodexTranslator } from "./translate-codex.js";
 
 /** Environment the board MCP server needs; Codex starts MCP servers with the env named in its config. */
-const MCP_ENV = ["VERSTAS_AGENT_API", "VERSTAS_RUN_TOKEN", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy"];
+const MCP_ENV = ["VERSTAS_AGENT_API", "VERSTAS_RUN_TOKEN", "VERSTAS_ROLE", "VERSTAS_BUDGET_FILE", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy"];
 
 const toml = (s: string) => JSON.stringify(s); // a JSON string literal is a valid TOML basic string
 

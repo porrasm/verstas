@@ -1,4 +1,7 @@
-import type { Board, Session, Ticket } from "../core/types.js";
+import { promises as fs } from "node:fs";
+import path from "node:path";
+import { verstasHome } from "../config.js";
+import { attachmentLines, type Board, type Session, type Ticket } from "../core/types.js";
 import { NETWORK_PACKS } from "../network/packs.js";
 
 /**
@@ -18,7 +21,7 @@ board and the log later. Facts about this box:
   but are not in the workspace.
 - Repositories, fresh clones on branch \`verstas/${session.id}\`:
 ${session.repos.map((r) => `  - \`/workspace/${r.name}\` (from \`${r.branch}\`)`).join("\n") || "  - (none)"}
-- Attachments the user added: ${session.attachments.length ? session.attachments.map((a) => `\`/workspace/attachments/${a.dir}\``).join(", ") : "none"}.
+- Attachments the user added${session.attachments.length ? `, with what the user said they are:\n${attachmentLines(session.attachments, "  ")}` : ": none."}
 - Notes for future workers: \`/workspace/notes/\`. Read \`INDEX.md\` first;
   append what the next worker should know to \`learnings.md\`.
 - The environment: \`/workspace/notes/env.md\` says what is installed, which
@@ -60,11 +63,20 @@ ${session.setupScripts.length ? session.setupScripts.map((x) => `  - ${x.name}: 
   commit, do not rewrite history, do not create branches.
 `;
 
-export const systemMd = (role: "implementer" | "reviewer" | "planner" | "setup" | "prompt"): string => {
+/** Where a lead's rules can be replaced without a rebuild: read for every new lead. */
+export const leadRulesFile = (): string => path.join(verstasHome(), "prompts", "lead.md");
+
+/** The lead's role rules: the override file when it exists and is not empty, else the built-in text. */
+export const readLeadRules = async (file = leadRulesFile()): Promise<string | undefined> => {
+  const text = await fs.readFile(file, "utf8").catch(() => "");
+  return text.trim() ? `\nRole: lead.\n${text.trim()}` : undefined;
+};
+
+export const systemMd = (role: "implementer" | "reviewer" | "planner" | "setup" | "prompt" | "lead", leadRules?: string): string => {
   const common = `You are one worker in a long-running Verstas session. Read /workspace/VERSTAS.md first.
 
 Rules that apply to every role:
-- Work only on what the prompt gives you. Never widen the scope.
+- ${role === "lead" ? "Work the board's tickets. Work you find that the board lacks becomes a ticket (board_create_ticket), not a silent addition to the ticket you hold." : "Work only on what the prompt gives you. Never widen the scope."}
 - Nobody is watching while you work; the user reads the board later. Fix what you can yourself: install missing tools with sudo (and append the command to /workspace/notes/setup.sh and a line to env.md), restart a service with svc, re-create a dummy config. The environment was set up before work started; if it broke, repair it rather than asking.
 - Only for what you cannot do yourself (a host the proxy refuses, something only a person can do, a decision that is genuinely the user's), gather EVERYTHING into one \`request\` (summary + actions: pack or network for hosts, resources, instruction, question), then stop; do not work around the proxy. Questions are the exception, not the habit: when a sensible choice exists, make it, write the assumption in a note and the report, and continue; a reviewer can overturn an assumption cheaply, a parked ticket costs a night. Never ask for a secret value in an answer; ask them to place it in a file under /workspace and tell you the path.
 - Bugs and gaps you notice but must not fix now: \`board_create_ticket\` (kinds bug, followup, chore). Feature ideas: \`idea\`. Observations: \`message\`.
@@ -81,11 +93,14 @@ Role: implementer. Definition of done for your ticket:
 5. You left notes for the next worker, who starts with a fresh context and knows only what is written down: a trap, a command, a decision, a slow test goes into /workspace/notes/learnings.md (one line each); a wrong line in brief.md or env.md gets fixed.
 Then reply with one line and stop. If you cannot finish within the caps, file the report with what is done and what is left; the harness will requeue the ticket if the reviewer thinks it is fixable.`,
     reviewer: `
-Role: reviewer. You did not write this change. Read the ticket, its acceptance criteria and the diff the prompt gives you, run the tests yourself, and decide. Your reply must start with exactly one of:
+Role: reviewer. You did not write this change. Two passes, both required.
+1. Acceptance: read the ticket and its criteria, run the tests and the commands the criteria name yourself, and check each criterion.
+2. Code: read every hunk of the diff, not only the tests. Look for a test that mirrors the implementation or a threshold tuned until a fixture passes; user input that can throw, recurse or grow memory without bound; a loop that allocates or does string work per element where the design asks for a hot path; a contract document (a DESIGN or README the repository treats as its spec) that the change contradicts or should have updated; copied code where a call would do; a decision the ticket did not ask for and the report does not mention.
+Name at least one concrete finding with file and line, or write "code pass: nothing found" and the number of hunks you read. A finding that does not block the ticket becomes a bug or followup ticket with \`board_create_ticket\`, and the verdict stays ok. Your reply must start with exactly one of:
 VERDICT: ok
 VERDICT: fixable
 VERDICT: blocked
-followed by your reasons in a few lines. "fixable" means another implementer attempt with your notes would likely finish it; "blocked" means the ticket as written cannot be done or the change is harmful. Add specific notes with \`board_add_note\`. Do not fix the code yourself.`,
+followed by your reasons in a few lines, the code pass included. "fixable" means another implementer attempt with your notes would likely finish it; "blocked" means the ticket as written cannot be done or the change is harmful. Add specific notes with \`board_add_note\`. Do not fix the code yourself.`,
     setup: `
 Role: setup (the environment and the project brief). No ticket work.
 
@@ -112,10 +127,19 @@ then one line per requirement, as a checklist, in the user's words:
 then a short summary. "ready" means every requirement is checked and work can start now. "needs" means something is missing; say what, and file the request.`,
     prompt: `
 Role: the user's direct request. The user typed the task below on the session page; do exactly that. There is no ticket and no reviewer. You may install and configure (with sudo), start services, investigate, and update the notes (env.md, setup.sh, brief.md, learnings.md) when what you do changes what they say. Change repository files only if the request asks for it; the harness commits any repository change as one commit after you. Do not work on board tickets. End with a reply for the user, a few lines: what you did, what you found, anything they should decide.`,
+    lead: `
+Role: lead. You work this session's board until nothing you can start is left. Nobody picks tickets for you: you choose the order, decide when to read and when to build, and may use subagents for research or for independent parts of a ticket. What is fixed is the contract with the board:
+
+1. Claim a ticket with \`board_claim\` before you change files for it. You hold one ticket at a time; the repositories have one working tree, and each ticket becomes one commit.
+2. When its work is finished (the change made, tests for it passing, the docs it affects updated), file the report with \`board_report\` and submit it with \`board_submit\`. The harness runs the checks and an independent reviewer, commits, and moves it to done, or back to ready with the reviewer's notes, or to blocked. You never mark a ticket done yourself. Read the verdict: fix and resubmit, or leave the ticket and come back to it later.
+3. A ticket that needs something only the user can give: one \`request\` with everything, while you hold it. The ticket parks and you are free to claim the next one.
+4. Keep notes/ true for whoever comes after you, as every worker does: traps and commands in learnings.md, a wrong line in brief.md or env.md fixed.
+5. Watch your context with \`budget\`. When it has become noise (the session has moved on from what you first read, you keep re-reading the same files, or the context is large), finish or park what you hold if you can, then \`handoff\` with a note: what is in flight, what you tried, what you learned that is not in notes/ yet, what to do next. A fresh lead starts from that note.
+6. When no ticket you can start is left (everything is done, waiting on the user, or blocked), reply with one line saying so and stop.`,
     planner: `
 Role: planner. Turn the user's planning request into tickets with \`board_create_ticket\`: small (S) or medium (M) where possible, each with a clear spec, acceptance criteria that a reviewer can check, the repository it touches, and dependencies by id when order matters. You may create feature tickets; keep them within the request. Prefer ten good tickets over thirty vague ones. When the board already has tickets, add only what is missing and do not duplicate. Reply with a short summary of the plan and stop.`,
   };
-  return common + "\n" + byRole[role];
+  return common + "\n" + (role === "lead" && leadRules ? leadRules : byRole[role]);
 };
 
 const ticketBlock = (t: Ticket): string => `# ${t.id}: ${t.title}
@@ -150,7 +174,15 @@ export const withContext = (brief: string | null, env: string | null, prompt: st
     .filter(Boolean)
     .join("\n\n---\n\n");
 
-export const implementerPrompt = (board: Board, ticket: Ticket, answer?: string): string => `${ticketBlock(ticket)}
+export const implementerPrompt = (board: Board, ticket: Ticket, answer?: string, continuing = false): string =>
+  continuing
+    ? `# Next ticket
+You are continuing in the same conversation: what you learned about the repositories and the box still holds, so do not re-read what you already know. The harness has taken the previous ticket from you (judged, parked or requeued) and committed what there was. Check the board or the files only where this ticket needs something new.
+
+${ticketBlock(ticket)}
+${answer ? `## The user answered your request\n${answer}\n` : ""}
+Do the ticket. Finish with \`board_report\` and one line.`
+    : `${ticketBlock(ticket)}
 ${answer ? `## The user answered your request\n${answer}\n` : ""}
 ## Recent reports from other workers
 ${recentReports(board, ticket.id)}
@@ -179,7 +211,7 @@ ${diffStat || "(empty: no files changed. That is fine when the ticket's delivera
 ${diff.length > 60_000 ? diff.slice(0, 60_000) + "\n… (truncated; read the files for the rest)" : diff}
 \`\`\`
 
-Run the tests yourself if the gates did not. Reply starting with VERDICT: ok | fixable | blocked.`;
+Run the tests yourself if the gates did not. Do the code pass over every hunk above (read the files when the diff is truncated). Reply starting with VERDICT: ok | fixable | blocked.`;
 
 export const setupPrompt = (session: Session, board: Board, answers: string[], mode: "setup" | "brief"): string => `${mode === "brief" ? "# Brief only\nRefresh /workspace/notes/brief.md (and env.md if it is out of date) against the repositories and the board as they are today. Install nothing unless a command you need to verify is missing. Still reply with a SETUP line.\n\n" : ""}# Set up the environment
 Make this box a sensible place to develop the repositories below: their toolchains at the versions they pin, their dependencies installed from their lockfiles, the services their tests need, their own build and test commands verified by running them, and env.md written for the workers. Work out what is needed from the repositories and the board; do not implement any ticket, and do not install things only one later ticket would need.
@@ -189,7 +221,7 @@ ${session.requirements.trim() || "(none)"}
 
 # Repositories
 ${session.repos.map((r) => `- /workspace/${r.name} (branch ${r.branch})`).join("\n") || "- none"}
-
+${session.attachments.length ? `\n# Attachments (what the user said they are)\n${attachmentLines(session.attachments)}\n` : ""}
 # Board
 ${board.tickets.length ? board.tickets.map((t) => `- ${t.id} [${t.state}] ${t.title} (${t.kind}, ${t.size}${t.repo ? `, ${t.repo}` : ""})${t.spec ? `: ${t.spec.replace(/\s+/g, " ").slice(0, 300)}` : ""}`).join("\n") : "- empty"}
 ${answers.length ? `\n# Your earlier setup requests were answered\n${answers.map((a) => `- ${a}`).join("\n")}\n` : ""}
@@ -239,3 +271,30 @@ You are inside a Verstas sandbox. Read, in this order:
 
 Repositories live under /workspace/<name> and may carry their own CLAUDE.md.
 `;
+
+const boardLines = (board: Board): string =>
+  board.tickets.length
+    ? board.tickets.map((t) => `- ${t.id} [${t.state}] ${t.title} (${t.kind}, ${t.size}${t.repo ? `, ${t.repo}` : ""}${t.deps.length ? `, after ${t.deps.join(" ")}` : ""}, priority ${t.priority})`).join("\n")
+    : "- empty";
+
+/** A fresh lead: the board, what it holds, and the previous lead's note. */
+export const leadPrompt = (board: Board, opts: { holds?: Ticket; handoff?: string } = {}): string => `# Work the board
+${board.goal ? `Goal: ${board.goal}\n` : ""}
+${opts.handoff ? `## Note from the previous lead\n${opts.handoff.trim()}\n` : ""}
+${opts.holds ? `## You hold ${opts.holds.id} (${opts.holds.state})\nA previous lead claimed it and did not finish. Its changes, if any, are in the working tree. Continue it, or file a request on it if it needs the user.\n\n${ticketBlock(opts.holds)}` : ""}
+## Board
+${boardLines(board)}
+
+## Recent reports
+${recentReports(board, opts.holds?.id ?? "")}
+
+Read /workspace/VERSTAS.md and /workspace/notes/INDEX.md if you have not. Then work: \`board_get_ticket\` for the full spec of a ticket, \`board_claim\` before changing files, \`board_submit\` when it is finished.`;
+
+/** A lead continuing its own conversation: only what changed. */
+export const leadContinuePrompt = (board: Board, holds?: Ticket): string => `# Continue
+You are continuing in the same conversation. The board as it stands now:
+
+${boardLines(board)}
+${holds ? `\nYou still hold ${holds.id} (${holds.state}).` : ""}
+
+Carry on with the board. When nothing you can start is left, reply with one line and stop.`;

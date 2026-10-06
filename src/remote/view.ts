@@ -1,16 +1,19 @@
 import type { Run, Session, Board, Inbox, VerstasEvent } from "../core/types.js";
-import { isInitialized } from "../core/types.js";
 import { packHosts } from "../network/packs.js";
 
 /**
  * What a shared session looks like on the remote dashboard: the board, the
- * inbox, the run's state and a short activity log, every text capped. Tool
- * results, file contents, diffs and costs per call never leave; tool calls
- * show as one line ("Bash: npm test"). The shape is the dashboard's
+ * open requests, the run's state, your prompts to the box and a short
+ * activity log, every text capped. Tool results, file contents, diffs and
+ * costs per call never leave; tool calls show as one line ("Bash: npm test").
+ *
+ * Deliberately small and stable (docs/REMOTE.md): only initialized sessions
+ * are sent, and nothing about setup, agents or settings, so the dashboard
+ * need not follow those as they change. The shape is the dashboard's
  * VerstasRemoteSession (apps monorepo, common/src/apps/verstas.ts).
  */
 
-export const REMOTE_PROTOCOL = 1;
+export const REMOTE_PROTOCOL = 2;
 
 /** Events kept per session for the activity tab. */
 export const REMOTE_EVENTS = 80;
@@ -71,24 +74,6 @@ export const remoteSession = (x: RemoteSessionInput) => {
     id: s.id,
     name: s.name,
     state: s.state,
-    goal: cap(s.goal, 2000),
-    createdAt: s.createdAt,
-    ...(s.model ? { model: s.model } : {}),
-    repos: s.repos.map((r) => r.name),
-    requirements: cap(s.requirements, 4000),
-    needsSetup: !isInitialized(s),
-    initialized: isInitialized(s),
-    ...(s.readiness
-      ? {
-          readiness: {
-            verdict: s.readiness.verdict,
-            at: s.readiness.at,
-            summary: cap(s.readiness.summary, 2000),
-            checks: s.readiness.checks.map((c) => ({ text: cap(c.text, 300), ok: c.ok })),
-            ...(s.readiness.confirmedAt ? { confirmedAt: s.readiness.confirmedAt } : {}),
-          },
-        }
-      : {}),
     active: x.active,
     ...(run
       ? {
@@ -106,7 +91,6 @@ export const remoteSession = (x: RemoteSessionInput) => {
         }
       : {}),
     totals: x.totals,
-    caps: { budgetUsd: s.caps.budgetUsd, runTickets: s.caps.runTickets, reviewer: s.caps.reviewer },
     tickets: board.tickets.map((t) => ({
       id: t.id,
       title: t.title,
@@ -141,8 +125,7 @@ export const remoteSession = (x: RemoteSessionInput) => {
         ...(a.outcome ? { outcome: cap(a.outcome, 500) } : {}),
       })),
     })),
-    messages: inbox.messages.slice(-20).map((m) => ({ id: m.id, ...(m.ticketId ? { ticketId: m.ticketId } : {}), text: cap(m.text, 2000), createdAt: m.createdAt, read: m.read })),
-    prompts: s.prompts.slice(-5).map((p) => ({ at: p.at, text: cap(p.text, 2000), reply: cap(p.reply, 4000), stopReason: p.stopReason })),
+    prompts: s.prompts.filter((p) => p.kind === "prompt").slice(-5).map((p) => ({ at: p.at, text: cap(p.text, 2000), reply: cap(p.reply, 4000), stopReason: p.stopReason })),
     events: x.events.slice(-REMOTE_EVENTS),
   };
 };

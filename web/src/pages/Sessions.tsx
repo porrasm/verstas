@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, fmtAgo, fmtDateTime, fmtUsd, STATE_LABEL, useLive, useNow, type DraftRow, type SessionSummary, type Status } from "../api";
+import { api, ApiError, upload, fmtAgo, fmtDateTime, fmtUsd, STATE_LABEL, useLive, useNow, type DraftRow, type SessionSummary, type Status } from "../api";
 
 const ORDER = ["done", "review", "in_progress", "waiting", "blocked", "ready", "backlog"];
 
@@ -87,6 +87,29 @@ export const SessionsPage = ({ status }: { status: Status | null }) => {
       setErr((e as Error).message);
     }
   };
+  /** An archive whose id exists here waits for your choice: replace that session or import a copy. */
+  const [clash, setClash] = useState<{ upload: string; id: string; name: string } | null>(null);
+  const runImport = async (uploadId: string, as?: "replace" | "copy"): Promise<string> => {
+    setClash(null);
+    try {
+      const r = await api<{ session: { id: string; name: string }; unmapped: string[]; skipped: string[] }>("POST", "/sessions/import", { upload: uploadId, as });
+      const unmapped = r.unmapped.length ? ` No work target here for ${r.unmapped.join(", ")}: add one with the same name to apply its work to a repository here (exporting bundles works regardless).` : "";
+      return `Imported ${r.session.name} (${r.session.id}). Open it and press Initialize: the container, recipes and setup are rebuilt here; the clones, board and notes are kept.${unmapped}`;
+    } catch (e) {
+      const exists = e instanceof ApiError && e.status === 409 ? (e.body as { exists?: { id: string; name: string } } | null)?.exists : undefined;
+      if (!exists) throw e;
+      setClash({ upload: uploadId, ...exists });
+      return "";
+    }
+  };
+  const importArchive = (uploadId: string, as: "replace" | "copy") => hostAct("importing", () => runImport(uploadId, as));
+  const pickArchive = (file: File | undefined) => {
+    if (!file) return;
+    void hostAct("uploading", async () => {
+      const u = await upload(file);
+      return runImport(u.id);
+    });
+  };
   const sorted = rows ? [...rows].sort((a, b) => (b.totals?.lastActivityAt ?? b.session.createdAt).localeCompare(a.totals?.lastActivityAt ?? a.session.createdAt)) : null;
   return (
     <div className="stack">
@@ -104,9 +127,23 @@ export const SessionsPage = ({ status }: { status: Status | null }) => {
           ) : (
             <button className="quiet sm" onClick={() => setQuitArm(true)} disabled={Boolean(busy)} title="Shut Verstas down: active runs stop and requeue their tickets, containers stop, the app exits">Quit Verstas</button>
           )}
+          <label className="btn" aria-disabled={Boolean(busy)} title="A session exported from another machine (.ver)">
+            Import session…
+            <input type="file" accept=".ver,.zip" hidden disabled={Boolean(busy)} onChange={(e) => { pickArchive(e.target.files?.[0]); e.target.value = ""; }} />
+          </label>
           <a className="btn pri" href="#/new">New session</a>
         </span>
       </div>
+      {clash && (
+        <div className="banner warn">
+          <span>A session <code>{clash.id}</code> ({clash.name}) exists here already. Replace it with the imported one (its container, clones and history here are removed), or import a copy under a new id?</span>
+          <span className="end row" style={{ gap: 6 }}>
+            <button className="warn solid sm" onClick={() => importArchive(clash.upload, "replace")} disabled={Boolean(busy)}>Replace</button>
+            <button className="sm" onClick={() => importArchive(clash.upload, "copy")} disabled={Boolean(busy)}>Import a copy</button>
+            <button className="quiet sm" onClick={() => setClash(null)}>Cancel</button>
+          </span>
+        </div>
+      )}
       {err && <div className="banner warn"><span>{err}</span><button className="quiet sm end" onClick={() => setErr("")}>Dismiss</button></div>}
       {note && <div className="banner good" role="status"><span>{note}</span><button className="quiet sm end" onClick={() => setNote("")}>Dismiss</button></div>}
       {status && !status.docker.ok && <div className="banner warn">Docker is not reachable. Sessions can be created and edited, but not run.</div>}

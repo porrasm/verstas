@@ -154,7 +154,7 @@ test("cursor driver: the board server goes into the user-level mcp.json for the 
     expect(Object.keys(written.mcpServers)).toEqual(["board"]);
     // Proxy variables of the host running the tests may ride along; nothing else does.
     expect(written.mcpServers.board!.env).toMatchObject({ VERSTAS_AGENT_API: "http://host.docker.internal:4701/agent", VERSTAS_RUN_TOKEN: "run-9" });
-    expect(Object.keys(written.mcpServers.board!.env).every((k) => /^(VERSTAS_AGENT_API|VERSTAS_RUN_TOKEN|https?_proxy|HTTPS?_PROXY|no_proxy|NO_PROXY)$/.test(k))).toBe(true);
+    expect(Object.keys(written.mcpServers.board!.env).every((k) => /^(VERSTAS_AGENT_API|VERSTAS_RUN_TOKEN|VERSTAS_ROLE|VERSTAS_BUDGET_FILE|https?_proxy|HTTPS?_PROXY|no_proxy|NO_PROXY)$/.test(k))).toBe(true);
     await cursorDriver.finish!(job);
     expect(await fs.readFile(userFile, "utf8")).toBe('{"mcpServers":{"mine":{"command":"x"}}}');
     // No previous file: it is removed again.
@@ -196,4 +196,52 @@ test("worker: a driver whose CLI is not installed ends with driver_missing inste
   expect(String(parsed[1]!.text)).toContain("agent or cursor-agent");
   expect(await findBinary(["definitely-not-a-binary-xyz"])).toBeUndefined();
   expect(Object.keys(DRIVER_IMPLS)).toEqual(["claude", "codex", "cursor"]);
+});
+
+test("claude keeps a conversation only when the job names one: a new id, or a resume", () => {
+  const base = { role: "implementer", promptFile: "/p", systemPromptFile: "/s", caps: { minutes: 1, turns: 1, budgetUsd: 1 }, mcpConfigFile: "/m" } as Job;
+  const throwaway = claudeArgs(base);
+  expect(throwaway).toContain("--no-session-persistence");
+  expect(throwaway).not.toContain("--resume");
+  const fresh = claudeArgs({ ...base, agentSession: { id: "0b6c-new", resume: false } });
+  expect(fresh).not.toContain("--no-session-persistence");
+  expect(fresh.slice(fresh.indexOf("--session-id"), fresh.indexOf("--session-id") + 2)).toEqual(["--session-id", "0b6c-new"]);
+  const resumed = claudeArgs({ ...base, agentSession: { id: "0b6c-old", resume: true } });
+  expect(resumed.slice(resumed.indexOf("--resume"), resumed.indexOf("--resume") + 2)).toEqual(["--resume", "0b6c-old"]);
+  expect(resumed).not.toContain("--session-id");
+});
+
+test("worker: the budget file tracks turns and the context size, and the agent is told where it is", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "verstas-budget-"));
+  await fs.writeFile(path.join(dir, "p.md"), "task");
+  await fs.writeFile(path.join(dir, "s.md"), "rules");
+  const budgetFile = path.join(dir, "budget.json");
+  const assistant = (input: number) => JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "hi" }], usage: { input_tokens: 10, cache_read_input_tokens: input, output_tokens: 5 } } });
+  const bin = path.join(dir, "fake-claude");
+  await fs.writeFile(
+    bin,
+    `#!/bin/sh\ncat >/dev/null\necho '${assistant(1000)}'\necho '${assistant(4000)}'\necho "{\\"type\\":\\"result\\",\\"subtype\\":\\"success\\",\\"result\\":\\"$VERSTAS_BUDGET_FILE\\",\\"total_cost_usd\\":0.2,\\"num_turns\\":2}"\n`,
+    { mode: 0o755 },
+  );
+  const job: Job = { role: "implementer", ticket: "T-1", promptFile: path.join(dir, "p.md"), systemPromptFile: path.join(dir, "s.md"), caps: { minutes: 5, turns: 20, budgetUsd: 1 }, mcpConfigFile: path.join(dir, "m.json"), cwd: dir, binary: bin, budgetFile };
+  const lines: string[] = [];
+  const orig = process.stdout.write.bind(process.stdout);
+  (process.stdout as unknown as { write: (s: string) => boolean }).write = (s: string) => {
+    lines.push(String(s));
+    return true;
+  };
+  try {
+    const savedEnv = { role: process.env.VERSTAS_ROLE, budget: process.env.VERSTAS_BUDGET_FILE };
+    expect(await runJob(job)).toBe(0);
+    expect(process.env.VERSTAS_ROLE).toBe("implementer");
+    if (savedEnv.role === undefined) delete process.env.VERSTAS_ROLE; else process.env.VERSTAS_ROLE = savedEnv.role;
+    if (savedEnv.budget === undefined) delete process.env.VERSTAS_BUDGET_FILE; else process.env.VERSTAS_BUDGET_FILE = savedEnv.budget;
+    const budget = JSON.parse(await fs.readFile(budgetFile, "utf8")) as Record<string, unknown>;
+    expect(budget).toMatchObject({ turns: 2, contextTokens: 4010, outputTokens: 10, caps: { turns: 20 }, resumed: false });
+  } finally {
+    (process.stdout as unknown as { write: typeof orig }).write = orig;
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+  const done = lines.map((l) => JSON.parse(l) as Record<string, unknown>).find((e) => e.kind === "worker_done")!;
+  expect(done).toMatchObject({ ok: true, text: budgetFile });
 });

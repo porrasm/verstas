@@ -20,7 +20,7 @@ import path from "node:path";
 import { combinedPrompt, type DriverImpl, type Job } from "./driver.js";
 import { createCursorTranslator } from "./translate-cursor.js";
 
-const MCP_ENV = ["VERSTAS_AGENT_API", "VERSTAS_RUN_TOKEN", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy"];
+const MCP_ENV = ["VERSTAS_AGENT_API", "VERSTAS_RUN_TOKEN", "VERSTAS_ROLE", "VERSTAS_BUDGET_FILE", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy"];
 
 export const cursorArgs = (job: Job, prompt: string): string[] => ["-p", "--output-format", "stream-json", "--force", ...(job.model ? ["--model", job.model] : []), prompt];
 

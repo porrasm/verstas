@@ -66,8 +66,8 @@ const RemoteDashboard = () => {
     <section className="card">
       <h3>Remote dashboard</h3>
       <p className="lead">
-        Follow sessions and answer the inbox from your phone. Create a token in the dashboard (the <code>verstas</code> app), paste its address and the token here, then tick
-        "Remote dashboard" on each session you want to see there. <strong>Sessions are not sent unless you tick them</strong>; for those, tickets, inbox, setup verdict, prompts and a short
+        Follow runs from your phone: the board, the activity log and the requests; start, pause or stop, approve and add tickets, ask the box. Create a token in the dashboard (the <code>verstas</code> app), paste its address and the token here, then tick
+        "Remote dashboard" on each session you want to see there. <strong>Sessions are not sent unless you tick them</strong>, and only once initialized; for those, tickets, requests, your prompts and a short
         activity log go out, never tool output, file contents or diffs. Verstas connects out; nothing here listens for the dashboard.
       </p>
       <div className="two">

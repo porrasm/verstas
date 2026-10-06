@@ -22,6 +22,10 @@ const devUrl = process.env.VERSTAS_DEV_URL ?? "http://127.0.0.1:4710";
 
 app.setName("Verstas");
 
+// The hammer in the Dock under `npm start` too (the launcher bundle carries it as its .icns).
+const dockIcon = path.join(root, "electron", "icon.png");
+if (process.platform === "darwin" && app.dock && existsSync(dockIcon)) app.whenReady().then(() => app.dock.setIcon(dockIcon));
+
 // A desktop launch gets a short PATH; Verstas shells out to docker and git.
 if (process.platform === "darwin") {
   const extra = ["/usr/local/bin", "/opt/homebrew/bin", "/Applications/Docker.app/Contents/Resources/bin"];

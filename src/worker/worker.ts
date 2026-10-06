@@ -66,13 +66,34 @@ export const runJob = async (job: Job): Promise<number> => {
 
   const prompt = await fs.readFile(job.promptFile, "utf8");
   const system = await fs.readFile(job.systemPromptFile, "utf8");
+  // The board server reads these: which tools this role gets, and where the
+  // running totals are. Set before prepare: Codex and Cursor copy named
+  // variables into their MCP config there; Claude Code passes its env on.
+  process.env.VERSTAS_ROLE = job.role;
+  if (job.budgetFile) process.env.VERSTAS_BUDGET_FILE = job.budgetFile;
   const spawned = await driver.prepare(job, prompt, system, bin);
   const translator = driver.translator(job);
   let turns = 0;
   let stopReason = "";
   let result: Translated["result"];
 
-  const child = spawn(spawned.bin, spawned.args, { cwd: spawned.cwd, stdio: ["pipe", "pipe", "pipe"], env: spawned.env });
+  // The running totals the agent reads through the board server's `budget`
+  // tool. Context is the last turn's input tokens: what the model was sent.
+  const budget = { turns: 0, seconds: 0, contextTokens: 0, outputTokens: 0, caps: job.caps, resumed: Boolean(job.agentSession?.resume) };
+  // One write at a time, each to a temporary file renamed over the last, so
+  // the board server never reads a half-written or interleaved file.
+  let budgetWrites: Promise<void> = Promise.resolve();
+  const writeBudget = () => {
+    const file = job.budgetFile;
+    if (!file) return;
+    budget.seconds = Math.round((Date.now() - t0) / 1000);
+    const text = JSON.stringify(budget);
+    budgetWrites = budgetWrites.then(() => fs.writeFile(`${file}.tmp`, text).then(() => fs.rename(`${file}.tmp`, file))).catch(() => undefined);
+  };
+  writeBudget();
+  const env = { ...spawned.env, VERSTAS_ROLE: job.role, ...(job.budgetFile ? { VERSTAS_BUDGET_FILE: job.budgetFile } : {}) };
+
+  const child = spawn(spawned.bin, spawned.args, { cwd: spawned.cwd, stdio: ["pipe", "pipe", "pipe"], env });
   child.stdin.end(spawned.stdin ?? "");
 
   const stop = () => {
@@ -116,10 +137,18 @@ export const runJob = async (job: Job): Promise<number> => {
   for await (const line of rl) {
     if (job.debug) emit({ kind: "raw", t: new Date().toISOString(), line });
     const out = translator.line(line);
-    for (const e of out.events) emit(e);
+    for (const e of out.events) {
+      emit(e);
+      if (e.kind === "cost") {
+        budget.contextTokens = e.cost.inputTokens;
+        budget.outputTokens += e.cost.outputTokens;
+      }
+    }
     if (out.result) result = out.result;
     if (out.assistantTurn) {
       turns++;
+      budget.turns = turns;
+      writeBudget();
       if (turns > job.caps.turns && !stopReason) {
         stopReason = "turn_cap";
         emit({ kind: "status", t: new Date().toISOString(), ticket: job.ticket, text: `turn cap of ${job.caps.turns} reached; stopping` });
@@ -129,6 +158,7 @@ export const runJob = async (job: Job): Promise<number> => {
   }
   const code = await exited;
   clearTimeout(timer);
+  await budgetWrites;
   if (!result) result = translator.end();
 
   const after = await driver.finish?.(job).catch(() => undefined);
