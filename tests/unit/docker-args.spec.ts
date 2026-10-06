@@ -3,6 +3,7 @@ import {
   connectProxyToBridgeArgs,
   createNetworkArgs,
   execArgs,
+  ownWorkspaceArgs,
   runProxyArgs,
   setupScriptArgs,
   runSessionArgs,
@@ -135,4 +136,11 @@ test("each worker runs from its own job file, and stopping one matches only that
   expect(workerCommand("/workspace/.verstas/jobs/3-6-implementer/job.json").join(" ")).not.toContain(workerPattern(a));
   // Recovery after a crash still stops them all.
   expect(workerCommand(a).join(" ")).toContain(WORKER_PATTERN);
+});
+
+test("handing the workspace to the agent runs as root and touches only files the agent does not own", () => {
+  const args = ownWorkspaceArgs("nuppi-mvp");
+  expect(args.slice(0, 3)).toEqual(["exec", "-u", "root"]);
+  expect(args).toContain("verstas-nuppi-mvp");
+  expect(args.slice(args.indexOf("find"))).toEqual(["find", "/workspace", "-xdev", "!", "-user", "1000", "-exec", "chown", "-h", "1000:1000", "{}", "+"]);
 });

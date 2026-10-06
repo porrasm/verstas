@@ -1015,7 +1015,8 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
     if (!isInitialized(h.session)) throw Object.assign(new Error("Nothing to export: the session is not initialized"), { status: 409 });
     await ensureSessionSandbox(d.runConfig, h.session, path.join(h.paths.dir, "sandbox.env"), false);
     const sh = dockerShell(d.sandbox, h.id);
-    await sh.exec(["mkdir", "-p", "/workspace/.verstas/export"]);
+    const mk = await sh.exec(["mkdir", "-p", "/workspace/.verstas/export"]);
+    if (mk.code !== 0) throw new Error(`The agent cannot write in /workspace (${mk.stderr.trim().slice(-200)}); on a Linux host the workspace must be owned by uid 1000, which the sandbox arranges at start`);
     const files: { repo: string; file: string; branch: string; bytes: number }[] = [];
     for (const repo of h.session.repos.filter((r) => !names || names.includes(r.name))) {
       const bundle = `/workspace/.verstas/export/${repo.name}.bundle`;

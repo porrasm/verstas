@@ -17,6 +17,7 @@ import {
   containerName,
   createNetworkArgs,
   execArgs,
+  ownWorkspaceArgs,
   listLabelledArgs,
   listLabelledNetworksArgs,
   logsArgs,
@@ -164,6 +165,17 @@ export const ensureSandboxUp = async (cfg: SandboxConfig, spec: SandboxSpec, opt
   }
   if (st.container === "stopped") await docker.run(["start", containerName(spec.sessionId)]);
   return { recreated: false };
+};
+
+/**
+ * On a Linux host, makes the agent the owner of what the host app wrote into
+ * the workspace (see ownWorkspaceArgs); elsewhere a no-op. Best effort: a
+ * failure is returned for the log, the box still starts.
+ */
+export const ownWorkspace = async (cfg: SandboxConfig, sessionId: string): Promise<string | null> => {
+  if (!cfg.linuxHost) return null;
+  const r = await cfg.docker.run(ownWorkspaceArgs(sessionId), { allowFailure: true, timeoutMs: 120_000 });
+  return r.code === 0 ? null : `could not hand the workspace to the agent: ${(r.stderr || r.stdout).trim().slice(-300)}`;
 };
 
 /** Starts whatever is stopped, recreates nothing; returns what it did, for the log. */

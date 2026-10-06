@@ -236,6 +236,18 @@ export type ExecOptions = {
   passEnv?: readonly string[];
 };
 
+/**
+ * Gives the agent (uid 1000) every workspace file it does not own yet. On a
+ * Linux host a bind mount keeps the host's real ownership, so what the host
+ * app wrote (clones, an import, notes, .verstas/) belongs to the host user,
+ * which is root on a server, and the agent could not even create a file in
+ * /workspace. Docker Desktop on macOS and Windows maps ownership itself, so
+ * there this is not run. Only mismatched files are touched, which keeps a
+ * repeat cheap on a large workspace.
+ */
+export const ownWorkspaceArgs = (sessionId: string): string[] =>
+  execArgs(sessionId, ["find", "/workspace", "-xdev", "!", "-user", "1000", "-exec", "chown", "-h", "1000:1000", "{}", "+"], { user: "root" });
+
 export const execArgs = (sessionId: string, cmd: readonly string[], opts: ExecOptions = {}): string[] => [
   "exec",
   ...(opts.stdin ? ["-i"] : []),

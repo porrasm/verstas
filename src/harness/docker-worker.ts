@@ -4,7 +4,7 @@ import type { DriverName, Session } from "../core/types.js";
 import type { SessionHub } from "../sessions/hub.js";
 import type { RunTokens } from "../agent-api/agent-api.js";
 import { promises as fs } from "node:fs";
-import { buildSpec, ensureSandboxUp, execInSandbox, healSandbox, proxyLogsSince, runInSandbox, runRootScript, runSetupScript, snapshotSandbox, usableSnapshot, writeEnvFile, type SandboxConfig } from "../sandbox/lifecycle.js";
+import { buildSpec, ensureSandboxUp, execInSandbox, healSandbox, ownWorkspace, proxyLogsSince, runInSandbox, runRootScript, runSetupScript, snapshotSandbox, usableSnapshot, writeEnvFile, type SandboxConfig } from "../sandbox/lifecycle.js";
 import { now, type SetupResult } from "../core/types.js";
 import { secretValues, type Secrets } from "../config.js";
 import { writeAllowlist } from "../sessions/sessions.js";
@@ -184,6 +184,9 @@ export const ensureSessionSandbox = async (c: RunManagerConfig, session: Session
   // A confirmed environment was committed to an image: a recreated box starts from it, already set up.
   const snapshot = await usableSnapshot(c.sandbox, session);
   const { recreated } = await ensureSandboxUp(c.sandbox, buildSpec(c.sandbox, session, h.paths, envFile, snapshot));
+  // Files the host wrote since the last start (an import, recipes, env.md, the logs directory above) must be the agent's.
+  const owned = await ownWorkspace(c.sandbox, session.id);
+  if (owned) console.warn(`[sandbox ${session.id}] ${owned}`);
   const fromSnapshot = recreated && Boolean(snapshot);
   // Setup scripts run on a fresh container, and also when a previous setup never completed.
   const setupPending = !fromSnapshot && session.setupScripts.length > 0 && (recreated || session.setup.length === 0 || session.setup.some((r) => !r.ok));
