@@ -1,10 +1,15 @@
 import {
   boardImportSchema,
   BOARD_FORMAT_VERSION,
+  CHORE_ID_PATTERN,
   now,
   TICKET_ID_PATTERN,
   type Board,
   type BoardImport,
+  type Chore,
+  type ChoreImport,
+  type Sweep,
+  type SweepResult,
   type Ticket,
   type TicketImport,
   type TicketKind,
@@ -28,7 +33,11 @@ export class BoardError extends Error {
       | "pinned"
       | "forbidden_kind"
       | "forbidden_move"
-      | "unknown_repo",
+      | "unknown_repo"
+      | "unknown_chore"
+      | "chore_state"
+      | "sweep_in_flight"
+      | "no_sweep",
   ) {
     super(message);
   }
@@ -219,6 +228,8 @@ export type ImportResult = {
   created: string[];
   updated: string[];
   skipped: { title: string; reason: string }[];
+  /** Chores created by this import. */
+  chores: string[];
 };
 
 /**
@@ -303,15 +314,171 @@ export const importBoard = (
   }
 
   validateDeps(tickets);
+  let next: Board = { ...board, verstas: BOARD_FORMAT_VERSION, goal: parsed.goal ?? board.goal, tickets };
+  const chores: string[] = [];
+  for (const inc of parsed.chores) {
+    const existing = inc.id ? next.chores.find((c) => c.id === inc.id) : undefined;
+    if (existing) {
+      if (existing.state === "proposed" || existing.state === "open") {
+        next = replaceChore(next, { ...existing, text: inc.text, where: inc.where ?? existing.where, repo: inc.repo ?? existing.repo, state: inc.state ?? existing.state, updatedAt: at });
+      }
+      continue;
+    }
+    const r = addChore(next, inc, opts.by, { state: inc.state ?? (opts.by === "user" ? "open" : undefined) });
+    next = r.board;
+    chores.push(r.id);
+  }
+  return { board: next, created, updated, skipped, chores };
+};
+
+export const emptyBoard = (goal = ""): Board => ({ verstas: BOARD_FORMAT_VERSION, goal, tickets: [], chores: [] });
+
+// --- Chores ----------------------------------------------------------------
+// Small fixes outside the ticket flow: filed by anyone, swept by a lead in
+// batches, committed by the harness after the checks and a size check.
+
+export const nextChoreId = (board: Board, extra: readonly string[] = []): string => {
+  let max = 0;
+  for (const id of [...board.chores.map((c) => c.id), ...extra]) {
+    const n = Number(id.slice(2));
+    if (Number.isFinite(n) && n > max) max = n;
+  }
+  return `C-${max + 1}`;
+};
+
+export const getChore = (board: Board, id: string): Chore => {
+  const c = board.chores.find((x) => x.id === id);
+  if (!c) throw new BoardError(`No chore ${id}`, "unknown_chore");
+  return c;
+};
+
+export const replaceChore = (board: Board, chore: Chore): Board => ({ ...board, chores: board.chores.map((c) => (c.id === chore.id ? chore : c)) });
+
+/** Chores a sweep may take. */
+export const openChores = (board: Board): Chore[] => board.chores.filter((c) => c.state === "open");
+
+/** A sweep that is being worked or judged. */
+export const sweepInFlight = (board: Board): Sweep | undefined => (board.sweep && (board.sweep.state === "working" || board.sweep.state === "judging") ? board.sweep : undefined);
+
+/**
+ * Files a chore. Agents' chores start `open`, or `proposed` when the caller
+ * says so (the session asks you to approve them first); yours start open.
+ */
+export const addChore = (
+  board: Board,
+  input: Pick<ChoreImport, "text" | "where" | "repo"> & { id?: string },
+  by: "user" | "agent" | "harness",
+  opts: { fromTicket?: string; state?: "proposed" | "open" } = {},
+): { board: Board; id: string } => {
+  const at = now();
+  const id = input.id && CHORE_ID_PATTERN.test(input.id) && !board.chores.some((c) => c.id === input.id) ? input.id : nextChoreId(board);
+  const chore: Chore = {
+    id,
+    text: input.text.trim(),
+    where: input.where?.trim() || undefined,
+    repo: input.repo,
+    state: opts.state ?? "open",
+    by,
+    fromTicket: opts.fromTicket,
+    createdAt: at,
+    updatedAt: at,
+  };
+  return { board: { ...board, chores: [...board.chores, chore] }, id };
+};
+
+/** Your moves: approve a proposed chore (to open), or drop one that is not in a sweep. */
+export const setChoreState = (board: Board, id: string, to: "open" | "dropped", note?: string): Board => {
+  const c = getChore(board, id);
+  const ok = (to === "open" && c.state === "proposed") || (to === "dropped" && (c.state === "proposed" || c.state === "open"));
+  if (!ok) throw new BoardError(`Cannot move ${id} from ${c.state} to ${to}`, "chore_state");
+  return replaceChore(board, { ...c, state: to, outcome: to === "dropped" ? note || "Dropped" : c.outcome, updatedAt: now() });
+};
+
+/** A chore that turned out bigger than a chore becomes a backlog ticket (a followup) that quotes it. */
+export const promoteChore = (board: Board, id: string, by: "user" | "agent", opts: { note?: string; role?: AgentRole; sweep?: number } = {}): { board: Board; ticketId: string } => {
+  const c = getChore(board, id);
+  if (c.state !== "proposed" && c.state !== "open" && c.state !== "sweeping") throw new BoardError(`${id} is ${c.state}; only an open chore can become a ticket`, "chore_state");
+  const title = c.text.split("\n")[0]!.slice(0, 200);
+  const spec = [c.text, c.where ? `Where: ${c.where}` : "", opts.note ? `\n${opts.note}` : ""].filter(Boolean).join("\n");
+  const r = importBoard(board, { tickets: [{ title, kind: "followup", spec, repo: c.repo, notes: [`From chore ${c.id}${c.fromTicket ? ` (found while on ${c.fromTicket})` : ""}`] }] }, { by, role: opts.role ?? "lead", defaultState: "backlog" });
+  const ticketId = r.created[0]!;
+  return { board: replaceChore(r.board, { ...getChore(r.board, id), state: "promoted", promotedTo: ticketId, outcome: opts.note, sweep: opts.sweep, updatedAt: now() }), ticketId };
+};
+
+/**
+ * A lead takes a batch of open chores: the given ids, or the oldest `max`.
+ * One sweep at a time; it holds the chores until the harness settles it.
+ */
+export const beginSweep = (board: Board, opts: { ids?: string[]; max?: number } = {}): { board: Board; sweep: Sweep; chores: Chore[] } => {
+  const live = sweepInFlight(board);
+  if (live) throw new BoardError(`Sweep ${live.n} is ${live.state}; submit it before starting another`, "sweep_in_flight");
+  const open = openChores(board);
+  let picked: Chore[];
+  if (opts.ids?.length) {
+    picked = opts.ids.map((id) => {
+      const c = getChore(board, id);
+      if (c.state !== "open") throw new BoardError(`${id} is ${c.state}, not open`, "chore_state");
+      return c;
+    });
+  } else picked = open.slice(0, opts.max ?? 20);
+  if (!picked.length) throw new BoardError("No open chores to sweep", "no_sweep");
+  const at = now();
+  const sweep: Sweep = { n: (board.sweep?.n ?? 0) + 1, ids: picked.map((c) => c.id), state: "working", startedAt: at };
+  const ids = new Set(sweep.ids);
   return {
-    board: { verstas: BOARD_FORMAT_VERSION, goal: parsed.goal ?? board.goal, tickets },
-    created,
-    updated,
-    skipped,
+    board: { ...board, sweep, chores: board.chores.map((c) => (ids.has(c.id) ? { ...c, state: "sweeping", updatedAt: at } : c)) },
+    sweep,
+    chores: picked,
   };
 };
 
-export const emptyBoard = (goal = ""): Board => ({ verstas: BOARD_FORMAT_VERSION, goal, tickets: [] });
+/** The lead submitted its sweep: the harness judges it next. */
+export const sweepToJudging = (board: Board): Board => {
+  const live = sweepInFlight(board);
+  if (!live || live.state !== "working") throw new BoardError("No sweep is being worked; start one with chores_sweep", "no_sweep");
+  return { ...board, sweep: { ...live, state: "judging" } };
+};
+
+/**
+ * The harness's verdict on a sweep. Accepted: every result is applied (done,
+ * dropped with the reason, or promoted to a backlog ticket), and chores the
+ * lead said nothing about go back to open. Refused: everything goes back to
+ * open and the note says why.
+ */
+export const settleSweep = (board: Board, results: readonly SweepResult[], verdict: { accepted: boolean; note: string; diff?: Sweep["diff"] }): { board: Board; done: string[]; dropped: string[]; promoted: { chore: string; ticket: string }[] } => {
+  const live = sweepInFlight(board);
+  if (!live) throw new BoardError("No sweep to settle", "no_sweep");
+  const at = now();
+  let next: Board = board;
+  const done: string[] = [];
+  const dropped: string[] = [];
+  const promoted: { chore: string; ticket: string }[] = [];
+  const settled = new Set<string>();
+  if (verdict.accepted) {
+    for (const r of results) {
+      if (!live.ids.includes(r.id) || settled.has(r.id)) continue;
+      settled.add(r.id);
+      const c = getChore(next, r.id);
+      if (r.outcome === "promoted") {
+        const p = promoteChore(next, r.id, "agent", { note: r.note, sweep: live.n });
+        next = p.board;
+        promoted.push({ chore: r.id, ticket: p.ticketId });
+      } else {
+        next = replaceChore(next, { ...c, state: r.outcome, outcome: r.note || (r.outcome === "done" ? "Done in the sweep" : "Dropped"), sweep: live.n, updatedAt: at });
+        (r.outcome === "done" ? done : dropped).push(r.id);
+      }
+    }
+  }
+  for (const id of live.ids) {
+    if (settled.has(id)) continue;
+    const c = getChore(next, id);
+    if (c.state === "sweeping") next = replaceChore(next, { ...c, state: "open", updatedAt: at });
+  }
+  return { board: { ...next, sweep: { ...live, state: verdict.accepted ? "accepted" : "refused", endedAt: at, note: verdict.note, diff: verdict.diff } }, done, dropped, promoted };
+};
+
+/** A sweep the run could not finish (stop, crash, pause): the chores go back to open; the working tree is left as it is. */
+export const releaseSweep = (board: Board, note: string): Board => (sweepInFlight(board) ? settleSweep(board, [], { accepted: false, note }).board : board);
 
 /** The export is the board itself; this exists so callers never serialize ad hoc. */
 export const exportBoard = (board: Board): string => JSON.stringify(board, null, 2) + "\n";
@@ -335,8 +502,10 @@ export const exportBoard = (board: Board): string => JSON.stringify(board, null,
 export const parseMarkdownBoard = (md: string): BoardImport => {
   const lines = md.replace(/\r\n/g, "\n").split("\n");
   const tickets: TicketImport[] = [];
+  const chores: ChoreImport[] = [];
   let goal: string | undefined;
   let cur: (TicketImport & { specLines: string[] }) | null = null;
+  let inChores = false;
 
   const flush = () => {
     if (!cur) return;
@@ -348,7 +517,22 @@ export const parseMarkdownBoard = (md: string): BoardImport => {
 
   for (const raw of lines) {
     const heading = /^#{2,3}\s+(.*)$/.exec(raw);
+    if (heading && /^chores$/i.test(heading[1]!.trim())) {
+      // "## Chores": every list item under it is a chore, "text — where" or "text (where)".
+      flush();
+      inChores = true;
+      continue;
+    }
+    if (inChores && !heading) {
+      const item = /^\s*[-*]\s+(.*\S)\s*$/.exec(raw);
+      if (item) {
+        const m = /^(.*?)\s+(?:—|--|·)\s+(.*)$/.exec(item[1]!) ?? /^(.*?)\s+\(([^()]+)\)$/.exec(item[1]!);
+        chores.push(m ? { text: m[1]!.trim(), where: m[2]!.trim() } : { text: item[1]!.trim() });
+      }
+      continue;
+    }
     if (heading) {
+      inChores = false;
       flush();
       let title = heading[1]!.trim();
       let id: string | undefined;
@@ -395,7 +579,7 @@ export const parseMarkdownBoard = (md: string): BoardImport => {
     cur.specLines.push(raw);
   }
   flush();
-  return boardImportSchema.parse({ goal, tickets });
+  return boardImportSchema.parse({ goal, tickets, chores });
 };
 
 /** Detects the paste format and returns an import. JSON that fails to parse is treated as markdown. */

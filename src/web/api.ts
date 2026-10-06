@@ -9,6 +9,7 @@ import { z } from "zod";
 import {
   agentFor,
   capsSchema,
+  choreIdSchema,
   sessionModeSchema,
   DEFAULT_ALLOWLIST,
   DRIVER_NAMES,
@@ -31,7 +32,7 @@ import {
   type SessionSetupScript,
   type Ticket,
 } from "../core/types.js";
-import { emptyBoard, addNote, BoardError, exportBoard, getTicket, importBoard, parseBoardPaste, replaceTicket, transition, validateDeps, validateRepos, canTransition } from "../board/board.js";
+import { emptyBoard, addChore, addNote, BoardError, exportBoard, getTicket, importBoard, parseBoardPaste, promoteChore, replaceTicket, setChoreState, transition, validateDeps, validateRepos, canTransition } from "../board/board.js";
 import { codexAuthRefreshedAt, configSchema, loadConfig, loadSecrets, saveConfig, saveSecrets, verstasHome, workTargetSchema, type Config } from "../config.js";
 import { codexAuthAgeDays, configuredDrivers, DRIVERS } from "../harness/drivers.js";
 import type { SessionHub } from "../sessions/hub.js";
@@ -421,6 +422,7 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
           ok: true,
           goal: r.board.goal,
           tickets: r.board.tickets.map((t) => ({ id: t.id, title: t.title, kind: t.kind, repo: t.repo, size: t.size, state: t.state, deps: t.deps, acceptance: t.acceptance.length })),
+          chores: r.chores.length,
         });
       } catch (e) {
         const msg = e instanceof z.ZodError ? `Invalid board: ${e.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}` : e instanceof SyntaxError ? `Not valid JSON: ${e.message}` : (e as Error).message;
@@ -1188,9 +1190,70 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
       const result = await h.mutate((docs) => {
         const r = importBoard(docs.board, parsed, { by: "user", defaultState: state });
         validateRepos(r.board.tickets, docs.session.repos.map((x) => x.name), { ignoreDone: true });
-        return { next: { board: r.board }, result: { created: r.created, updated: r.updated, skipped: r.skipped } };
+        return { next: { board: r.board }, result: { created: r.created, updated: r.updated, skipped: r.skipped, chores: r.chores } };
       });
       res.json(result);
+    }),
+  );
+
+  // --- chores: small fixes swept in batches (docs/BOARD.md) ------------------
+
+  api.post(
+    "/sessions/:id/chores",
+    wrap(async (req, res) => {
+      const input = z.object({ text: z.string().min(1).max(2000), where: z.string().max(500).optional(), repo: z.string().min(1).max(100).optional() }).parse(req.body);
+      const h = await d.hub.get(param(req, "id"));
+      const id = await h.mutate((docs) => {
+        if (input.repo && !docs.session.repos.some((x) => x.name === input.repo)) throw new BoardError(`No repository ${input.repo} in this session`, "unknown_repo");
+        const r = addChore(docs.board, input, "user", { state: "open" });
+        return { next: { board: r.board }, result: r.id };
+      });
+      res.status(201).json({ id });
+    }),
+  );
+
+  /** Approve a proposed chore (to open) or drop one. A chore in a sweep belongs to the lead until the sweep is settled. */
+  api.post(
+    "/sessions/:id/chores/:cid/state",
+    wrap(async (req, res) => {
+      const { state, note } = z.object({ state: z.enum(["open", "dropped"]), note: z.string().max(2000).optional() }).parse(req.body);
+      const cid = choreIdSchema.parse(param(req, "cid"));
+      const h = await d.hub.get(param(req, "id"));
+      await h.mutate((docs) => ({ next: { board: setChoreState(docs.board, cid, state, note) } }));
+      res.json({ ok: true });
+    }),
+  );
+
+  api.post(
+    "/sessions/:id/chores/approve-all",
+    wrap(async (req, res) => {
+      const h = await d.hub.get(param(req, "id"));
+      const ids = await h.mutate((docs) => {
+        let board = docs.board;
+        const moved: string[] = [];
+        for (const c of docs.board.chores) {
+          if (c.state !== "proposed") continue;
+          board = setChoreState(board, c.id, "open");
+          moved.push(c.id);
+        }
+        return { next: { board }, result: moved };
+      });
+      res.json({ ok: true, approved: ids });
+    }),
+  );
+
+  /** A chore that deserves a reviewer becomes a backlog ticket. */
+  api.post(
+    "/sessions/:id/chores/:cid/promote",
+    wrap(async (req, res) => {
+      const { note } = z.object({ note: z.string().max(2000).optional() }).parse(req.body ?? {});
+      const cid = choreIdSchema.parse(param(req, "cid"));
+      const h = await d.hub.get(param(req, "id"));
+      const ticketId = await h.mutate((docs) => {
+        const r = promoteChore(docs.board, cid, "user", { note });
+        return { next: { board: r.board }, result: r.ticketId };
+      });
+      res.status(201).json({ id: ticketId });
     }),
   );
 

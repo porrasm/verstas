@@ -7,6 +7,8 @@ test("the reviewer is told to read the code, not only to check acceptance", () =
   expect(md).toContain("read every hunk of the diff");
   expect(md).toContain("at least one concrete finding with file and line");
   expect(md).toContain("board_create_ticket");
+  // Small findings are chores, not tickets: the one rule that keeps the board from filling with nits.
+  expect(md).toContain("anything smaller becomes a `chore`");
   for (const v of ["VERDICT: ok", "VERDICT: fixable", "VERDICT: blocked"]) expect(md).toContain(v);
   // The implementer's rules are untouched by the reviewer wording.
   expect(systemMd("implementer")).not.toContain("read every hunk");

@@ -134,6 +134,11 @@ Then, in the web app:
    a `budget` tool showing its turns, minutes and context size. To change
    the lead's rules without a rebuild, write them to
    `~/.verstas/prompts/lead.md`; the next lead reads it.
+   **Chores** (both modes keep the list, a lead works it): small fixes
+   that are not worth a ticket. Reviewers and workers file them instead of
+   follow-up tickets; a lead sweeps a batch when the board runs dry or the
+   list grows, and Verstas commits the batch as one commit after the
+   checks and a size check, with no reviewer (`docs/BOARD.md`, Chores).
 9. **Apply to repo** when you want the work: the session page's Work panel
    puts a repository's commits on the branch `verstas/<session>` in your
    real checkout, one commit per ticket, without touching the branch you

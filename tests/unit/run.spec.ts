@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { createAgentApi, RunTokens } from "../../src/agent-api/agent-api.js";
 import type net from "node:net";
-import { importBoard, emptyBoard, getTicket, replaceTicket, transition } from "../../src/board/board.js";
+import { beginSweep, importBoard, emptyBoard, getTicket, replaceTicket, transition } from "../../src/board/board.js";
 import { saveBoard, writeJsonAtomic } from "../../src/board/store.js";
 import { inboxSchema, now, requestSchema, sessionSchema, type VerstasEvent } from "../../src/core/types.js";
 import { describeBlockers, parseSetup, parseVerdict, RunManager, type Shell, type WorkerDone, type WorkerRunner } from "../../src/harness/run.js";
@@ -837,9 +837,9 @@ type LeadScript = (api: Api, job: Job, n: number, signal: AbortSignal) => Promis
  * server inside the box would call it. The reviewer is scripted; the lead
  * script gets an API client bound to that lead's own run token.
  */
-const leadRun = async (s: Awaited<ReturnType<typeof makeSession>>, lead: LeadScript, opts: { verdict?: (ticket: string) => string; reviewerRateLimited?: boolean; heal?: (mgr: RunManager) => Promise<string[]> } = {}) => {
+const leadRun = async (s: Awaited<ReturnType<typeof makeSession>>, lead: LeadScript, opts: { verdict?: (ticket: string) => string; reviewerRateLimited?: boolean; heal?: (mgr: RunManager) => Promise<string[]>; shell?: ReturnType<typeof fakeShell> } = {}) => {
   const tokens = new RunTokens();
-  const shell = fakeShell();
+  const shell = opts.shell ?? fakeShell();
   const jobs: Job[] = [];
   const prompts: string[] = [];
   let leads = 0;
@@ -1158,6 +1158,162 @@ test("lead mode: a submit that lands after the run ended is put back, never left
     expect((await s.hub.get(s.id)).board.tickets[0]!.state).toBe("ready");
   } finally {
     r.close();
+    await fs.rm(s.root, { recursive: true, force: true });
+  }
+});
+
+// --- chores and sweeps ---------------------------------------------------------
+
+/** What chores_submit does: submit, then wait until the harness settled the sweep. */
+const submitSweep = async (api: Api, results: unknown[]) => {
+  const r = await api("POST", "/chores/sweep/submit", { results });
+  if (r.status !== 200) return r.json;
+  for (;;) {
+    await new Promise((res) => setTimeout(res, 5));
+    const sw = (await api("GET", "/chores/sweep")).json;
+    if (sw.state === "accepted" || sw.state === "refused") return sw;
+  }
+};
+
+const withChores = async (s: Awaited<ReturnType<typeof makeSession>>, texts: string[]) => {
+  const h = await s.hub.get(s.id);
+  await h.mutate((d) => ({ next: { board: importBoard(d.board, { chores: texts.map((text) => ({ text })) }).board } }));
+};
+
+test("lead mode: a sweep of chores is committed as one commit without a reviewer; promoted chores become backlog tickets", async () => {
+  const s = await makeSession({ mode: "lead" });
+  await withChores(s, ["Rename tmp to pending", "Doc the exit codes", "Rework the loop"]);
+  const r = await leadRun(s, async (api) => {
+    expect(await finishTicket(api, "T-1")).toMatchObject({ state: "done" });
+    expect(await finishTicket(api, "T-2")).toMatchObject({ state: "done" });
+    const sw = await api("POST", "/chores/sweep", {});
+    expect(sw.status).toBe(200);
+    expect((sw.json.chores as { id: string }[]).map((c) => c.id)).toEqual(["C-1", "C-2", "C-3"]);
+    const out = await submitSweep(api, [
+      { id: "C-1", outcome: "done", note: "renamed" },
+      { id: "C-2", outcome: "dropped", note: "already in the README" },
+      { id: "C-3", outcome: "promoted", note: "the loop needs a redesign, not a nit" },
+    ]);
+    expect(out).toMatchObject({ n: 1, state: "accepted" });
+    return { text: "swept" };
+  });
+  try {
+    const run = await (await r.mgr.start(s.id)).done;
+    expect(run.state).toBe("finished");
+    expect(run.ticketsDone).toBe(2);
+    // No reviewer for the sweep.
+    expect(r.jobs.map((j) => j.role)).toEqual(["lead", "reviewer", "reviewer"]);
+    expect(r.shell.commits).toHaveLength(3);
+    expect(r.shell.commits[2]).toMatch(/^Chores \(sweep 1\): 1 done, 1 dropped, 1 promoted\n\n- C-1 done: Rename tmp to pending\n- C-2 dropped \(already in the README\): Doc the exit codes\n- C-3 promoted \(the loop needs a redesign, not a nit\): Rework the loop$/);
+    const h = await s.hub.get(s.id);
+    expect(h.board.chores.map((c) => c.state)).toEqual(["done", "dropped", "promoted"]);
+    expect(h.board.chores[2]!.promotedTo).toBe("T-3");
+    expect(h.board.tickets[2]).toMatchObject({ id: "T-3", kind: "followup", state: "backlog" });
+    expect(h.board.sweep).toMatchObject({ n: 1, state: "accepted", diff: { added: 3, removed: 1, files: 1 } });
+    const events = (await fs.readFile(path.join(s.paths.runs, "1", "events.jsonl"), "utf8")).split("\n").filter(Boolean).map((l) => JSON.parse(l) as VerstasEvent);
+    expect(events.find((e) => e.kind === "chores")).toMatchObject({ accepted: true, done: 1, dropped: 1, promoted: 1, sweep: 1 });
+  } finally {
+    r.close();
+    await fs.rm(s.root, { recursive: true, force: true });
+  }
+});
+
+test("lead mode: a sweep that is too large, touches a protected path, or fails the checks is refused; nothing is committed and the chores reopen", async () => {
+  const s = await makeSession({ mode: "lead" });
+  await withChores(s, ["One", "Two"]);
+  const shell = fakeShell();
+  let numstat = "300\t200\tsrc/big.ts\n";
+  let tests = 0;
+  const orig = shell.exec.bind(shell);
+  shell.exec = async (cmd, o) => {
+    const line = cmd.join(" ");
+    if (line === "git diff --cached --numstat") return { code: 0, stdout: numstat, stderr: "" };
+    if (line.startsWith("npm run --silent test")) return { code: tests, stdout: tests ? "1 failing" : "3 passing", stderr: "" };
+    return orig(cmd, o);
+  };
+  const r = await leadRun(
+    s,
+    async (api) => {
+      expect(await finishTicket(api, "T-1")).toMatchObject({ state: "done" });
+      expect((await api("POST", "/chores/sweep", {})).status).toBe(200);
+      const big = await submitSweep(api, [{ id: "C-1", outcome: "done" }]);
+      expect(big).toMatchObject({ n: 1, state: "refused" });
+      expect(String(big.note)).toContain("too large for a sweep: 1 files, 500 lines");
+      numstat = "1\t1\tdocs/DESIGN.md\n";
+      expect((await api("POST", "/chores/sweep", {})).status).toBe(200);
+      const prot = await submitSweep(api, [{ id: "C-1", outcome: "done" }]);
+      expect(prot).toMatchObject({ n: 2, state: "refused" });
+      expect(String(prot.note)).toContain("may not change app/docs/DESIGN.md");
+      numstat = "3\t1\tsrc/a.ts\n";
+      tests = 1;
+      expect((await api("POST", "/chores/sweep", {})).status).toBe(200);
+      const fail = await submitSweep(api, [{ id: "C-1", outcome: "done" }]);
+      expect(fail).toMatchObject({ n: 3, state: "refused" });
+      expect(String(fail.note)).toContain("checks failed: npm run test");
+      // Chores are open again after each refusal; a ticket can be claimed in between.
+      expect(((await api("GET", "/chores?state=open")).json.chores as unknown[]).length).toBe(2);
+      tests = 0;
+      expect(await finishTicket(api, "T-2")).toMatchObject({ state: "done" });
+      return {};
+    },
+    { shell },
+  );
+  try {
+    const run = await (await r.mgr.start(s.id)).done;
+    expect(run.ticketsDone).toBe(2);
+    expect(r.shell.commits).toEqual(["T-1: Schema", "T-2: Engine"]);
+    // Every refusal unstaged the sweep's changes and left the working tree alone.
+    expect(r.shell.calls.filter((c) => c.join(" ") === "git reset -q")).toHaveLength(3);
+    const h = await s.hub.get(s.id);
+    expect(h.board.chores.map((c) => c.state)).toEqual(["open", "open"]);
+    expect(h.board.sweep).toMatchObject({ n: 3, state: "refused" });
+  } finally {
+    r.close();
+    await fs.rm(s.root, { recursive: true, force: true });
+  }
+});
+
+test("lead mode: when only chores remain the lead is asked to sweep once; if it sweeps nothing the run finishes", async () => {
+  const s = await makeSession({ mode: "lead" });
+  const h0 = await s.hub.get(s.id);
+  await h0.mutate((d) => {
+    let board = transition(d.board, "T-1", "in_progress");
+    board = transition(board, "T-1", "review");
+    board = transition(board, "T-1", "done");
+    board = transition(board, "T-2", "in_progress");
+    board = transition(board, "T-2", "review");
+    board = transition(board, "T-2", "done");
+    return { next: { board } };
+  });
+  await withChores(s, ["Only a nit"]);
+  const r = await leadRun(s, async () => ({ text: "not now" }));
+  try {
+    const run = await (await r.mgr.start(s.id)).done;
+    expect(run.state).toBe("finished");
+    expect(r.jobs.filter((j) => j.role === "lead")).toHaveLength(1);
+    expect(r.prompts[0]).toContain("Only chores remain");
+    expect(r.prompts[0]).toContain("- C-1 Only a nit");
+    const events = (await fs.readFile(path.join(s.paths.runs, "1", "events.jsonl"), "utf8")).split("\n").filter(Boolean).map((l) => JSON.parse(l) as VerstasEvent);
+    expect(events.some((e) => e.kind === "status" && e.text.includes("1 chore stays open (the lead did not sweep them)"))).toBe(true);
+  } finally {
+    r.close();
+    await fs.rm(s.root, { recursive: true, force: true });
+  }
+});
+
+test("recover releases a sweep the host left in flight", async () => {
+  const s = await makeSession({ mode: "lead" });
+  await withChores(s, ["One"]);
+  const h = await s.hub.get(s.id);
+  await h.mutate((d) => ({ next: { board: beginSweep(d.board).board } }));
+  const mgr = manager(s, fakeShell(), fakeWorker(s.hub, s.id, async () => ({})));
+  try {
+    const did = await mgr.recover(s.id);
+    expect(did).toContain("released sweep 1 (C-1)");
+    expect(h.board.chores[0]!.state).toBe("open");
+    expect(h.board.sweep).toMatchObject({ state: "refused", note: expect.stringContaining("host app stopped") });
+    expect(await mgr.recover(s.id)).toEqual([]);
+  } finally {
     await fs.rm(s.root, { recursive: true, force: true });
   }
 });

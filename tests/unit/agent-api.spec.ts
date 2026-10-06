@@ -10,12 +10,12 @@ import { SessionHub } from "../../src/sessions/hub.js";
 import { sessionPaths } from "../../src/sessions/sessions.js";
 import { inboxSchema, sessionSchema } from "../../src/core/types.js";
 
-const setup = async () => {
+const setup = async (opts: { choreApproval?: boolean } = {}) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "verstas-api-"));
   const id = "2026-10-03-t";
   const paths = sessionPaths(root, id);
   await fs.mkdir(paths.workspace, { recursive: true });
-  await writeJsonAtomic(paths.session, sessionSchema.parse({ id, name: "t", goal: "g", createdAt: "2026-10-03T00:00:00.000Z" }));
+  await writeJsonAtomic(paths.session, sessionSchema.parse({ id, name: "t", goal: "g", createdAt: "2026-10-03T00:00:00.000Z", repos: [{ name: "app", sourcePath: "/x", branch: "main", runBranch: "verstas/t" }], caps: { choreApproval: opts.choreApproval ?? false } }));
   let board = importBoard(emptyBoard("g"), {
     tickets: [
       { id: "T-1", title: "Schema", state: "ready", pinned: true },
@@ -276,5 +276,74 @@ test("what a lead files after its ticket is settled is not attached to that tick
   } finally {
     server.close();
     await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("chores: anyone files one (proposed when the session says so); sweeps are a lead's, need a run, and exclude a held ticket", async () => {
+  const s = await setup();
+  try {
+    const c = await s.call("POST", "/chores", { text: "Rename tmp to pending", where: "src/loop.ts" });
+    expect(c.status).toBe(201);
+    expect(c.json).toMatchObject({ id: "C-1", state: "open" });
+    expect((await s.call("POST", "/chores", { text: "x", repo: "nope" })).status).toBe(400);
+    const list = await s.call("GET", "/chores");
+    expect((list.json.chores as { id: string; fromTicket?: string; by: string }[])[0]).toMatchObject({ id: "C-1", fromTicket: "T-2", by: "agent" });
+    expect((await s.call("GET", "/chores/sweep")).json).toEqual({ state: "none" });
+    // A worker may not sweep.
+    expect((await s.call("POST", "/chores/sweep", {})).status).toBe(403);
+    // A lead without a run cannot either.
+    const noRun = s.tokens.issue({ sessionId: s.id, runId: 1, role: "lead" });
+    expect((await s.call("POST", "/chores/sweep", {}, `Bearer ${noRun}`)).status).toBe(409);
+  } finally {
+    await s.close();
+  }
+});
+
+test("chores: a lead's sweep holds the chores, blocks claims, and its submit hands the results to the run", async () => {
+  const s = await setup();
+  const started: string[][] = [];
+  const submitted: unknown[] = [];
+  const hooks = { submitted() {}, handoff() {}, claimRefusal: () => undefined, sweepStarted: (_r: unknown, ids: string[]) => started.push(ids), sweepSubmitted: (_r: unknown, results: unknown) => submitted.push(results) };
+  const app = createAgentApi(s.hub, s.tokens, hooks);
+  const server = app.listen(0, "127.0.0.1");
+  const port = await new Promise<number>((r) => server.on("listening", () => r((server.address() as net.AddressInfo).port)));
+  const call = async (method: string, p: string, body: unknown, token: string) => {
+    const res = await fetch(`http://127.0.0.1:${port}/agent${p}`, { method, headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
+    return { status: res.status, json: (await res.json()) as Record<string, unknown> };
+  };
+  try {
+    await s.call("POST", "/chores", { text: "One" });
+    await s.call("POST", "/chores", { text: "Two" });
+    const holding = s.tokens.issue({ sessionId: s.id, runId: 1, role: "lead", currentTicket: "T-2" });
+    expect((await call("POST", "/chores/sweep", {}, holding)).json.error).toContain("You hold T-2");
+    const lead = s.tokens.issue({ sessionId: s.id, runId: 1, role: "lead" });
+    const sw = await call("POST", "/chores/sweep", { max: 5 }, lead);
+    expect(sw.status).toBe(200);
+    expect(sw.json).toMatchObject({ sweep: 1, limits: { maxLines: 400, maxFiles: 15 } });
+    expect((sw.json.chores as { id: string; text: string }[]).map((c) => c.text)).toEqual(["One", "Two"]);
+    expect(started).toEqual([["C-1", "C-2"]]);
+    expect((await call("POST", "/tickets/T-1/claim", {}, lead)).json.error).toContain("Sweep 1 is working");
+    expect((await call("POST", "/chores/sweep", {}, lead)).status).toBe(409);
+    expect((await call("POST", "/chores/sweep/submit", { results: [{ id: "C-9", outcome: "done" }] }, lead)).json.error).toContain("C-9 is not in this sweep");
+    const sub = await call("POST", "/chores/sweep/submit", { results: [{ id: "C-1", outcome: "done", note: "ok" }, { id: "C-2", outcome: "dropped", note: "moot" }] }, lead);
+    expect(sub.json).toMatchObject({ ok: true, state: "judging" });
+    expect(submitted).toEqual([[{ id: "C-1", outcome: "done", note: "ok" }, { id: "C-2", outcome: "dropped", note: "moot" }]]);
+    expect((await call("GET", "/chores/sweep", undefined, lead)).json).toMatchObject({ n: 1, state: "judging" });
+    expect((await call("POST", "/chores/sweep/submit", { results: [] }, lead)).status).toBe(409);
+  } finally {
+    await new Promise((r) => server.close(r));
+    await s.close();
+  }
+});
+
+test("chores: with choreApproval on, an agent's chore waits as proposed", async () => {
+  const s = await setup({ choreApproval: true });
+  try {
+    const c = await s.call("POST", "/chores", { text: "Needs a look" });
+    expect(c.json).toMatchObject({ id: "C-1", state: "proposed" });
+    expect((await s.call("GET", "/chores?state=open")).json.chores).toEqual([]);
+    expect((await s.call("GET", "/chores")).json.approvalRequired).toBe(true);
+  } finally {
+    await s.close();
   }
 });

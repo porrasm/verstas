@@ -295,6 +295,7 @@ export const draftBoard = (draft: Draft): BoardImport & { verstas: number } => (
   verstas: BOARD_FORMAT_VERSION,
   goal: draft.goal,
   tickets: draft.tickets.map((t) => ({ ...t, state: t.state ?? "ready" })),
+  chores: [],
 });
 
 export const draftBoardText = (draft: Draft): string => JSON.stringify(draftBoard(draft), null, 2) + "\n";

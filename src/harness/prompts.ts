@@ -32,9 +32,10 @@ ${session.repos.map((r) => `  - \`/workspace/${r.name}\` (from \`${r.branch}\`)`
   (idempotent) and a line to env.md, or the next box will not have it.${session.requirements.trim() ? `
 - Setup instructions the box was set up with:
 ${session.requirements.trim().split("\n").map((l) => `  ${l}`).join("\n")}` : ""}
-- The board (tickets) is reachable only through the \`board_*\`, \`request\`,
-  \`message\` and \`idea\` tools (MCP server "board"). The plain HTTP API behind
-  them is ${agentApi} with your run token in \`VERSTAS_RUN_TOKEN\`.
+- The board (tickets and the chore list) is reachable only through the
+  \`board_*\`, \`chore\`, \`chores_*\`, \`request\`, \`message\` and \`idea\` tools
+  (MCP server "board"). The plain HTTP API behind them is ${agentApi} with
+  your run token in \`VERSTAS_RUN_TOKEN\`.
 - Network: only these hosts, over HTTPS, through the proxy already set in
   \`HTTPS_PROXY\`: ${session.allowlist.join(", ") || "(none)"}. Anything else
   is refused with 403. Ask with \`request\` kind \`pack\` for a whole toolchain
@@ -79,7 +80,7 @@ Rules that apply to every role:
 - ${role === "lead" ? "Work the board's tickets. Work you find that the board lacks becomes a ticket (board_create_ticket), not a silent addition to the ticket you hold." : "Work only on what the prompt gives you. Never widen the scope."}
 - Nobody is watching while you work; the user reads the board later. Fix what you can yourself: install missing tools with sudo (and append the command to /workspace/notes/setup.sh and a line to env.md), restart a service with svc, re-create a dummy config. The environment was set up before work started; if it broke, repair it rather than asking.
 - Only for what you cannot do yourself (a host the proxy refuses, something only a person can do, a decision that is genuinely the user's), gather EVERYTHING into one \`request\` (summary + actions: pack or network for hosts, resources, instruction, question), then stop; do not work around the proxy. Questions are the exception, not the habit: when a sensible choice exists, make it, write the assumption in a note and the report, and continue; a reviewer can overturn an assumption cheaply, a parked ticket costs a night. Never ask for a secret value in an answer; ask them to place it in a file under /workspace and tell you the path.
-- Bugs and gaps you notice but must not fix now: \`board_create_ticket\` (kinds bug, followup, chore). Feature ideas: \`idea\`. Observations: \`message\`.
+- Work you notice but must not do now, by size: a small, self-contained fix (a nit, a rename, a missing guard, a doc line, a weak test name; a few dozen changed lines at most) is a \`chore\`: one line and where. A bug, anything a user would notice, or anything bigger is a ticket: \`board_create_ticket\` (kinds bug, followup, chore). Feature ideas: \`idea\`. Observations: \`message\`.
 - Never commit, never touch files outside /workspace, never delete the .git directories.
 - Read /workspace/notes/brief.md first when it exists: it is the verified map of the repositories. Keep it true: if you find a trap or a wrong command, fix the brief's line, and keep /workspace/notes/learnings.md for short facts that do not fit the brief.
 - Use the \`halt\` tool only for a security problem, a contradiction that invalidates several tickets, or a dependency that cannot be met.`;
@@ -96,7 +97,7 @@ Then reply with one line and stop. If you cannot finish within the caps, file th
 Role: reviewer. You did not write this change. Two passes, both required.
 1. Acceptance: read the ticket and its criteria, run the tests and the commands the criteria name yourself, and check each criterion.
 2. Code: read every hunk of the diff, not only the tests. Look for a test that mirrors the implementation or a threshold tuned until a fixture passes; user input that can throw, recurse or grow memory without bound; a loop that allocates or does string work per element where the design asks for a hot path; a contract document (a DESIGN or README the repository treats as its spec) that the change contradicts or should have updated; copied code where a call would do; a decision the ticket did not ask for and the report does not mention.
-Name at least one concrete finding with file and line, or write "code pass: nothing found" and the number of hunks you read. A finding that does not block the ticket becomes a bug or followup ticket with \`board_create_ticket\`, and the verdict stays ok. Your reply must start with exactly one of:
+Name at least one concrete finding with file and line, or write "code pass: nothing found" and the number of hunks you read. A finding that does not block the ticket: a correctness bug or a user-visible effect becomes a ticket with \`board_create_ticket\`; anything smaller becomes a \`chore\` (one line and where; a lead sweeps chores in batches later). The verdict stays ok either way. Your reply must start with exactly one of:
 VERDICT: ok
 VERDICT: fixable
 VERDICT: blocked
@@ -135,7 +136,8 @@ Role: lead. You work this session's board until nothing you can start is left. N
 3. A ticket that needs something only the user can give: one \`request\` with everything, while you hold it. The ticket parks and you are free to claim the next one.
 4. Keep notes/ true for whoever comes after you, as every worker does: traps and commands in learnings.md, a wrong line in brief.md or env.md fixed.
 5. Watch your context with \`budget\`. When it has become noise (the session has moved on from what you first read, you keep re-reading the same files, or the context is large), finish or park what you hold if you can, then \`handoff\` with a note: what is in flight, what you tried, what you learned that is not in notes/ yet, what to do next. A fresh lead starts from that note.
-6. When no ticket you can start is left (everything is done, waiting on the user, or blocked), reply with one line saying so and stop.`,
+6. Chores: the board also keeps a list of small fixes filed by reviewers, workers and the user (\`chores_list\`). Sweep them in a batch when no ticket you can start is left, when the list has grown long, or when you are in those files anyway: \`chores_sweep\` takes a batch (hold no ticket at that moment), you do each one, run the repository's own checks, then \`chores_submit\` with one line per chore: done, dropped with the reason, or promoted when it is bigger than a chore (a backlog ticket is made from your note). The harness runs the checks and a size check and commits the batch as one commit; there is no reviewer, so a sweep may not touch the project's contract documents or fixtures, and over the size limits it is refused with the reason while the changes stay in the working tree (claim a ticket for them, or revert).
+7. When no ticket you can start is left and no chore is open (everything is done, waiting on the user, or blocked), reply with one line saying so and stop.`,
     planner: `
 Role: planner. Turn the user's planning request into tickets with \`board_create_ticket\`: small (S) or medium (M) where possible, each with a clear spec, acceptance criteria that a reviewer can check, the repository it touches, and dependencies by id when order matters. You may create feature tickets; keep them within the request. Prefer ten good tickets over thirty vague ones. When the board already has tickets, add only what is missing and do not duplicate. Reply with a short summary of the plan and stop.`,
   };
@@ -277,24 +279,53 @@ const boardLines = (board: Board): string =>
     ? board.tickets.map((t) => `- ${t.id} [${t.state}] ${t.title} (${t.kind}, ${t.size}${t.repo ? `, ${t.repo}` : ""}${t.deps.length ? `, after ${t.deps.join(" ")}` : ""}, priority ${t.priority})`).join("\n")
     : "- empty";
 
+/** The chore list as a lead sees it: what a sweep may take, and what waits for the user. */
+const choreLines = (board: Board): string => {
+  const open = board.chores.filter((c) => c.state === "open");
+  const proposed = board.chores.filter((c) => c.state === "proposed").length;
+  const sweeping = board.chores.filter((c) => c.state === "sweeping");
+  const lines = [
+    ...sweeping.map((c) => `- ${c.id} [in your sweep] ${c.text}${c.where ? ` (${c.where})` : ""}`),
+    ...open.map((c) => `- ${c.id} ${c.text}${c.where ? ` (${c.where})` : ""}${c.fromTicket ? ` · from ${c.fromTicket}` : ""}`),
+  ];
+  if (!lines.length) return proposed ? `- none open (${proposed} proposed, waiting for the user)` : "- none";
+  return lines.join("\n") + (proposed ? `\n- (${proposed} more proposed, waiting for the user)` : "");
+};
+
+type LeadPromptOptions = { holds?: Ticket; handoff?: string; /** Nothing to claim; only chores remain: sweep them or stop. */ onlyChores?: boolean };
+
+const sweepNote = (board: Board): string => {
+  const sw = board.sweep;
+  if (!sw || (sw.state !== "working" && sw.state !== "judging")) return "";
+  return `## You hold sweep ${sw.n} (${sw.state})\nA previous lead took chores ${sw.ids.join(", ")} and did not submit. Their changes, if any, are in the working tree. Finish them and \`chores_submit\`, or submit with no results to release them.\n`;
+};
+
+const onlyChoresNote = (board: Board, onlyChores?: boolean): string =>
+  onlyChores && board.chores.some((c) => c.state === "open") ? `\nNo ticket can be claimed. Only chores remain: sweep them (\`chores_sweep\`, do them, \`chores_submit\`), or reply with one line why not and stop.\n` : "";
+
 /** A fresh lead: the board, what it holds, and the previous lead's note. */
-export const leadPrompt = (board: Board, opts: { holds?: Ticket; handoff?: string } = {}): string => `# Work the board
+export const leadPrompt = (board: Board, opts: LeadPromptOptions = {}): string => `# Work the board
 ${board.goal ? `Goal: ${board.goal}\n` : ""}
 ${opts.handoff ? `## Note from the previous lead\n${opts.handoff.trim()}\n` : ""}
-${opts.holds ? `## You hold ${opts.holds.id} (${opts.holds.state})\nA previous lead claimed it and did not finish. Its changes, if any, are in the working tree. Continue it, or file a request on it if it needs the user.\n\n${ticketBlock(opts.holds)}` : ""}
+${opts.holds ? `## You hold ${opts.holds.id} (${opts.holds.state})\nA previous lead claimed it and did not finish. Its changes, if any, are in the working tree. Continue it, or file a request on it if it needs the user.\n\n${ticketBlock(opts.holds)}` : ""}${sweepNote(board)}
 ## Board
 ${boardLines(board)}
 
+## Chores (small fixes, swept in batches without a reviewer)
+${choreLines(board)}
+${onlyChoresNote(board, opts.onlyChores)}
 ## Recent reports
 ${recentReports(board, opts.holds?.id ?? "")}
 
-Read /workspace/VERSTAS.md and /workspace/notes/INDEX.md if you have not. Then work: \`board_get_ticket\` for the full spec of a ticket, \`board_claim\` before changing files, \`board_submit\` when it is finished.`;
+Read /workspace/VERSTAS.md and /workspace/notes/INDEX.md if you have not. Then work: \`board_get_ticket\` for the full spec of a ticket, \`board_claim\` before changing files, \`board_submit\` when it is finished; \`chores_sweep\` and \`chores_submit\` for a batch of chores.`;
 
 /** A lead continuing its own conversation: only what changed. */
-export const leadContinuePrompt = (board: Board, holds?: Ticket): string => `# Continue
+export const leadContinuePrompt = (board: Board, holds?: Ticket, opts: { onlyChores?: boolean } = {}): string => `# Continue
 You are continuing in the same conversation. The board as it stands now:
 
 ${boardLines(board)}
-${holds ? `\nYou still hold ${holds.id} (${holds.state}).` : ""}
 
-Carry on with the board. When nothing you can start is left, reply with one line and stop.`;
+Chores:
+${choreLines(board)}
+${holds ? `\nYou still hold ${holds.id} (${holds.state}).` : ""}${sweepNote(board) ? `\n${sweepNote(board)}` : ""}${onlyChoresNote(board, opts.onlyChores)}
+Carry on with the board. When nothing you can start is left and no chore is open, reply with one line and stop.`;

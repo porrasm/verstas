@@ -61,6 +61,43 @@ those two moves itself through the agent API: `board_claim` (`ready` to
 the ticket and moves it to `done`, back to `ready` or to `blocked`. You move
 between `backlog`, `ready`, `blocked`, and reopen.
 
+## Chores
+
+Beside the tickets the board keeps **chores**: small, self-contained fixes
+that are not worth a ticket (a nit, a rename, a missing guard, a doc line).
+Reviewers and workers file them with the `chore` tool, you add them on the
+session page or in an import, and a lead sweeps them in batches: it takes
+some open chores (`chores_sweep`), does them, runs the repository's own
+checks, and submits one line per chore (`chores_submit`: done, dropped
+with the reason, or promoted to a backlog ticket when it turned out
+bigger). Verstas then runs the checks itself and a size check, and
+commits the whole batch as **one commit without a reviewer**. Over the
+size caps (`sweepMaxLines`, `sweepMaxFiles` in the session's caps), or
+when the sweep touched a protected path (contract documents such as
+`DESIGN.md`, anything under `fixtures/`, snapshots), the sweep is refused
+with the reason, the chores go back to open, and the changes stay in the
+working tree for the lead to turn into a ticket or revert.
+
+```jsonc
+{
+  "chores": [
+    { "id": "C-4", "text": "Rename `tmp` to `pending` in the loop", "where": "src/loop.ts", "repo": "nuppi" }
+  ]
+}
+```
+
+- `id` is optional and assigned when missing. A known id updates the text
+  while the chore is still proposed or open.
+- States: `proposed` (filed by an agent while the session's
+  `choreApproval` cap is on; you approve it), `open`, `sweeping` (held by
+  the lead's current sweep), `done`, `dropped`, `promoted` (the ticket is in
+  `promotedTo`).
+- `board.sweep` is the sweep in flight or the last one: its number, the
+  chore ids, `working` / `judging` / `accepted` / `refused`, the note and
+  the diff size.
+- Sweeps are a lead's job (lead mode). In the one-worker-per-ticket mode
+  chores wait on the list until you promote them or switch the mode.
+
 ## Markdown
 
 ```markdown
@@ -83,6 +120,8 @@ Emit events to an injected sink.
 - One line of `Key: value` pairs separated by `·` or `|` sets repo, deps,
   priority, size, kind, state and pinned.
 - Checklist items are acceptance criteria. Everything else is the spec.
+- A heading `## Chores` starts the chore list: every `- ` item under it is
+  one chore, written `text — where` or `text (where)`.
 
 ## Export
 

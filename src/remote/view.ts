@@ -52,6 +52,8 @@ export const flattenEvent = (e: VerstasEvent): RemoteEvent | null => {
       return { ...base, text: `blocked ${e.host}:${e.port}` };
     case "worker_done":
       return { ...base, text: `${e.role} finished: ${e.stopReason} · ${e.turns} turns · ${e.seconds} s`, ok: e.ok };
+    case "chores":
+      return { ...base, text: cap(`sweep ${e.sweep} ${e.accepted ? `committed: ${e.done} done, ${e.dropped} dropped, ${e.promoted} promoted` : "refused"}: ${e.note}`, 300), ok: e.accepted };
   }
 };
 

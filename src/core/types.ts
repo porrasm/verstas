@@ -81,12 +81,81 @@ export const ticketSchema = z.object({
 });
 export type Ticket = z.infer<typeof ticketSchema>;
 
+// --- Chores ----------------------------------------------------------------
+
+/**
+ * A chore is a small, self-contained fix that is not worth a ticket: a nit,
+ * a rename, a missing guard, a doc line. Reviewers, workers and you file
+ * them; a lead sweeps a batch at a time and the harness commits the batch
+ * as one commit after the repository's own checks and a size check. No
+ * reviewer. Anything bigger is promoted to a ticket.
+ */
+export const CHORE_ID_PATTERN = /^C-\d+$/;
+export const choreIdSchema = z.string().regex(CHORE_ID_PATTERN, "Chore ids look like C-3");
+
+export const choreStateSchema = z.enum([
+  "proposed", // filed by an agent while the session asks you to approve chores first
+  "open", // may be swept
+  "sweeping", // a lead holds it in the current sweep
+  "done",
+  "dropped", // not worth doing, with the reason
+  "promoted", // became a ticket (promotedTo)
+]);
+export type ChoreState = z.infer<typeof choreStateSchema>;
+
+export const choreSchema = z.object({
+  id: choreIdSchema,
+  text: z.string().min(1).max(2000),
+  /** Where to look: a file, a function, a page. Free text. */
+  where: z.string().max(500).optional(),
+  repo: z.string().min(1).max(100).optional(),
+  state: choreStateSchema.default("open"),
+  by: noteAuthorSchema,
+  /** The ticket whose work surfaced it. */
+  fromTicket: ticketIdSchema.optional(),
+  /** What the sweep said: done how, or dropped why. */
+  outcome: z.string().max(4000).optional(),
+  promotedTo: ticketIdSchema.optional(),
+  /** The sweep it was settled in. */
+  sweep: z.number().int().positive().optional(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+export type Chore = z.infer<typeof choreSchema>;
+
+export const sweepStateSchema = z.enum(["working", "judging", "accepted", "refused"]);
+
+/** The current or last sweep: which chores a lead took, and how it ended. */
+export const sweepSchema = z.object({
+  n: z.number().int().positive(),
+  ids: z.array(choreIdSchema),
+  state: sweepStateSchema,
+  startedAt: z.string(),
+  endedAt: z.string().optional(),
+  /** Why it was refused, or what was committed. */
+  note: z.string().max(4000).optional(),
+  diff: diffStatSchema.optional(),
+});
+export type Sweep = z.infer<typeof sweepSchema>;
+
+export const SWEEP_OUTCOMES = ["done", "dropped", "promoted"] as const;
+export const sweepResultSchema = z.object({
+  id: choreIdSchema,
+  outcome: z.enum(SWEEP_OUTCOMES),
+  /** One line: what was done, why it was dropped, or what the ticket should say. */
+  note: z.string().max(2000).optional(),
+});
+export type SweepResult = z.infer<typeof sweepResultSchema>;
+
 export const BOARD_FORMAT_VERSION = 1;
 
 export const boardSchema = z.object({
   verstas: z.literal(BOARD_FORMAT_VERSION),
   goal: z.string().max(20_000).default(""),
   tickets: z.array(ticketSchema).default([]),
+  chores: z.array(choreSchema).default([]),
+  /** The sweep in flight, or the last one. */
+  sweep: sweepSchema.optional(),
 });
 export type Board = z.infer<typeof boardSchema>;
 
@@ -111,11 +180,24 @@ export const ticketImportSchema = z.object({
 });
 export type TicketImport = z.infer<typeof ticketImportSchema>;
 
-export const boardImportSchema = z.object({
-  verstas: z.literal(BOARD_FORMAT_VERSION).optional(),
-  goal: z.string().max(20_000).optional(),
-  tickets: z.array(ticketImportSchema).min(1),
+/** A chore as pasted or filed: text and where; the state only for your own imports. */
+export const choreImportSchema = z.object({
+  id: choreIdSchema.optional(),
+  text: z.string().min(1).max(2000),
+  where: z.string().max(500).optional(),
+  repo: z.string().min(1).max(100).optional(),
+  state: z.enum(["proposed", "open"]).optional(),
 });
+export type ChoreImport = z.infer<typeof choreImportSchema>;
+
+export const boardImportSchema = z
+  .object({
+    verstas: z.literal(BOARD_FORMAT_VERSION).optional(),
+    goal: z.string().max(20_000).optional(),
+    tickets: z.array(ticketImportSchema).default([]),
+    chores: z.array(choreImportSchema).default([]),
+  })
+  .refine((b) => b.tickets.length > 0 || b.chores.length > 0, { message: "Nothing to import: no tickets and no chores", path: ["tickets"] });
 export type BoardImport = z.infer<typeof boardImportSchema>;
 
 // --- Inbox: requests, messages, ideas ---------------------------------------
@@ -288,8 +370,41 @@ export const capsSchema = z.object({
   /** A lead lives much longer than a worker; at a cap it hands over to a fresh lead instead of failing a ticket. */
   leadMinutes: z.number().int().min(10).max(1440).default(180),
   leadTurns: z.number().int().min(20).max(5000).default(600),
+  /** A chore sweep's commit may change at most this many lines (added plus removed) and files; over it, the sweep is refused and the work belongs in a ticket. */
+  sweepMaxLines: z.number().int().min(10).max(100_000).default(400),
+  sweepMaxFiles: z.number().int().min(1).max(1000).default(15),
+  /** Chores filed by agents wait for your approval before a sweep may take them. */
+  choreApproval: z.boolean().default(false),
 });
 export type Caps = z.infer<typeof capsSchema>;
+
+/**
+ * Paths a sweep may not change, as globs against the path inside the
+ * repository: the documents a project treats as its contract and golden
+ * files. Changing one of them is a ticket's job, with a reviewer.
+ */
+export const SWEEP_PROTECTED_GLOBS: readonly string[] = ["**/DESIGN.md", "**/SPEC.md", "**/ARCHITECTURE.md", "**/fixtures/**", "**/__snapshots__/**", "**/*.snap"];
+
+/** A tiny glob: `**` spans directories, `*` one path segment; anchored at both ends. */
+export const globToRegExp = (glob: string): RegExp => {
+  let re = "";
+  for (let i = 0; i < glob.length; i++) {
+    const c = glob[i]!;
+    if (c === "*") {
+      if (glob[i + 1] === "*") {
+        if (glob[i + 2] === "/") {
+          re += "(?:.*/)?";
+          i += 2;
+        } else {
+          re += ".*";
+          i += 1;
+        }
+      } else re += "[^/]*";
+    } else re += /[.+^${}()|[\]\\?]/.test(c) ? `\\${c}` : c;
+  }
+  return new RegExp(`^${re}$`);
+};
+export const matchesAnyGlob = (p: string, globs: readonly string[]): boolean => globs.some((g) => globToRegExp(g).test(p));
 
 export const limitsSchema = z.object({
   memory: z.string().regex(/^\d+[mg]$/).default("4g"),
@@ -514,13 +629,15 @@ export const eventSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("tool_use"), t: z.string(), ticket: ticketIdSchema.optional(), tool: z.string(), summary: z.string() }),
   z.object({ kind: z.literal("tool_result"), t: z.string(), ticket: ticketIdSchema.optional(), tool: z.string(), ok: z.boolean(), summary: z.string() }),
   z.object({ kind: z.literal("status"), t: z.string(), ticket: ticketIdSchema.optional(), text: z.string() }),
-  z.object({ kind: z.literal("gate"), t: z.string(), ticket: ticketIdSchema, name: z.string(), ok: z.boolean(), summary: z.string() }),
+  z.object({ kind: z.literal("gate"), t: z.string(), ticket: ticketIdSchema.optional(), name: z.string(), ok: z.boolean(), summary: z.string() }),
   z.object({ kind: z.literal("ticket"), t: z.string(), ticket: ticketIdSchema, from: ticketStateSchema, to: ticketStateSchema, note: z.string().optional() }),
   z.object({ kind: z.literal("denied_network"), t: z.string(), host: z.string(), port: z.number().int() }),
   z.object({ kind: z.literal("request"), t: z.string(), requestId: z.string(), ticket: ticketIdSchema.optional(), summary: z.string() }),
   z.object({ kind: z.literal("cost"), t: z.string(), ticket: ticketIdSchema.optional(), cost: costSchema }),
   z.object({ kind: z.literal("run"), t: z.string(), state: runStateSchema, reason: z.string().optional() }),
   z.object({ kind: z.literal("error"), t: z.string(), ticket: ticketIdSchema.optional(), text: z.string() }),
+  /** A chore sweep was judged: committed as one commit, or refused with the reason. */
+  z.object({ kind: z.literal("chores"), t: z.string(), sweep: z.number().int(), accepted: z.boolean(), done: z.number().int(), dropped: z.number().int(), promoted: z.number().int(), note: z.string() }),
   /** The last line a worker writes; the harness reads it to decide what happens to the ticket. */
   z.object({
     kind: z.literal("worker_done"),

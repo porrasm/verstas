@@ -22,7 +22,9 @@ export type Ticket = {
   createdAt: string;
   updatedAt: string;
 };
-export type Board = { goal: string; tickets: Ticket[] };
+export type Chore = { id: string; text: string; where?: string; repo?: string; state: "proposed" | "open" | "sweeping" | "done" | "dropped" | "promoted"; by: string; fromTicket?: string; outcome?: string; promotedTo?: string; sweep?: number; createdAt: string; updatedAt: string };
+export type Sweep = { n: number; ids: string[]; state: "working" | "judging" | "accepted" | "refused"; startedAt: string; endedAt?: string; note?: string; diff?: { added: number; removed: number; files: number } };
+export type Board = { goal: string; tickets: Ticket[]; chores: Chore[]; sweep?: Sweep };
 export type ActionDetail =
   | { kind: "network"; host: string; port?: number }
   | { kind: "pack"; pack: string }
@@ -52,7 +54,7 @@ export type Session = {
   attachments: { name: string; dir: string; bytes: number; skipped: string[]; description?: string }[];
   allowlist: string[];
   packs: string[];
-  caps: { workerMinutes: number; workerTurns: number; runTickets: number; budgetUsd: number; ticketAttempts: number; reviewer: boolean; resumeWorker?: boolean; leadMinutes?: number; leadTurns?: number };
+  caps: { workerMinutes: number; workerTurns: number; runTickets: number; budgetUsd: number; ticketAttempts: number; reviewer: boolean; resumeWorker?: boolean; leadMinutes?: number; leadTurns?: number; sweepMaxLines?: number; sweepMaxFiles?: number; choreApproval?: boolean };
   /** loop: a fresh implementer per ticket. lead: one long-lived agent works the board. */
   mode?: "loop" | "lead";
   limits: { memory: string; cpus: number; pids: number; workspaceMb: number };

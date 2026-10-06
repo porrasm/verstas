@@ -18,6 +18,7 @@ import {
   useNow,
   type AgentRequest,
   type Board,
+  type Chore,
   type Config,
   type Inbox,
   type NetworkPack,
@@ -503,6 +504,7 @@ const RunBody = (p: BodyProps) => {
       </div>
       <aside className="side">
         <InboxPanel inbox={inbox} onRead={(mid) => void p.tryAct("read", () => api("POST", `${base}/messages/${mid}/read`))} onPromote={(iid) => void p.tryAct("promote", () => api("POST", `${base}/ideas/${iid}/promote`))} onOpenTicket={p.openTicket} />
+        <ChoresPanel board={board} base={base} tryAct={p.tryAct} onOpenTicket={p.openTicket} />
         <WorkPanel session={session} base={base} active={active} done={counts.done ?? 0} onExport={p.onExport} />
         <PromptBox session={session} base={base} active={active} onDone={p.refreshRun} />
         <EnvironmentPanel env={env} />
@@ -1500,6 +1502,7 @@ const KIND_GROUP: Record<string, KindGroup> = {
   worker_done: "board",
   request: "board",
   error: "board",
+  chores: "board",
   denied_network: "network",
 };
 const GROUPS: { key: KindGroup; label: string }[] = [
@@ -1640,11 +1643,85 @@ const EventText = ({ e }: { e: VEvent }) => {
       return <>request {String(e.requestId)} · {String(e.summary)}</>;
     case "worker_done":
       return <>{String(e.role)} {e.ok ? "finished" : "stopped"} · {String(e.stopReason)} · {String(e.turns)} turns · {fmtSecs(Number(e.seconds))} · {fmtUsd(Number(e.costUsd))}</>;
+    case "chores":
+      return <>sweep {String(e.sweep)} {e.accepted ? `committed · ${String(e.done)} done, ${String(e.dropped)} dropped, ${String(e.promoted)} promoted` : "refused"} · {String(e.note)}</>;
     case "cost":
       return null;
     default:
       return <>{String(e.text ?? e.summary ?? JSON.stringify(e))}</>;
   }
+};
+
+// --- chores ----------------------------------------------------------------
+
+/**
+ * The chore list: small fixes filed by reviewers, workers and you, swept
+ * by a lead in batches and committed without a reviewer (docs/BOARD.md).
+ */
+const ChoresPanel = ({ board, base, tryAct, onOpenTicket }: { board: Board; base: string; tryAct: (label: string, fn: () => Promise<unknown>) => Promise<unknown>; onOpenTicket: (tid: string) => void }) => {
+  const [text, setText] = useState("");
+  const [where, setWhere] = useState("");
+  const chores = board.chores ?? [];
+  const proposed = chores.filter((c) => c.state === "proposed");
+  const open = chores.filter((c) => c.state === "open");
+  const sweeping = chores.filter((c) => c.state === "sweeping");
+  const settled = chores.filter((c) => c.state === "done" || c.state === "dropped" || c.state === "promoted").sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  const live = proposed.length + open.length + sweeping.length;
+  const sweep = board.sweep;
+  const add = async () => {
+    if (!text.trim()) return;
+    await tryAct("adding chore", () => api("POST", `${base}/chores`, { text: text.trim(), where: where.trim() || undefined }));
+    setText("");
+    setWhere("");
+  };
+  const row = (c: Chore) => (
+    <div className="req" key={c.id}>
+      <div className="head">
+        <span className={`pill ${c.state === "sweeping" ? "sig" : c.state === "proposed" ? "warn" : c.state === "done" ? "good" : "quiet"}`}>{c.state}</span>
+        <span className="mono muted">{c.id}</span>
+        {c.fromTicket && <span className="small">from <a href="#" className="mono" onClick={(e) => { e.preventDefault(); onOpenTicket(c.fromTicket!); }}>{c.fromTicket}</a></span>}
+        {c.promotedTo && <span className="small">→ <a href="#" className="mono" onClick={(e) => { e.preventDefault(); onOpenTicket(c.promotedTo!); }}>{c.promotedTo}</a></span>}
+        <span className="faint" title={fmtDateTime(c.createdAt)}>{fmtAgo(c.createdAt)}</span>
+      </div>
+      <div className="wrap" style={{ fontSize: 13 }}>{c.text}{c.where ? <span className="muted"> · {c.where}</span> : null}</div>
+      {c.outcome && <div className="wrap muted" style={{ fontSize: 12.5 }}>{c.outcome}</div>}
+      {(c.state === "proposed" || c.state === "open") && (
+        <div className="row">
+          {c.state === "proposed" && <button className="sm pri" onClick={() => void tryAct("approving chore", () => api("POST", `${base}/chores/${c.id}/state`, { state: "open" }))}>Approve</button>}
+          <button className="sm" onClick={() => void tryAct("promoting chore", () => api("POST", `${base}/chores/${c.id}/promote`, {}))}>Make a ticket</button>
+          <button className="sm quiet" onClick={() => void tryAct("dropping chore", () => api("POST", `${base}/chores/${c.id}/state`, { state: "dropped", note: "Dropped by the user" }))}>Drop</button>
+        </div>
+      )}
+    </div>
+  );
+  return (
+    <section className="card">
+      <h3>Chores{live ? ` · ${live}` : ""}</h3>
+      <p className="lead">Small fixes that are not worth a ticket. A lead sweeps them in batches and the batch becomes one commit after the checks, with no reviewer.</p>
+      {sweep && (sweep.state === "working" || sweep.state === "judging") && <div className="small"><span className="pill sig">sweep {sweep.n} {sweep.state}</span> {sweep.ids.join(", ")}</div>}
+      {sweep && (sweep.state === "accepted" || sweep.state === "refused") && <div className="small muted"><span className={`pill ${sweep.state === "accepted" ? "good" : "warn"}`}>sweep {sweep.n} {sweep.state}</span> {sweep.note}</div>}
+      {proposed.length > 0 && (
+        <div className="row small" style={{ marginTop: 8 }}>
+          <span><b>{proposed.length}</b> proposed by the workers wait for your approval.</span>
+          <button className="sm end" onClick={() => void tryAct("approving chores", () => api("POST", `${base}/chores/approve-all`))}>Approve all</button>
+        </div>
+      )}
+      {sweeping.map(row)}
+      {proposed.map(row)}
+      {open.map(row)}
+      <div className="row" style={{ marginTop: 8 }}>
+        <input placeholder="A small fix, one line" value={text} onChange={(e) => setText(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") void add(); }} style={{ flex: 2 }} />
+        <input placeholder="where (optional)" value={where} onChange={(e) => setWhere(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") void add(); }} style={{ flex: 1 }} />
+        <button className="sm" onClick={() => void add()} disabled={!text.trim()}>Add</button>
+      </div>
+      {settled.length > 0 && (
+        <details style={{ marginTop: 8 }}>
+          <summary className="muted small">{settled.length} settled</summary>
+          <div className="decided">{settled.slice(0, 50).map(row)}</div>
+        </details>
+      )}
+    </section>
+  );
 };
 
 // --- inbox -----------------------------------------------------------------
@@ -1706,6 +1783,8 @@ const CAP_HELP: Record<string, string> = {
   ticketAttempts: "Tries before a ticket is blocked",
   leadMinutes: "Wall-clock life of one lead; then a fresh one takes over",
   leadTurns: "Model turns per lead; then a fresh one takes over",
+  sweepMaxLines: "A chore sweep's commit may change at most this many lines; over it the sweep is refused",
+  sweepMaxFiles: "Files a chore sweep's commit may touch",
 };
 
 /**
@@ -1727,6 +1806,9 @@ const SessionSettings = ({ session, onSave, part = "all" }: { session: Session; 
     mode: session.mode ?? "loop",
     leadMinutes: String(session.caps.leadMinutes ?? 180),
     leadTurns: String(session.caps.leadTurns ?? 600),
+    sweepMaxLines: String(session.caps.sweepMaxLines ?? 400),
+    sweepMaxFiles: String(session.caps.sweepMaxFiles ?? 15),
+    choreApproval: session.caps.choreApproval ?? false,
     memory: session.limits.memory,
     cpus: String(session.limits.cpus),
   });
@@ -1753,7 +1835,7 @@ const SessionSettings = ({ session, onSave, part = "all" }: { session: Session; 
         ...(part !== "caps" ? { allowlist: f.allow.split(/\n/).map((s) => s.trim()).filter(Boolean), packs: f.packs } : {}),
         ...(part !== "network"
           ? {
-              caps: { workerMinutes: Number(f.workerMinutes), workerTurns: Number(f.workerTurns), budgetUsd: Number(f.budgetUsd), runTickets: Number(f.runTickets), ticketAttempts: Number(f.ticketAttempts), reviewer: f.reviewer, resumeWorker: f.resumeWorker, leadMinutes: Number(f.leadMinutes), leadTurns: Number(f.leadTurns) },
+              caps: { workerMinutes: Number(f.workerMinutes), workerTurns: Number(f.workerTurns), budgetUsd: Number(f.budgetUsd), runTickets: Number(f.runTickets), ticketAttempts: Number(f.ticketAttempts), reviewer: f.reviewer, resumeWorker: f.resumeWorker, leadMinutes: Number(f.leadMinutes), leadTurns: Number(f.leadTurns), sweepMaxLines: Number(f.sweepMaxLines), sweepMaxFiles: Number(f.sweepMaxFiles), choreApproval: f.choreApproval },
               limits: { memory: f.memory, cpus: Number(f.cpus) },
               mode: f.mode,
             }
@@ -1800,9 +1882,9 @@ const SessionSettings = ({ session, onSave, part = "all" }: { session: Session; 
       {part !== "network" && (
         <div className="two">
           {f.mode === "lead" &&
-            (["leadMinutes", "leadTurns"] as const).map((k) => (
+            (["leadMinutes", "leadTurns", "sweepMaxLines", "sweepMaxFiles"] as const).map((k) => (
               <label key={k}>
-                {{ leadMinutes: "Lead minutes", leadTurns: "Lead turns" }[k]}
+                {{ leadMinutes: "Lead minutes", leadTurns: "Lead turns", sweepMaxLines: "Chore sweep: max lines", sweepMaxFiles: "Chore sweep: max files" }[k]}
                 <span className="help">{CAP_HELP[k]}</span>
                 <input type="number" min={1} value={f[k]} onChange={(e) => set(k, e.target.value)} />
               </label>
@@ -1816,6 +1898,7 @@ const SessionSettings = ({ session, onSave, part = "all" }: { session: Session; 
           ))}
           <div style={{ alignSelf: "end", display: "grid", gap: 6 }}>
           <label className="chk"><input type="checkbox" checked={f.reviewer} onChange={(e) => set("reviewer", e.target.checked)} /> Reviewer pass after each ticket</label>
+          <label className="chk" title="Chores filed by reviewers and workers wait for your approval before a sweep may take them. Off: they are swept as they come."><input type="checkbox" checked={f.choreApproval} onChange={(e) => set("choreApproval", e.target.checked)} /> Approve workers' chores before they are swept</label>
           {f.mode !== "lead" && <label className="chk" title="Claude Code only. The next ticket's implementer continues the previous one's conversation instead of re-reading the repositories. The reviewer always starts fresh."><input type="checkbox" checked={f.resumeWorker} onChange={(e) => set("resumeWorker", e.target.checked)} /> Implementers continue one conversation</label>}
           </div>
           <label>Memory <span className="help">Container limit, e.g. 4g</span><input value={f.memory} onChange={(e) => set("memory", e.target.value)} /></label>

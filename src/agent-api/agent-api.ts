@@ -3,18 +3,22 @@ import express, { type Request, type Response, type NextFunction } from "express
 import { z } from "zod";
 import {
   actionDetailSchema,
+  choreIdSchema,
+  choreStateSchema,
   ideaSchema,
   messageSchema,
   now,
   requestOutcome,
   requestSchema,
+  sweepResultSchema,
   ticketIdSchema,
   ticketImportSchema,
   type AgentRequest,
   type Inbox,
+  type SweepResult,
   type Ticket,
 } from "../core/types.js";
-import { addNote, agentAddDep, agentSetPriority, BoardError, canStart, getTicket, importBoard, replaceTicket, transition, validateRepos, type AgentRole } from "../board/board.js";
+import { addChore, addNote, agentAddDep, agentSetPriority, beginSweep, BoardError, canStart, getTicket, importBoard, replaceTicket, sweepInFlight, sweepToJudging, transition, validateRepos, type AgentRole } from "../board/board.js";
 import type { SessionHub } from "../sessions/hub.js";
 
 /**
@@ -40,6 +44,10 @@ export type AgentRunHooks = {
   claimRefusal?(run: RunToken): string | undefined;
   /** The lead filed a request or a halt on the ticket it holds; the run parks the ticket so the lead can move on. */
   requested?(run: RunToken, ticketId: string): void;
+  /** The lead took a batch of chores (board.sweep is now `working`). */
+  sweepStarted?(run: RunToken, ids: string[]): void;
+  /** The lead submitted its sweep with one result per chore; the run judges it (checks, size, commit) and settles the chores. */
+  sweepSubmitted?(run: RunToken, results: SweepResult[]): void;
 };
 
 /** States in which a ticket still belongs to the lead that claimed it. */
@@ -118,12 +126,25 @@ export const createAgentApi = (hub: SessionHub, tokens: RunTokens, hooks?: Agent
   const r = express.Router();
   r.use(auth);
 
+  /** Claim, submit, handoff and sweeps are a lead's: a worker's ticket is chosen and judged by the loop. */
+  const leadOnly = (req: AgentRequestWithRun, res: Response): boolean => {
+    if (req.run.role !== "lead") {
+      res.status(403).json({ error: "Only a lead claims, submits, sweeps and hands off; the harness moves your ticket for you" });
+      return false;
+    }
+    if (!hooks) {
+      res.status(409).json({ error: "No run is attached to this API; nothing can judge or hand over" });
+      return false;
+    }
+    return true;
+  };
+
   const wrap =
     (fn: (req: AgentRequestWithRun, res: Response) => Promise<void>) =>
     (req: Request, res: Response) => {
       fn(req as AgentRequestWithRun, res).catch((e: unknown) => {
         if (e instanceof z.ZodError) res.status(400).json({ error: `Invalid input: ${e.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}` });
-        else if (e instanceof BoardError) res.status(e.code === "unknown_ticket" ? 404 : e.code === "unknown_repo" ? 400 : 403).json({ error: e.message });
+        else if (e instanceof BoardError) res.status(e.code === "unknown_ticket" || e.code === "unknown_chore" ? 404 : e.code === "unknown_repo" ? 400 : e.code === "sweep_in_flight" || e.code === "no_sweep" ? 409 : 403).json({ error: e.message });
         else {
           console.error(`[agent] 500 ${req.method} ${req.originalUrl}:`, e);
           res.status(500).json({ error: (e as Error).message });
@@ -304,21 +325,95 @@ export const createAgentApi = (hub: SessionHub, tokens: RunTokens, hooks?: Agent
     }),
   );
 
+  // --- Chores: small fixes outside the ticket flow ---------------------------
+
+  r.get(
+    "/chores",
+    wrap(async (req, res) => {
+      const h = await hub.get(req.run.sessionId);
+      const state = typeof req.query.state === "string" ? choreStateSchema.parse(req.query.state) : undefined;
+      const chores = h.board.chores.filter((c) => !state || c.state === state).map(({ id, text, where, repo, state: st, by, fromTicket, outcome, promotedTo }) => ({ id, text, where, repo, state: st, by, fromTicket, outcome, promotedTo }));
+      res.json({ chores, sweep: h.board.sweep ?? null, approvalRequired: h.session.caps.choreApproval });
+    }),
+  );
+
+  r.post(
+    "/chores",
+    wrap(async (req, res) => {
+      const input = z.object({ text: z.string().min(1).max(2000), where: z.string().max(500).optional(), repo: z.string().min(1).max(100).optional() }).parse(req.body);
+      const h = await hub.get(req.run.sessionId);
+      const out = await h.mutate((d) => {
+        if (input.repo && !d.session.repos.some((x) => x.name === input.repo)) throw new BoardError(`No repository ${input.repo} in this session (${d.session.repos.map((x) => x.name).join(", ") || "none"})`, "unknown_repo");
+        const r = addChore(d.board, input, "agent", { fromTicket: req.run.currentTicket, state: d.session.caps.choreApproval ? "proposed" : "open" });
+        return { next: { board: r.board }, result: { id: r.id, state: d.session.caps.choreApproval ? "proposed" : "open" } };
+      });
+      res.status(201).json({ ok: true, ...out, note: out.state === "proposed" ? "Kept for the user's approval; a sweep takes it once approved." : "On the chore list; a lead sweeps it in a batch." });
+    }),
+  );
+
+  r.get(
+    "/chores/sweep",
+    wrap(async (req, res) => {
+      const h = await hub.get(req.run.sessionId);
+      const sw = h.board.sweep;
+      if (!sw) {
+        res.json({ state: "none" });
+        return;
+      }
+      const chores = h.board.chores.filter((c) => sw.ids.includes(c.id)).map(({ id, state, outcome, promotedTo }) => ({ id, state, outcome, promotedTo }));
+      res.json({ ...sw, chores });
+    }),
+  );
+
+  r.post(
+    "/chores/sweep",
+    wrap(async (req, res) => {
+      if (!leadOnly(req, res)) return;
+      const { ids, max } = z.object({ ids: z.array(choreIdSchema).max(50).optional(), max: z.number().int().min(1).max(50).optional() }).parse(req.body ?? {});
+      const refusal = hooks!.claimRefusal?.(req.run);
+      if (refusal) {
+        res.status(409).json({ error: refusal });
+        return;
+      }
+      const h = await hub.get(req.run.sessionId);
+      const out = await h.mutate((d) => {
+        const held = req.run.currentTicket ? d.board.tickets.find((t) => t.id === req.run.currentTicket && HELD.has(t.state)) : undefined;
+        if (held) throw new BoardError(`You hold ${held.id} (${held.state}); a sweep is its own commit, so submit the ticket first`, "forbidden_move");
+        const r = beginSweep(d.board, { ids, max });
+        return { next: { board: r.board }, result: r };
+      });
+      hooks!.sweepStarted?.(req.run, out.sweep.ids);
+      res.json({
+        ok: true,
+        sweep: out.sweep.n,
+        chores: out.chores.map(({ id, text, where, repo, fromTicket, by }) => ({ id, text, where, repo, fromTicket, by })),
+        limits: { maxLines: h.session.caps.sweepMaxLines, maxFiles: h.session.caps.sweepMaxFiles },
+        next: "Do each chore (or decide to drop or promote it), run the repository's own checks, then chores_submit with one line per chore. The batch becomes one commit; keep it under the limits or it is refused.",
+      });
+    }),
+  );
+
+  r.post(
+    "/chores/sweep/submit",
+    wrap(async (req, res) => {
+      if (!leadOnly(req, res)) return;
+      const { results } = z.object({ results: z.array(sweepResultSchema).max(50).default([]) }).parse(req.body ?? {});
+      const h = await hub.get(req.run.sessionId);
+      await h.mutate((d) => {
+        const live = sweepInFlight(d.board);
+        if (!live) throw new BoardError("No sweep is in flight; start one with chores_sweep", "no_sweep");
+        const unknown = results.map((r) => r.id).filter((id) => !live.ids.includes(id));
+        if (unknown.length) throw new BoardError(`${unknown.join(", ")} ${unknown.length === 1 ? "is" : "are"} not in this sweep (${live.ids.join(", ")})`, "chore_state");
+        return { next: { board: sweepToJudging(d.board) } };
+      });
+      hooks!.sweepSubmitted?.(req.run, results);
+      res.json({ ok: true, state: "judging", next: "The harness runs the checks and the size check, then commits or refuses. Poll chores_sweep status, or wait with chores_submit." });
+    }),
+  );
 
   // --- A lead drives the board: claim, submit, hand off ----------------------
   // Only a lead's token may; a worker's ticket is chosen and judged by the loop.
 
-  const leadOnly = (req: AgentRequestWithRun, res: Response): boolean => {
-    if (req.run.role !== "lead") {
-      res.status(403).json({ error: "Only a lead claims, submits and hands off; the harness moves your ticket for you" });
-      return false;
-    }
-    if (!hooks) {
-      res.status(409).json({ error: "No run is attached to this API; nothing can judge or hand over" });
-      return false;
-    }
-    return true;
-  };
 
   r.post(
     "/tickets/:id/claim",
@@ -335,6 +430,8 @@ export const createAgentApi = (hub: SessionHub, tokens: RunTokens, hooks?: Agent
       await h.mutate((d) => {
         const held = req.run.currentTicket ? d.board.tickets.find((t) => t.id === req.run.currentTicket && HELD.has(t.state)) : undefined;
         if (held && held.id !== id) throw new BoardError(`You hold ${held.id} (${held.state}); submit it, or note why it is stuck, before claiming another`, "forbidden_move");
+        const sweeping = sweepInFlight(d.board);
+        if (sweeping) throw new BoardError(`Sweep ${sweeping.n} is ${sweeping.state}; finish it with chores_submit before claiming a ticket`, "forbidden_move");
         const t = getTicket(d.board, id);
         if (t.state !== "ready") throw new BoardError(`${id} is ${t.state}, not ready`, "illegal_transition");
         if (!canStart(d.board, t)) {

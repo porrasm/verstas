@@ -58,7 +58,7 @@ test("board MCP server speaks JSON-RPC and forwards tool calls with the run toke
     const names = (list.result!.tools as { name: string; inputSchema: { required: string[] } }[]).map((t) => t.name);
     expect(names).toEqual([
       "budget", "board_list_tickets", "board_get_ticket", "board_add_note", "board_report", "board_create_ticket",
-      "board_set_priority", "board_add_dep", "request", "halt", "message", "idea",
+      "chore", "chores_list", "board_set_priority", "board_add_dep", "request", "halt", "message", "idea",
     ]);
 
     const got = await call("tools/call", { name: "board_get_ticket", arguments: { id: "T-1" } });
@@ -105,9 +105,13 @@ test("claim, submit and handoff are shown to a lead only", async () => {
   const { visibleTools } = await import("../../src/worker/mcp-server.js");
   const lead = visibleTools("lead").map((t) => t.name);
   const worker = visibleTools("implementer").map((t) => t.name);
-  for (const name of ["board_claim", "board_submit", "handoff"]) {
+  for (const name of ["board_claim", "board_submit", "handoff", "chores_sweep", "chores_submit"]) {
     expect(lead).toContain(name);
     expect(worker).not.toContain(name);
+  }
+  for (const name of ["chore", "chores_list"]) {
+    expect(lead).toContain(name);
+    expect(worker).toContain(name);
   }
   expect(worker).toContain("board_report");
   expect(lead).toContain("board_report");

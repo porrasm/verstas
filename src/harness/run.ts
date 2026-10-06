@@ -2,8 +2,8 @@ import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
-import { agentFor, DRIVER_NAMES, eventSchema, isInitialized, now, requestOutcome, runSchema, type Board, type DriverName, type Readiness, type Run, type Session, type Ticket, type TicketState, type VerstasEvent } from "../core/types.js";
-import { addNote, canStart, getTicket, hasOpenWork, nextReady, replaceTicket, transition, validateRepos } from "../board/board.js";
+import { agentFor, DRIVER_NAMES, eventSchema, isInitialized, matchesAnyGlob, now, requestOutcome, runSchema, SWEEP_PROTECTED_GLOBS, type Board, type DriverName, type Readiness, type Run, type Session, type SweepResult, type Ticket, type TicketState, type VerstasEvent } from "../core/types.js";
+import { addNote, canStart, getTicket, hasOpenWork, nextReady, openChores, releaseSweep, replaceTicket, settleSweep, sweepInFlight, transition, validateRepos } from "../board/board.js";
 import { writeJsonAtomic } from "../board/store.js";
 import type { SessionHandle, SessionHub } from "../sessions/hub.js";
 import type { AgentRunHooks, RunToken, RunTokens } from "../agent-api/agent-api.js";
@@ -215,6 +215,34 @@ export class RunManager implements AgentRunHooks {
       .catch(() => undefined);
   }
 
+  sweepStarted(r: RunToken, ids: string[]): void {
+    const c = this.leadFor(r);
+    if (!c) return;
+    void c.log({ kind: "status", t: (this.deps.now ?? now)(), text: `sweep ${c.h.board.sweep?.n ?? "?"}: the lead took ${ids.length} chore${ids.length === 1 ? "" : "s"} (${ids.join(", ")})` }).catch(() => undefined);
+  }
+
+  /** Judge the submitted sweep while the lead waits: the checks, the size check, one commit or a refusal. */
+  sweepSubmitted(r: RunToken, results: SweepResult[]): void {
+    const c = this.leadFor(r);
+    if (!c) {
+      void this.deps.hub
+        .get(r.sessionId)
+        .then((h) => h.mutate((docs) => ({ next: { board: releaseSweep(docs.board, "Submitted after the run ended; the chores are open again and the changes stay in the working tree") } })))
+        .catch(() => undefined);
+      return;
+    }
+    c.queue = c.queue
+      .then(async () => {
+        try {
+          await this.judgeSweep(c.h, c.run, results, c.log, c.signal);
+        } catch (e) {
+          await c.log({ kind: "error", t: (this.deps.now ?? now)(), text: `judging the sweep failed: ${(e as Error).message}` });
+          await c.h.mutate((docs) => ({ next: { board: releaseSweep(docs.board, `Judging failed (${(e as Error).message.slice(0, 200)}); the chores are open again`) } })).catch(() => undefined);
+        }
+      })
+      .catch(() => undefined);
+  }
+
   /** End this lead; the loop starts a fresh one with the note. */
   handoff(r: RunToken, note: string): void {
     const c = this.leadFor(r);
@@ -268,7 +296,8 @@ export class RunManager implements AgentRunHooks {
     const busy = ["running", "checking", "planning"].includes(h.session.state);
     const last = await lastRunFile(h.paths.runs);
     const runLeftOpen = last?.run.state === "running";
-    if (!held.length && !busy && !runLeftOpen) return [];
+    const sweep = sweepInFlight(h.board);
+    if (!held.length && !busy && !runLeftOpen && !sweep) return [];
     const did: string[] = [];
     const killed = await d.shell(sessionId).exec(["pkill", "-TERM", "-f", "/opt/verstas/worker.js"], { timeoutMs: 15_000 }).catch(() => null);
     if (killed?.code === 0) did.push("stopped a worker left running in the container");
@@ -279,6 +308,10 @@ export class RunManager implements AgentRunHooks {
         return { next: { board } };
       });
       did.push(`requeued ${held.map((t) => t.id).join(", ")}`);
+    }
+    if (sweep) {
+      await h.mutate((docs) => ({ next: { board: releaseSweep(docs.board, "The host app stopped during this sweep; the chores are open again and the changes stay in the working tree") } }));
+      did.push(`released sweep ${sweep.n} (${sweep.ids.join(", ")})`);
     }
     if (last && runLeftOpen) {
       const closed: Run = { ...last.run, state: "stopped", endedAt: clock(), currentTicket: undefined, pauseReason: "host app restarted" };
@@ -527,6 +560,7 @@ export class RunManager implements AgentRunHooks {
               : {};
           });
         }
+        if (sweepInFlight(h.board)) await h.mutate((docs) => ({ next: { board: releaseSweep(docs.board, "Run stopped by the user; the chores are open again and the changes stay in the working tree") } }));
       }
     } catch (e) {
       run.state = "failed";
@@ -570,8 +604,10 @@ export class RunManager implements AgentRunHooks {
     let convoId: string | undefined;
     let handoffNote = (await this.readNote(h, "state.md", 16_000)) ?? undefined;
     let idle = 0;
+    /** A lead that was given only chores and swept none: the next round finishes instead of spending another lead. */
+    let choresIdle = false;
     let lastDenialCheck = clock();
-    const fingerprint = () => JSON.stringify([h.board.tickets.map((t) => [t.id, t.state, t.attempts]), h.inbox.requests.length]);
+    const fingerprint = () => JSON.stringify([h.board.tickets.map((t) => [t.id, t.state, t.attempts]), h.board.chores.map((c) => [c.id, c.state]), h.inbox.requests.length]);
     try {
       while (!ctl.isStop()) {
         if (ctl.isPause()) {
@@ -595,12 +631,17 @@ export class RunManager implements AgentRunHooks {
           for (const line of healed) await status(line);
         }
         const holds = h.board.tickets.find((t) => t.state === "in_progress");
-        if (!holds && !h.board.tickets.some((t) => canStart(h.board, t))) {
+        const startable = h.board.tickets.some((t) => canStart(h.board, t));
+        const sweeping = Boolean(sweepInFlight(h.board));
+        const choresOpen = openChores(h.board).length;
+        // Only chores left: one lead gets them; if it sweeps none, the run finishes rather than spend another.
+        const onlyChores = !holds && !startable && !sweeping && choresOpen > 0;
+        if (!holds && !startable && !sweeping && (!choresOpen || choresIdle)) {
           const open = h.inbox.requests.some((r) => r.state === "open");
           run.state = hasOpenWork(h.board) || open ? "paused" : "finished";
           const blockers = describeBlockers(h.board);
           run.pauseReason = open ? "requests" : hasOpenWork(h.board) ? blockers || "waiting on dependencies" : undefined;
-          await status(open ? "nothing ready; waiting for your answers in the inbox" : run.state === "finished" ? "no ready tickets left" : `nothing can run: ${blockers}`);
+          await status(open ? "nothing ready; waiting for your answers in the inbox" : run.state === "finished" ? (choresOpen ? `no ready tickets left; ${choresOpen} ${choresOpen === 1 ? "chore stays" : "chores stay"} open (the lead did not sweep them)` : "no ready tickets left") : `nothing can run: ${blockers}`);
           break;
         }
 
@@ -608,8 +649,8 @@ export class RunManager implements AgentRunHooks {
         const agent = agentFor(h.session, "lead");
         const resume = Boolean(convoId) && agent.driver === "claude";
         const agentSession = agent.driver === "claude" ? (resume ? { id: convoId!, resume: true } : { id: randomUUID(), resume: false }) : undefined;
-        const freshPrompt = () => this.withNotes(h, leadPrompt(h.board, { holds, handoff: handoffNote }));
-        const promptText = resume ? leadContinuePrompt(h.board, holds) : await freshPrompt();
+        const freshPrompt = () => this.withNotes(h, leadPrompt(h.board, { holds, handoff: handoffNote, onlyChores }));
+        const promptText = resume ? leadContinuePrompt(h.board, holds, { onlyChores }) : await freshPrompt();
         const leadAbort = new AbortController();
         const onStop = () => leadAbort.abort();
         ctl.signal.addEventListener("abort", onStop, { once: true });
@@ -662,7 +703,9 @@ export class RunManager implements AgentRunHooks {
           convoId = lead.agentSession && lead.turns > 0 ? lead.agentSession : undefined;
         }
 
-        idle = fingerprint() === before ? idle + 1 : 0;
+        const moved = fingerprint() !== before;
+        if (onlyChores) choresIdle = !moved;
+        idle = moved ? 0 : idle + 1;
         if (idle >= 2) {
           run.state = "paused";
           run.pauseReason = "the lead ended twice without moving a ticket";
@@ -686,8 +729,79 @@ export class RunManager implements AgentRunHooks {
         for (const t of h.board.tickets.filter((x) => x.state === "in_progress")) {
           await h.mutate((docs) => (getTicket(docs.board, t.id).state === "in_progress" ? { next: { board: transition(docs.board, t.id, "ready", { by: "harness", text: "The lead's run ended while it held this ticket; requeued with the work kept" }) } } : {})).catch(() => undefined);
         }
+        if (sweepInFlight(h.board)) await h.mutate((docs) => ({ next: { board: releaseSweep(docs.board, "The lead's run ended during this sweep; the chores are open again and the changes stay in the working tree") } })).catch(() => undefined);
       }
     }
+  }
+
+  /**
+   * The verdict on a chore sweep: the repositories' own checks, then a size
+   * check (lines, files, protected paths), then one commit for the batch,
+   * or a refusal that leaves the changes in the working tree. No reviewer:
+   * the size check is what stands in for one, so it is strict.
+   */
+  async judgeSweep(h: SessionHandle, run: Run, results: readonly SweepResult[], log: (e: VerstasEvent) => Promise<void>, signal: AbortSignal): Promise<"accepted" | "refused"> {
+    const clock = this.deps.now ?? now;
+    const sw = sweepInFlight(h.board);
+    if (!sw) return "refused";
+    const caps = h.session.caps;
+    const sh = this.deps.shell(h.id);
+    let added = 0;
+    let removed = 0;
+    let files = 0;
+    const touched: string[] = [];
+    const protectedHits: string[] = [];
+    for (const repo of h.session.repos) {
+      const dir = `/workspace/${repo.name}`;
+      const d = await this.stageAndDiff(h.id, dir);
+      added += d.numstat.added;
+      removed += d.numstat.removed;
+      files += d.numstat.files;
+      if (d.numstat.files) touched.push(repo.name);
+      for (const p of d.paths) if (matchesAnyGlob(p, SWEEP_PROTECTED_GLOBS)) protectedHits.push(`${repo.name}/${p}`);
+    }
+    const gates: { name: string; ok: boolean; summary: string }[] = [];
+    for (const name of touched.length ? touched : h.session.repos.slice(0, 1).map((r) => r.name)) gates.push(...(await this.runGates(h.id, `/workspace/${name}`, log)));
+    const failed = gates.filter((g) => !g.ok);
+    const lines = added + removed;
+    let refusal: string | undefined;
+    if (signal.aborted) refusal = "the run stopped before the sweep was judged";
+    else if (failed.length) refusal = `checks failed: ${failed.map((g) => `${g.name} (${g.summary.slice(0, 160)})`).join("; ")}. Fix and sweep again, or revert the changes.`;
+    else if (protectedHits.length) refusal = `a sweep may not change ${protectedHits.slice(0, 6).join(", ")}${protectedHits.length > 6 ? ` and ${protectedHits.length - 6} more` : ""}: contract documents and fixtures change through a ticket, with a reviewer. Revert those files, or claim a ticket that covers the change.`;
+    else if (files > caps.sweepMaxFiles || lines > caps.sweepMaxLines) refusal = `too large for a sweep: ${files} files, ${lines} lines changed (limits ${caps.sweepMaxFiles} files, ${caps.sweepMaxLines} lines). The changes stay in the working tree: claim a ticket that covers them (file one with board_create_ticket if none fits), or revert.`;
+    const counts = { done: results.filter((r) => r.outcome === "done").length, dropped: results.filter((r) => r.outcome === "dropped").length, promoted: results.filter((r) => r.outcome === "promoted").length };
+    const settle = async (accepted: boolean, note: string) => {
+      const out = await h.mutate((docs) => {
+        const r = settleSweep(docs.board, results, { accepted, note, diff: { added, removed, files } });
+        return { next: { board: r.board }, result: r };
+      });
+      await log({ kind: "chores", t: clock(), sweep: sw.n, accepted, done: out.done.length, dropped: out.dropped.length, promoted: out.promoted.length, note });
+      await log({ kind: "status", t: clock(), text: `sweep ${sw.n} ${accepted ? "committed" : "refused"}: ${note.slice(0, 300)}` });
+      return out;
+    };
+    if (refusal) {
+      // Unstage but keep the working tree: the lead decides what becomes a ticket and what is reverted.
+      for (const repo of touched) await sh.exec(["git", "reset", "-q"], { workdir: `/workspace/${repo}`, timeoutMs: 60_000 });
+      await settle(false, refusal);
+      return "refused";
+    }
+    const chores = h.board.chores;
+    const lineFor = (r: SweepResult) => {
+      const c = chores.find((x) => x.id === r.id);
+      return `- ${r.id} ${r.outcome}${r.outcome === "done" ? "" : ` (${r.note?.trim() || "no reason given"})`}: ${c?.text.split("\n")[0] ?? ""}${c?.where ? ` [${c.where}]` : ""}`;
+    };
+    const subject = `Chores (sweep ${sw.n}): ${[counts.done ? `${counts.done} done` : "", counts.dropped ? `${counts.dropped} dropped` : "", counts.promoted ? `${counts.promoted} promoted` : ""].filter(Boolean).join(", ") || "nothing settled"}`;
+    const message = `${subject}\n\n${results.map(lineFor).join("\n")}`;
+    const leaked = files ? await this.commitInContainer(h, message) : [];
+    if (leaked.length) {
+      await settle(false, `The Claude token appears in the changes to ${leaked.join(", ")}; nothing was committed. Remove it from the files and sweep again.`);
+      return "refused";
+    }
+    const note = `${subject}${files ? ` · ${files} files, +${added} −${removed}` : " · no files changed"}`;
+    const out = await settle(true, note);
+    if (out.promoted.length) await log({ kind: "status", t: clock(), text: `sweep ${sw.n}: promoted ${out.promoted.map((p) => `${p.chore} → ${p.ticket}`).join(", ")} to the backlog` });
+    addCost(run, 0);
+    return "accepted";
   }
 
   /** One ticket, start to finish: the implementer, then the judge. Returns how it ended for the loop's bookkeeping. */
@@ -965,7 +1079,7 @@ export class RunManager implements AgentRunHooks {
   }
 
   /** Gates are whatever the repository itself offers: npm scripts and pytest. */
-  private async runGates(sessionId: string, repoDir: string, log: (e: VerstasEvent) => Promise<void>, ticketId: string): Promise<{ name: string; ok: boolean; summary: string }[]> {
+  private async runGates(sessionId: string, repoDir: string, log: (e: VerstasEvent) => Promise<void>, ticketId?: string): Promise<{ name: string; ok: boolean; summary: string }[]> {
     const clock = this.deps.now ?? now;
     const sh = this.deps.shell(sessionId);
     const results: { name: string; ok: boolean; summary: string }[] = [];
@@ -997,7 +1111,7 @@ export class RunManager implements AgentRunHooks {
     return results;
   }
 
-  private async stageAndDiff(sessionId: string, repoDir: string): Promise<{ stat: string; numstat: { added: number; removed: number; files: number }; diff: string }> {
+  private async stageAndDiff(sessionId: string, repoDir: string): Promise<{ stat: string; numstat: { added: number; removed: number; files: number }; diff: string; paths: string[] }> {
     const sh = this.deps.shell(sessionId);
     await sh.exec(["git", "add", "-A"], { workdir: repoDir, timeoutMs: 60_000 });
     const stat = await sh.exec(["git", "diff", "--cached", "--stat"], { workdir: repoDir, timeoutMs: 60_000 });
@@ -1006,14 +1120,18 @@ export class RunManager implements AgentRunHooks {
     let added = 0;
     let removed = 0;
     let files = 0;
+    const paths: string[] = [];
     for (const line of num.stdout.split("\n")) {
-      const [a, r] = line.split("\t");
+      const [a, r, ...rest] = line.split("\t");
       if (a === undefined || r === undefined) continue;
       files++;
       added += Number(a) || 0;
       removed += Number(r) || 0;
+      // A rename shows as "old => new" or "{a => b}/file"; the new name is what the rules apply to.
+      const p = rest.join("\t").trim().replace(/\{[^}]* => ([^}]*)\}/g, "$1").replace(/^.* => /, "");
+      if (p) paths.push(p);
     }
-    return { stat: stat.stdout.trim(), numstat: { added, removed, files }, diff: diff.stdout };
+    return { stat: stat.stdout.trim(), numstat: { added, removed, files }, diff: diff.stdout, paths };
   }
 
   /**

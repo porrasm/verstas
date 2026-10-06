@@ -95,6 +95,25 @@ export const submitAndWait = async (id: string, waitMs = SUBMIT_WAIT_MS, pollMs 
   }
 };
 
+/** How long `chores_submit` waits for the harness's verdict on a sweep. */
+const SWEEP_WAIT_MS = Number(process.env.VERSTAS_SWEEP_WAIT_MS) || 20 * 60_000;
+
+type SweepView = { state: string; n?: number; note?: string; chores?: unknown[] };
+
+/** Submit the sweep, then wait until the harness committed or refused it. */
+export const submitSweepAndWait = async (results: unknown[], waitMs = SWEEP_WAIT_MS, pollMs = SUBMIT_POLL_MS): Promise<unknown> => {
+  await api("POST", "/chores/sweep/submit", { results });
+  const until = Date.now() + waitMs;
+  for (;;) {
+    await new Promise((r) => setTimeout(r, pollMs));
+    const sw = (await api("GET", "/chores/sweep")) as SweepView;
+    if (sw.state === "accepted") return { sweep: sw.n, verdict: "committed", note: sw.note, chores: sw.chores };
+    if (sw.state === "refused") return { sweep: sw.n, verdict: "refused: the chores are open again; read the note", note: sw.note, chores: sw.chores };
+    if (sw.state === "none") return { verdict: "no sweep" };
+    if (Date.now() >= until) return { sweep: sw.n, state: sw.state, verdict: "still being judged", note: "Call chores_list later; do not start another sweep or claim a ticket until it is settled." };
+  }
+};
+
 export const TOOLS: Tool[] = [
   {
     name: "budget",
@@ -170,6 +189,44 @@ export const TOOLS: Tool[] = [
       ["title", "kind", "spec"],
     ),
     call: (a) => api("POST", `/tickets`, a),
+  },
+  {
+    name: "chore",
+    description:
+      "File a small, self-contained fix that is not worth a ticket: a nit, a rename, a missing guard, a doc line, a weak test name; a few dozen changed lines at most. One line of text plus where to look. Chores are swept in batches by a lead and committed together after the repository's checks; no reviewer. A bug, anything a user would notice, or anything bigger is a ticket (board_create_ticket), not a chore.",
+    inputSchema: obj({ text: str("What to change, one line", 2000), where: str("File, function or page", 500), repo: str("Which clone under /workspace, when the session has several", 100) }, ["text"]),
+    call: (a) => api("POST", `/chores`, { text: a.text, where: a.where, repo: a.repo }),
+  },
+  {
+    name: "chores_list",
+    description: "The chore list: small fixes waiting for a sweep (state open), proposed ones awaiting the user, and what the last sweep did. Optionally filter by state.",
+    inputSchema: obj({ state: { type: "string", enum: ["proposed", "open", "sweeping", "done", "dropped", "promoted"] } }, []),
+    call: (a) => api("GET", `/chores${a.state ? `?state=${encodeURIComponent(String(a.state))}` : ""}`),
+  },
+  {
+    name: "chores_sweep",
+    leadOnly: true,
+    description:
+      "Take a batch of open chores to do in one go (you must hold no ticket): the given ids, or the oldest ones up to max. Returns the chores and the size limits of a sweep. Do them, run the repository's own checks yourself, then chores_submit. The batch becomes one commit without a reviewer, so stay within the limits and never touch the project's contract documents or fixtures from a sweep; make that a ticket instead.",
+    inputSchema: obj({ ids: { type: "array", items: str("Chore id, e.g. C-3", 20), maxItems: 50 }, max: { type: "integer", minimum: 1, maximum: 50 } }, []),
+    call: (a) => api("POST", `/chores/sweep`, { ids: a.ids, max: a.max }),
+  },
+  {
+    name: "chores_submit",
+    leadOnly: true,
+    description:
+      "Submit the sweep you hold: one result per chore, outcome done (note: what changed), dropped (note: why) or promoted (note: what the ticket should say; a backlog ticket is created). A chore you leave out goes back to the list. The harness runs the checks and the size check, commits the batch as one commit or refuses it (the changes stay in the working tree; split them into a ticket or revert them), and returns the verdict.",
+    inputSchema: obj(
+      {
+        results: {
+          type: "array",
+          maxItems: 50,
+          items: obj({ id: str("Chore id", 20), outcome: { type: "string", enum: ["done", "dropped", "promoted"] }, note: str("One line", 2000) }, ["id", "outcome"]),
+        },
+      },
+      ["results"],
+    ),
+    call: (a) => submitSweepAndWait((a.results as unknown[]) ?? []),
   },
   {
     name: "board_set_priority",
