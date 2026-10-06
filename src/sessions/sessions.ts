@@ -11,6 +11,7 @@ import {
   type Session,
   type SessionAgents,
   type SessionSetupScript,
+  type SetupMode,
 } from "../core/types.js";
 import { writeJsonAtomic, saveBoard } from "../board/store.js";
 import { emptyBoard } from "../board/board.js";
@@ -104,6 +105,8 @@ export type CreateSessionInput = {
   allowlist?: string[];
   packs?: string[];
   requirements?: string;
+  /** Absent means agentic, the schema's default. */
+  setupMode?: SetupMode;
   image: string;
   /** Legacy: the worker's Claude model. New callers pass `agents`. */
   model?: string;
@@ -174,6 +177,7 @@ export const createSession = async (root: string, input: CreateSessionInput): Pr
     model: input.model?.trim() || undefined,
     agents: input.agents ?? {},
     requirements: input.requirements?.trim() ?? "",
+    setupMode: input.setupMode,
     setupScripts: input.setupScripts ?? [],
     // Packs plus extra hosts; hosts the chosen scripts download from join too. The agents' own backends come with the agent choice.
     packs: withAgentPacks(input.packs ?? (input.allowlist ? [] : [...DEFAULT_PACKS]), input),

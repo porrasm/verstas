@@ -109,7 +109,7 @@ export type Status = {
 export type Config = { sessionsRoot: string; workTargets: { name: string; path: string }[]; uiPort: number; agentApiPort: number; devboxImage: string; linuxHost: boolean };
 
 export class ApiError extends Error {
-  constructor(readonly status: number, message: string) {
+  constructor(readonly status: number, message: string, readonly body?: unknown) {
     super(message);
   }
 }
@@ -127,7 +127,7 @@ export const api = async <T,>(method: string, path: string, body?: unknown): Pro
   } catch {
     json = { raw: text };
   }
-  if (!res.ok) throw new ApiError(res.status, (json as { error?: string })?.error ?? `HTTP ${res.status}`);
+  if (!res.ok) throw new ApiError(res.status, (json as { error?: string })?.error ?? `HTTP ${res.status}`, json);
   return json as T;
 };
 

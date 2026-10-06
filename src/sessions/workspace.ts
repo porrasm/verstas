@@ -60,6 +60,28 @@ export const cloneWorkTarget = async (
   return { dest, branch: chosen, runBranch, commit };
 };
 
+/**
+ * A clone from a session archive's bundle (src/sessions/archive.ts): every
+ * branch and tag of the exported clone, with the run branch checked out.
+ * The repository is created empty with no template, so nothing but the
+ * bundle's objects and refs enters it; a bundle is pure data, as in apply.
+ */
+export const cloneFromBundle = async (bundleFile: string, dest: string, runBranch: string): Promise<{ commit: string }> => {
+  if (!BRANCH_RE.test(runBranch) || runBranch.startsWith("-")) throw new Error(`Bad branch name: ${runBranch}`);
+  await fs.mkdir(dest, { recursive: true });
+  await git(["init", "-q", "--template=", dest]);
+  // --update-head-ok: the empty repository's unborn HEAD may name a branch the bundle brings.
+  await git(["-C", dest, "fetch", "-q", "--update-head-ok", path.resolve(bundleFile), "+refs/heads/*:refs/heads/*", "+refs/tags/*:refs/tags/*"]);
+  await git(["-C", dest, "rev-parse", "-q", "--verify", `refs/heads/${runBranch}`]).catch(() => {
+    throw new Error(`The bundle has no branch ${runBranch}`);
+  });
+  await git(["-C", dest, "checkout", "-q", "-f", runBranch]);
+  await git(["-C", dest, "config", "user.name", "Verstas"]);
+  await git(["-C", dest, "config", "user.email", "verstas@localhost"]);
+  await git(["-C", dest, "config", "commit.gpgsign", "false"]);
+  return { commit: await git(["-C", dest, "rev-parse", "HEAD"]) };
+};
+
 export const ZIP_MAX_FILE_BYTES = 200 * 1024 * 1024;
 export const ZIP_MAX_TOTAL_BYTES = 2 * 1024 * 1024 * 1024;
 export const ZIP_MAX_ENTRIES = 50_000;
@@ -114,13 +136,13 @@ export const extractZip = async (zipFile: string, destDir: string): Promise<Extr
   return { dir: destDir, files, bytes, skipped };
 };
 
-export const entryProblem = (name: string, attr: number, size: number): string | null => {
+export const entryProblem = (name: string, attr: number, size: number, maxFileBytes = ZIP_MAX_FILE_BYTES): string | null => {
   if (!name || name.startsWith("/") || /^[A-Za-z]:/.test(name)) return "absolute path";
   if (name.split("/").some((seg) => seg === "..")) return "parent directory segment";
   if (name.includes("\0")) return "nul in name";
   const mode = (attr >>> 16) & 0xffff;
   if ((mode & S_IFMT) === S_IFLNK) return "symlink";
-  if (size > ZIP_MAX_FILE_BYTES) return "file too large";
+  if (size > maxFileBytes) return "file too large";
   return null;
 };
 

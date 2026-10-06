@@ -35,8 +35,9 @@ import { emptyBoard, addNote, BoardError, exportBoard, getTicket, importBoard, p
 import { codexAuthRefreshedAt, configSchema, loadConfig, loadSecrets, saveConfig, saveSecrets, verstasHome, workTargetSchema, type Config } from "../config.js";
 import { codexAuthAgeDays, configuredDrivers, DRIVERS } from "../harness/drivers.js";
 import type { SessionHub } from "../sessions/hub.js";
-import { createSession, deleteSessionDir, listSessions, provisionSession, removeClones, repoPick, RESERVED_WORKSPACE_NAMES, sessionPaths, withAgentPacks, writeRecipeFiles } from "../sessions/sessions.js";
+import { createSession, deleteSessionDir, listSessions, makeSessionId, provisionSession, removeClones, repoPick, RESERVED_WORKSPACE_NAMES, sessionPaths, withAgentPacks, writeRecipeFiles } from "../sessions/sessions.js";
 import { applyBundle, ApplyError } from "../sessions/apply.js";
+import { importArchive, readArchive, writeArchive } from "../sessions/archive.js";
 import type { SessionHandle } from "../sessions/hub.js";
 import { listSandboxes, removeSandbox, sandboxStatus, snapshotSandbox, stopAllSandboxes, stopSandbox, type SandboxConfig } from "../sandbox/lifecycle.js";
 import { dockerAvailable } from "../sandbox/docker.js";
@@ -1078,6 +1079,92 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
       const h = await d.hub.get(param(req, "id"));
       const name = String(param(req, "repo")).replace(/[^A-Za-z0-9._-]/g, "");
       res.download(path.join(h.paths.exportDir, `${name}.bundle`));
+    }),
+  );
+
+  // --- session archives (src/sessions/archive.ts) ---------------------------------
+
+  const archiveFile = (h: SessionHandle) => path.join(h.paths.exportDir, `${h.id}.ver`);
+
+  /**
+   * Writes <session>/export/<id>.ver to take the session to another machine.
+   * The clones go as bundles made in the container, so a change nobody
+   * committed would be lost: the export refuses then.
+   */
+  api.post(
+    "/sessions/:id/archive",
+    wrap(async (req, res) => {
+      const h = await d.hub.get(param(req, "id"));
+      if (notWhileRunning(res, h.id)) return;
+      let bundles: { repo: string; file: string }[] = [];
+      if (isInitialized(h.session) && h.session.repos.length) {
+        await ensureSessionSandbox(d.runConfig, h.session, path.join(h.paths.dir, "sandbox.env"), false);
+        const sh = dockerShell(d.sandbox, h.id);
+        const dirty: string[] = [];
+        for (const r of h.session.repos) {
+          const st = await sh.exec(["git", "status", "--porcelain"], { workdir: `/workspace/${r.name}` });
+          if (st.code !== 0) throw new Error(`git status in ${r.name}: ${st.stderr.slice(-300)}`);
+          const files = st.stdout.split("\n").filter(Boolean);
+          if (files.length) dirty.push(`${r.name} (${files.slice(0, 5).map((l) => l.slice(3)).join(", ")}${files.length > 5 ? `, ${files.length - 5} more` : ""})`);
+        }
+        if (dirty.length) {
+          res.status(409).json({ error: `Uncommitted changes would be left behind: ${dirty.join("; ")}. Commit or discard them (a prompt does either), then export again.` });
+          return;
+        }
+        bundles = (await bundleRepos(h)).map((f) => ({ repo: f.repo, file: f.file }));
+      }
+      const out = await writeArchive({ root: d.getConfig().sessionsRoot, session: h.session, bundles, outFile: archiveFile(h), verstasVersion: d.version });
+      res.json({ file: out.file, bytes: out.bytes, skipped: out.skipped, download: `/api/sessions/${encodeURIComponent(h.id)}/archive` });
+    }),
+  );
+
+  api.get(
+    "/sessions/:id/archive",
+    wrap(async (req, res) => {
+      const h = await d.hub.get(param(req, "id"));
+      const file = archiveFile(h);
+      await fs.access(file);
+      res.download(file, `${h.id}.ver`);
+    }),
+  );
+
+  /**
+   * An uploaded archive (see /uploads) becomes a session here, as a plan
+   * with its clones in place; Initialize rebuilds the environment. When the
+   * id exists already, `as` decides: replace that session, or import a copy
+   * under a new id. Without it the answer is 409 with `exists`.
+   */
+  api.post(
+    "/sessions/import",
+    wrap(async (req, res) => {
+      const body = z.object({ upload: z.string().regex(/^[a-f0-9]{16}$/), as: z.enum(["replace", "copy"]).optional() }).parse(req.body);
+      const file = path.join(uploadsDir, `${body.upload}.zip`);
+      const { session: incoming } = readArchive(file);
+      const cfg = d.getConfig();
+      const root = cfg.sessionsRoot;
+      const exists = await fs.access(sessionPaths(root, incoming.id).dir).then(() => true, () => false);
+      if (exists && !body.as) {
+        const here = await d.hub.get(incoming.id).then((h) => h.session.name, () => incoming.id);
+        res.status(409).json({ error: `A session ${incoming.id} exists here already`, exists: { id: incoming.id, name: here } });
+        return;
+      }
+      // A copy beside the original says so in its name, and its id follows the name.
+      const name = exists && body.as === "copy" ? `${incoming.name.slice(0, 193)} (copy)` : undefined;
+      const id = name ? await makeSessionId(root, name) : incoming.id;
+      const replace = exists && body.as === "replace";
+      if (replace && notWhileRunning(res, id)) return;
+      const result = await importArchive({
+        root,
+        file,
+        id,
+        name,
+        workTargets: cfg.workTargets,
+        image: cfg.devboxImage,
+        replace: replace ? { removeEnvironment: () => removeSandbox(d.sandbox, id, { everything: true }).catch(() => undefined) } : undefined,
+      });
+      d.hub.forget(id);
+      await fs.rm(file, { force: true });
+      res.status(201).json(result);
     }),
   );
 

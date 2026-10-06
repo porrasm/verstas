@@ -141,7 +141,17 @@ Then, in the web app:
    bundles remain for moving work to another machine: one `git fetch` line per
    repository is shown. Bundles are pure data; nothing from the repository
    runs on your machine.
-10. **Delete** the session when done. Its containers, network and directory
+10. **Move a session to another machine** with **Export session (.ver)**
+   in the session page's menu (stop the run first). The archive holds the
+   settings, board, inbox, notes, attachments, run history and each clone
+   as a bundle; no container, home volume or ignored files (node_modules,
+   build output). **Import session…** on the other machine's Sessions page
+   brings it in as a plan with its clones in place, and **Initialize**
+   rebuilds the environment there (recipes, `notes/setup.sh`, the setup
+   worker). Importing a session whose id exists asks whether to replace it
+   (the way back) or import a copy. Repositories are matched to work
+   targets by name, for Apply. Format: `src/sessions/archive.ts`.
+11. **Delete** the session when done. Its containers, network and directory
    go with it.
 
 Runs continue while Verstas is open (on macOS, also with the window

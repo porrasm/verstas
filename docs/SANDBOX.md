@@ -205,6 +205,12 @@ machine (`core.fsmonitor`, `core.sshCommand`, `pre-commit`). So:
   data) and writes into your own checkout, force-updating only the branch
   `verstas/<session>` and refusing if that branch is checked out. The
   workspace's `.git` is still never read by host git.
+- **A session archive** (Export session) carries each clone as a bundle
+  made the same way. Importing it runs host git only in a repository it
+  has just created empty (no template, nothing from the archive's `.git`),
+  fetching from the bundle: the same footing as the first clone. The
+  workspace's other files are read as files, never followed through a
+  symlink, and unpacked with the attachment checks.
 - Do not `git fetch` or `git pull` directly from `workspace/<repo>` on the
   host. The UI does not offer it and this document is why.
 

@@ -226,6 +226,17 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
       const r = await api<{ howTo: string[] }>("POST", `${base}/export`);
       setExportInfo(r.howTo);
     });
+  /** The whole session as <id>.ver, for Import on another machine; the browser saves it. */
+  const doArchive = () =>
+    tryAct("exporting the session", async () => {
+      const r = await api<{ bytes: number; skipped: string[]; download: string }>("POST", `${base}/archive`);
+      const a = document.createElement("a");
+      a.href = r.download;
+      a.download = `${id}.ver`;
+      a.click();
+      const mb = (r.bytes / 1_048_576).toFixed(1);
+      setNotice(`Exported ${id}.ver (${mb} MB). Import it on the other machine from the Sessions page; Initialize there rebuilds the environment.${r.skipped.length ? ` Left out: ${r.skipped.join("; ")}.` : ""}`);
+    });
   const doImport = () =>
     tryAct("importing", async () => {
       const r = await api<{ created: string[]; updated: string[]; skipped: { title: string; reason: string }[] }>("POST", `${base}/board/import`, { text: importText, state: "ready" });
@@ -302,6 +313,7 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
               items={[
                 { label: "Import board…", onClick: () => setImportText("") },
                 { label: "Export board (JSON)", href: `/api${base}/board/export` },
+                { label: active ? "Export session (stop the run first)" : "Export session (.ver)…", onClick: doArchive, disabled: active },
                 ...(initialized
                   ? [
                       { label: active ? "Export bundles (stop the run first)" : "Export bundles…", onClick: doExport, disabled: active },

@@ -44,6 +44,19 @@ const makeSourceRepo = async (dir: string) => {
   await git(dir, "checkout", "-q", "main");
 };
 
+test("createSession keeps the setup mode it is given; agentic when none is", async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "verstas-sessions-"));
+  try {
+    const root = path.join(tmp, "sessions");
+    const skip = await createSession(root, { name: "Skip", repos: [], zips: [], image: "img", setupMode: "skip" });
+    expect((await loadSession(root, skip.session.id)).setupMode).toBe("skip");
+    const plain = await createSession(root, { name: "Plain", repos: [], zips: [], image: "img" });
+    expect((await loadSession(root, plain.session.id)).setupMode).toBe("agentic");
+  } finally {
+    await fs.rm(tmp, { recursive: true, force: true });
+  }
+});
+
 test("createSession records the plan; provisionSession clones fresh, without secrets, hooks, origin or other branches", async () => {
   const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "verstas-sessions-"));
   const src = path.join(tmp, "src-repo");
