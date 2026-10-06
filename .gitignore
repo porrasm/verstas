@@ -10,3 +10,5 @@ playwright-report/
 .last-run.json
 # Local data: the sessions root is configured, never inside the repo
 /data/
+# Machine-specific scripts (deploy to a VPS etc.), not part of Verstas
+/local/
