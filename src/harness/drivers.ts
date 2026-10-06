@@ -1,6 +1,6 @@
 import type { Secrets } from "../config.js";
 import { codexAuthRefreshedAt } from "../config.js";
-import { DRIVER_NAMES, sessionDrivers, type DriverName, type SessionAgents } from "../core/types.js";
+import { DRIVER_NAMES, sessionDrivers, type AgentSpec, type DriverName, type SessionAgents, type TicketState } from "../core/types.js";
 import { driverPack, type PackName } from "../network/packs.js";
 
 /**
@@ -74,14 +74,23 @@ export const credentialFor = (secrets: Secrets, driver: DriverName): string | un
   return typeof v === "string" && v ? v : undefined;
 };
 
-export const missingCredentialError = (driver: DriverName): Error => {
+export const missingCredentialError = (driver: DriverName, because?: string): Error => {
   const d = DRIVERS[driver];
-  return new Error(`No ${d.title} credential configured. ${d.hint}`);
+  return new Error(`No ${d.title} credential configured${because ? ` (${because})` : ""}. ${d.hint}`);
 };
 
-/** Drivers a session's roles need but have no credential for. */
-export const missingCredentials = (secrets: Secrets, session: { model?: string; agents?: SessionAgents; caps?: { reviewer?: boolean } }): DriverName[] =>
-  sessionDrivers(session).filter((d) => !credentialFor(secrets, d));
+type BoardLike = { tickets: readonly { id: string; agent?: AgentSpec; state: TicketState }[] };
+
+/** Drivers a session's roles, and its tickets' own agents, need but have no credential for. */
+export const missingCredentials = (secrets: Secrets, session: { model?: string; agents?: SessionAgents; caps?: { reviewer?: boolean } }, board?: BoardLike): DriverName[] =>
+  sessionDrivers(session, board).filter((d) => !credentialFor(secrets, d));
+
+/** Why a driver is needed, for the error: the tickets that name it, or the session's roles. */
+export const whyDriverNeeded = (session: { model?: string; agents?: SessionAgents; caps?: { reviewer?: boolean } }, board: BoardLike | undefined, driver: DriverName): string | undefined => {
+  if (sessionDrivers(session).includes(driver)) return undefined;
+  const ids = (board?.tickets ?? []).filter((t) => t.agent?.driver === driver && t.state !== "done").map((t) => t.id);
+  return ids.length ? `${ids.join(", ")} name${ids.length === 1 ? "s" : ""} it as the ticket's agent; add the credential in Settings or remove the agent from the ticket` : undefined;
+};
 
 /** Which drivers have a credential, for the status endpoint. */
 export const configuredDrivers = (secrets: Secrets): Record<DriverName, boolean> =>

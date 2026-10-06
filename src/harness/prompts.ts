@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { verstasHome } from "../config.js";
-import { attachmentLines, type Board, type Session, type Ticket } from "../core/types.js";
+import { attachmentLines, describeAgent, type Board, type Session, type Ticket } from "../core/types.js";
 import { NETWORK_PACKS } from "../network/packs.js";
 
 /**
@@ -131,7 +131,7 @@ Role: the user's direct request. The user typed the task below on the session pa
     lead: `
 Role: lead. You work this session's board until nothing you can start is left. Nobody picks tickets for you: you choose the order, decide when to read and when to build, and may use subagents for research or for independent parts of a ticket. What is fixed is the contract with the board:
 
-1. Claim a ticket with \`board_claim\` before you change files for it. You hold one ticket at a time; the repositories have one working tree, and each ticket becomes one commit.
+1. Claim a ticket with \`board_claim\` before you change files for it. You hold one ticket at a time; the repositories have one working tree, and each ticket becomes one commit. A ticket that names its own agent (\`agent\` on the board line) is not yours to implement: when you hold nothing, \`board_run\` it; a fresh worker on that agent does it in the working tree, the reviewer judges it, and you get the verdict. Pick its moment like any other ticket's.
 2. When its work is finished (the change made, tests for it passing, the docs it affects updated), file the report with \`board_report\` and submit it with \`board_submit\`. The harness runs the checks and an independent reviewer, commits, and moves it to done, or back to ready with the reviewer's notes, or to blocked. You never mark a ticket done yourself. Read the verdict: fix and resubmit, or leave the ticket and come back to it later.
 3. A ticket that needs something only the user can give: one \`request\` with everything, while you hold it. The ticket parks and you are free to claim the next one.
 4. Keep notes/ true for whoever comes after you, as every worker does: traps and commands in learnings.md, a wrong line in brief.md or env.md fixed.
@@ -139,13 +139,13 @@ Role: lead. You work this session's board until nothing you can start is left. N
 6. Chores: the board also keeps a list of small fixes filed by reviewers, workers and the user (\`chores_list\`). Sweep them in a batch when no ticket you can start is left, when the list has grown long, or when you are in those files anyway: \`chores_sweep\` takes a batch (hold no ticket at that moment), you do each one, run the repository's own checks, then \`chores_submit\` with one line per chore: done, dropped with the reason, or promoted when it is bigger than a chore (a backlog ticket is made from your note). The harness runs the checks and a size check and commits the batch as one commit; there is no reviewer, so a sweep may not touch the project's contract documents or fixtures, and over the size limits it is refused with the reason while the changes stay in the working tree (claim a ticket for them, or revert).
 7. When no ticket you can start is left and no chore is open (everything is done, waiting on the user, or blocked), reply with one line saying so and stop.`,
     planner: `
-Role: planner. Turn the user's planning request into tickets with \`board_create_ticket\`: small (S) or medium (M) where possible, each with a clear spec, acceptance criteria that a reviewer can check, the repository it touches, and dependencies by id when order matters. You may create feature tickets; keep them within the request. Prefer ten good tickets over thirty vague ones. When the board already has tickets, add only what is missing and do not duplicate. Reply with a short summary of the plan and stop.`,
+Role: planner. Turn the user's planning request into tickets with \`board_create_ticket\`: small (S) or medium (M) where possible, each with a clear spec, acceptance criteria that a reviewer can check, the repository it touches, and dependencies by id when order matters. You may create feature tickets; keep them within the request. Set a ticket's \`agent\` only when the request asks for a particular agent or model for some of the work. Prefer ten good tickets over thirty vague ones. When the board already has tickets, add only what is missing and do not duplicate. Reply with a short summary of the plan and stop.`,
   };
   return common + "\n" + (role === "lead" && leadRules ? leadRules : byRole[role]);
 };
 
 const ticketBlock = (t: Ticket): string => `# ${t.id}: ${t.title}
-Kind: ${t.kind} · Size: ${t.size} · Repo: ${t.repo ?? "(unspecified)"} · Attempt: ${t.attempts}
+Kind: ${t.kind} · Size: ${t.size} · Repo: ${t.repo ?? "(unspecified)"} · Attempt: ${t.attempts}${t.agent ? ` · Agent: ${describeAgent(t.agent)} (this ticket runs on its own agent)` : ""}
 
 ## Spec
 ${t.spec || "(none)"}
@@ -276,7 +276,7 @@ Repositories live under /workspace/<name> and may carry their own CLAUDE.md.
 
 const boardLines = (board: Board): string =>
   board.tickets.length
-    ? board.tickets.map((t) => `- ${t.id} [${t.state}] ${t.title} (${t.kind}, ${t.size}${t.repo ? `, ${t.repo}` : ""}${t.deps.length ? `, after ${t.deps.join(" ")}` : ""}, priority ${t.priority})`).join("\n")
+    ? board.tickets.map((t) => `- ${t.id} [${t.state}] ${t.title} (${t.kind}, ${t.size}${t.repo ? `, ${t.repo}` : ""}${t.deps.length ? `, after ${t.deps.join(" ")}` : ""}, priority ${t.priority}${t.agent ? `, agent ${describeAgent(t.agent)}: board_run, not claim` : ""})`).join("\n")
     : "- empty";
 
 /** The chore list as a lead sees it: what a sweep may take, and what waits for the user. */

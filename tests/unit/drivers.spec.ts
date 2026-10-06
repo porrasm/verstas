@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { agentFor, sessionDrivers, sessionSchema, type VerstasEvent } from "../../src/core/types.js";
 import { codexAuthRefreshedAt, secretValues } from "../../src/config.js";
-import { codexAuthAgeDays, configuredDrivers, credentialFor, DRIVERS, missingCredentials } from "../../src/harness/drivers.js";
+import { codexAuthAgeDays, configuredDrivers, credentialFor, DRIVERS, missingCredentials, whyDriverNeeded } from "../../src/harness/drivers.js";
 import { parseCredentialLine, readWorkerStream } from "../../src/harness/run.js";
 import { allowlistFor, driverPack, NETWORK_PACKS } from "../../src/network/packs.js";
 import { withAgentPacks } from "../../src/sessions/sessions.js";
@@ -42,6 +42,13 @@ test("credentials: each driver reads its own secret; missing ones are named per 
   expect(missingCredentials(secrets, { agents: { worker: { driver: "claude" } } })).toEqual([]);
   expect(missingCredentials(secrets, { agents: { worker: { driver: "claude" }, reviewer: { driver: "codex" } } })).toEqual(["codex"]);
   expect(missingCredentials(secrets, { agents: { worker: { driver: "claude" }, reviewer: { driver: "codex" } }, caps: { reviewer: false } })).toEqual([]);
+  // A ticket's own agent counts while the ticket is live; a done ticket's does not.
+  const board = { tickets: [{ id: "T-4", state: "ready" as const, agent: { driver: "codex" as const, model: "gpt-5.1" } }, { id: "T-5", state: "done" as const, agent: { driver: "codex" as const } }] };
+  expect(missingCredentials(secrets, { agents: { worker: { driver: "claude" } } }, board)).toEqual(["codex"]);
+  expect(whyDriverNeeded({ agents: { worker: { driver: "claude" } } }, board, "codex")).toContain("T-4 names it");
+  expect(whyDriverNeeded({ agents: { worker: { driver: "codex" } } }, board, "codex")).toBeUndefined();
+  expect(missingCredentials(secrets, { agents: { worker: { driver: "claude" } } }, { tickets: [board.tickets[1]!] })).toEqual([]);
+  expect(withAgentPacks(["node"], { agents: { worker: { driver: "claude" } } }, board)).toEqual(["node", "anthropic", "openai"]);
   for (const d of Object.values(DRIVERS)) expect(d.hint).toContain("Settings");
 });
 

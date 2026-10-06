@@ -22,6 +22,7 @@ result imports as is. Markdown is accepted too (below).
       "deps": ["T-12"],         // ids that must be done first
       "state": "ready",         // backlog | ready (default backlog)
       "pinned": false,          // true: the agent may not reprioritize it
+      "agent": { "driver": "codex", "model": "gpt-5.1" }, // optional: this ticket's own agent
       "spec": "Pure module in src/engine. Input: control value 0..1 ...",
       "acceptance": [
         "unit tests cover 7-bit and 14-bit CC, note on/off, pitch bend",
@@ -48,6 +49,15 @@ A bare array of tickets is accepted as well.
 - Agents importing through the API may create `bug`, `followup` and `chore`
   tickets only. Features from an agent are skipped and reported; the agent
   files them as ideas instead.
+- `agent` is optional. When set, the ticket's implementer is a fresh worker
+  on that driver and model instead of the session's worker (Agent options);
+  the reviewer stays the session's, so the review is independent of what
+  wrote the code. The driver needs a credential in Settings: a run refuses
+  to start while a live ticket names one without it, and the driver's
+  network pack joins the allowlist when the run starts. In lead mode the
+  lead may not claim such a ticket; it hands it over with `board_run`,
+  which runs the worker and the judge while the lead waits. Use it for
+  tickets that need a particular strength, such as judging rendered images.
 
 ### States
 
@@ -118,7 +128,8 @@ Emit events to an injected sink.
 - Level-2 or level-3 headings start tickets. The leading `T-n` and the size
   in parentheses are optional.
 - One line of `Key: value` pairs separated by `·` or `|` sets repo, deps,
-  priority, size, kind, state and pinned.
+  priority, size, kind, state, pinned and agent (`Agent: codex/gpt-5.1`, or
+  just the driver).
 - Checklist items are acceptance criteria. Everything else is the spec.
 - A heading `## Chores` starts the chore list: every `- ` item under it is
   one chore, written `text — where` or `text (where)`.

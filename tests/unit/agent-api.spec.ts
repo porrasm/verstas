@@ -347,3 +347,36 @@ test("chores: with choreApproval on, an agent's chore waits as proposed", async 
     await s.close();
   }
 });
+
+test("a ticket with its own agent: the lead may not claim it, board_run hands it to the harness, and a plain ticket is refused", async () => {
+  const s = await setup();
+  const delegated: string[] = [];
+  const hooks = { submitted() {}, handoff() {}, claimRefusal: () => undefined, delegated: (_r: unknown, id: string) => delegated.push(id) };
+  const app = createAgentApi(s.hub, s.tokens, hooks);
+  const server = app.listen(0, "127.0.0.1");
+  const port = await new Promise<number>((r) => server.on("listening", () => r((server.address() as net.AddressInfo).port)));
+  const call = async (method: string, p: string, body: unknown, token: string) => {
+    const res = await fetch(`http://127.0.0.1:${port}/agent${p}`, { method, headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
+    return { status: res.status, json: (await res.json()) as Record<string, unknown> };
+  };
+  try {
+    const h = await s.hub.get(s.id);
+    await h.mutate((d) => ({ next: { board: importBoard(d.board, { tickets: [{ id: "T-3", title: "Visual pass", state: "ready", agent: { driver: "codex", model: "gpt-5.1" } }] }).board } }));
+    const lead = s.tokens.issue({ sessionId: s.id, runId: 1, role: "lead" });
+    expect((await call("POST", "/tickets/T-3/claim", {}, lead)).json.error).toContain("hand it over with board_run");
+    expect((await call("POST", "/tickets/T-1/run", {}, lead)).json.error).toContain("names no agent of its own");
+    expect((await s.call("POST", "/tickets/T-3/run", {})).status).toBe(403);
+    const holding = s.tokens.issue({ sessionId: s.id, runId: 1, role: "lead", currentTicket: "T-2" });
+    expect((await call("POST", "/tickets/T-3/run", {}, holding)).json.error).toContain("You hold T-2");
+    const run = await call("POST", "/tickets/T-3/run", {}, lead);
+    expect(run.status).toBe(200);
+    expect(run.json).toMatchObject({ id: "T-3", state: "in_progress", agent: { driver: "codex", model: "gpt-5.1" } });
+    expect(delegated).toEqual(["T-3"]);
+    expect(h.board.tickets.find((t) => t.id === "T-3")!.notes.at(-1)!.text).toContain("Handed to its own agent (codex · gpt-5.1)");
+    const list = (await call("GET", "/board", undefined, lead)).json.tickets as { id: string; agent?: unknown }[];
+    expect(list.find((t) => t.id === "T-3")!.agent).toEqual({ driver: "codex", model: "gpt-5.1" });
+  } finally {
+    await new Promise((r) => server.close(r));
+    await s.close();
+  }
+});

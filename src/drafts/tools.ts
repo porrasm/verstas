@@ -70,6 +70,13 @@ const TICKET_FIELDS = {
   acceptance: stringList("One criterion a reviewer can check by running or reading something", 30),
   notes: stringList("A note kept with the ticket", 10, 20_000),
   pinned: { type: "boolean", description: "Workers may not reprioritise or re-dep a pinned ticket" },
+  agent: {
+    type: "object",
+    description: "Optional: run this ticket's implementer on another agent than the session's worker (a fresh worker on that driver and model; the reviewer stays the session's). For work that needs that agent's strength, e.g. judging rendered images. The driver needs a credential in the user's Settings.",
+    properties: { driver: { type: "string", enum: ["claude", "codex", "cursor"] }, model: str("Model id the CLI accepts; empty for the account's default", 100) },
+    required: ["driver"],
+    additionalProperties: false,
+  },
 };
 
 const ticketInputSchema = { ...obj({ id: str("Optional id T-<n> (must be free); leave out to get the next number", 20), ...TICKET_FIELDS }, ["title"]) };

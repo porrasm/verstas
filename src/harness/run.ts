@@ -2,12 +2,13 @@ import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
-import { agentFor, DRIVER_NAMES, eventSchema, isInitialized, matchesAnyGlob, now, requestOutcome, runSchema, SWEEP_PROTECTED_GLOBS, type Board, type DriverName, type Readiness, type Run, type Session, type SweepResult, type Ticket, type TicketState, type VerstasEvent } from "../core/types.js";
+import { agentFor, boardDrivers, describeAgent, DRIVER_NAMES, eventSchema, isInitialized, matchesAnyGlob, now, requestOutcome, runSchema, SWEEP_PROTECTED_GLOBS, type AgentSpec, type Board, type DriverName, type Readiness, type Run, type Session, type SweepResult, type Ticket, type TicketState, type VerstasEvent } from "../core/types.js";
 import { addNote, canStart, getTicket, hasOpenWork, nextReady, openChores, releaseSweep, replaceTicket, settleSweep, sweepInFlight, transition, validateRepos } from "../board/board.js";
 import { writeJsonAtomic } from "../board/store.js";
 import type { SessionHandle, SessionHub } from "../sessions/hub.js";
 import type { AgentRunHooks, RunToken, RunTokens } from "../agent-api/agent-api.js";
-import { workspaceSizeMb } from "../sessions/sessions.js";
+import { withAgentPacks, workspaceSizeMb } from "../sessions/sessions.js";
+import { allowlistFor } from "../network/packs.js";
 import { implementerPrompt, leadContinuePrompt, leadPrompt, mcpConfig, readLeadRules, notesIndexMd, plannerPrompt, reviewerPrompt, setupPrompt, systemMd, userPrompt, verstasMd, withContext, workspaceClaudeMd } from "./prompts.js";
 import type { Job } from "../worker/worker.js";
 
@@ -129,6 +130,15 @@ export class RunManager implements AgentRunHooks {
     if (!opts.init && !isInitialized(h.session)) throw new Error("This session is not initialized: press Initialize on the session page first.");
     // Refuse up front rather than discover it ticket by ticket.
     validateRepos(h.board.tickets, h.session.repos.map((r) => r.name), { ignoreDone: true });
+    // A ticket's own agent needs its backend on the allowlist, like a session agent does.
+    if (boardDrivers(h.board).length) {
+      await h.mutate((docs) => {
+        const packs = withAgentPacks(docs.session.packs, docs.session, docs.board);
+        if (packs.length === docs.session.packs.length) return {};
+        const allowlist = [...new Set([...docs.session.allowlist, ...allowlistFor(packs)])];
+        return { next: { session: { ...docs.session, packs, allowlist } } };
+      });
+    }
     const id = (await nextRunId(h.paths.runs)) ?? 1;
     const run: Run = runSchema.parse({ id, sessionId, startedAt: (this.deps.now ?? now)(), state: "running" });
     let pauseRequested = false;
@@ -212,6 +222,35 @@ export class RunManager implements AgentRunHooks {
       if (parked === "halted") c.halted = true;
     })
       .catch((e: Error) => c.log({ kind: "error", t: (this.deps.now ?? now)(), ticket: ticketId, text: `parking failed: ${e.message}` }))
+      .catch(() => undefined);
+  }
+
+  /** The lead handed a ticket to its own agent: the loop-style worker and judge run while the lead waits. */
+  delegated(r: RunToken, ticketId: string): void {
+    const c = this.leadFor(r);
+    if (!c) {
+      void this.deps.hub
+        .get(r.sessionId)
+        .then((h) => h.mutate((docs) => (getTicket(docs.board, ticketId).state === "in_progress" ? { next: { board: transition(docs.board, ticketId, "ready", { by: "harness", text: "Handed over after the run ended; requeued" }) } } : {})))
+        .catch(() => undefined);
+      return;
+    }
+    c.queue = c.queue
+      .then(async () => {
+        const t = getTicket(c.h.board, ticketId);
+        if (t.state !== "in_progress") return;
+        c.run.currentTicket = ticketId;
+        try {
+          const out = await this.workTicket(c.h, c.run, t, c.log, c.signal, {}, { claimed: true });
+          if (out === "rate_limited") c.rateLimited = true;
+          if (out === "halted") c.halted = true;
+        } catch (e) {
+          await c.log({ kind: "error", t: (this.deps.now ?? now)(), ticket: ticketId, text: `the ticket's agent failed to run: ${(e as Error).message}` });
+          await c.h.mutate((docs) => (["in_progress", "review"].includes(getTicket(docs.board, ticketId).state) ? { next: { board: transition(docs.board, ticketId, "ready", { by: "harness", text: `Its agent could not run (${(e as Error).message.slice(0, 200)}); requeued` }) } } : {})).catch(() => undefined);
+        } finally {
+          if (!c.signal.aborted) c.run.currentTicket = undefined;
+        }
+      })
       .catch(() => undefined);
   }
 
@@ -812,21 +851,27 @@ export class RunManager implements AgentRunHooks {
     log: (e: VerstasEvent) => Promise<void>,
     signal: AbortSignal,
     convo: { id?: string } = {},
+    opts: { /** The ticket is already in progress (a lead handed it over). */ claimed?: boolean } = {},
   ): Promise<"done" | "requeued" | "waiting" | "blocked" | "rate_limited" | "halted"> {
     const d = this.deps;
     const clock = d.now ?? now;
     const caps = h.session.caps;
 
     const answer = latestAnswer(h, ticket.id);
-    await h.mutate((docs) => ({ next: { board: transition(docs.board, ticket.id, "in_progress", { by: "harness", text: `Implementer started (judged attempts so far: ${ticket.attempts})` }) } }));
-    await log({ kind: "ticket", t: clock(), ticket: ticket.id, from: "ready", to: "in_progress" });
+    if (!opts.claimed) {
+      await h.mutate((docs) => ({ next: { board: transition(docs.board, ticket.id, "in_progress", { by: "harness", text: `Implementer started (judged attempts so far: ${ticket.attempts})` }) } }));
+      await log({ kind: "ticket", t: clock(), ticket: ticket.id, from: "ready", to: "in_progress" });
+    }
     run.currentTicket = ticket.id;
 
-    const agentSession = caps.resumeWorker ? (convo.id ? { id: convo.id, resume: true } : { id: randomUUID(), resume: false }) : undefined;
+    // A ticket with its own agent gets a fresh conversation on that agent; the session's shared conversation (caps.resumeWorker) is for the session's worker only.
+    const own = ticket.agent;
+    if (own) await log({ kind: "status", t: clock(), ticket: ticket.id, text: `implementer on the ticket's own agent: ${describeAgent(own)}` });
+    const agentSession = caps.resumeWorker && !own ? (convo.id ? { id: convo.id, resume: true } : { id: randomUUID(), resume: false }) : undefined;
     const freshPrompt = () => this.withNotes(h, implementerPrompt(h.board, getTicket(h.board, ticket.id), answer));
     const promptText = agentSession?.resume ? implementerPrompt(h.board, getTicket(h.board, ticket.id), answer, true) : await freshPrompt();
-    const impl = await this.runJob(h, run, { role: "implementer", ticket: ticket.id, agentSession, promptText, freshPrompt }, log, signal);
-    if (impl.agentSession && impl.turns > 0) convo.id = impl.agentSession;
+    const impl = await this.runJob(h, run, { role: "implementer", ticket: ticket.id, agentSession, promptText, freshPrompt, agent: own }, log, signal);
+    if (impl.agentSession && impl.turns > 0 && !own) convo.id = impl.agentSession;
     addCost(run, impl.costUsd);
     await this.writeTicketReport(h, run, ticket.id, "implementer", impl);
 
@@ -980,6 +1025,8 @@ export class RunManager implements AgentRunHooks {
       freshPrompt?: () => Promise<string>;
       /** The ticket a lead already holds; its token starts with it. */
       holds?: string;
+      /** The ticket's own agent, when it names one; else the session's agent for the role. */
+      agent?: AgentSpec;
     },
     log: (e: VerstasEvent) => Promise<void>,
     signal: AbortSignal,
@@ -997,8 +1044,8 @@ export class RunManager implements AgentRunHooks {
     await fs.mkdir(dir, { recursive: true });
     await fs.writeFile(path.join(dir, "prompt.md"), job.promptText);
     await fs.writeFile(path.join(dir, "system.md"), systemMd(job.role, job.role === "lead" ? await readLeadRules() : undefined));
-    // The reviewer may be a different agent than the worker (session.agents); everything else about the job is the same.
-    const agent = agentFor(h.session, job.role);
+    // The reviewer may be a different agent than the worker (session.agents), and a ticket may name its own; everything else about the job is the same.
+    const agent = job.agent ?? agentFor(h.session, job.role);
     const spec: Job = {
       role: job.role,
       ticket: job.ticket,

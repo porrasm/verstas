@@ -14,7 +14,7 @@ only you create, start or run.
 | Repositories | Work targets from Settings, with a branch and an optional directory name. A draft cannot add work targets. |
 | Network | Packs and extra hosts. The Claude API is always on. |
 | Recipes | Library recipes by name. A draft never carries a script of its own. |
-| Board | Tickets in the board format (`docs/BOARD.md`). |
+| Board | Tickets in the board format (`docs/BOARD.md`), including a ticket's optional `agent` (its own driver and model) and chores. |
 
 Left out on purpose: caps, budget, model, memory limits and attachments. You
 set those on the session page, before you initialize.

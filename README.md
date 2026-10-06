@@ -139,6 +139,9 @@ Then, in the web app:
    follow-up tickets; a lead sweeps a batch when the board runs dry or the
    list grows, and Verstas commits the batch as one commit after the
    checks and a size check, with no reviewer (`docs/BOARD.md`, Chores).
+   **A ticket's own agent**: a ticket may name a driver and model of its
+   own; its implementer is then a fresh worker on that agent, judged by the
+   session's reviewer. A lead hands such a ticket over with `board_run`.
 9. **Apply to repo** when you want the work: the session page's Work panel
    puts a repository's commits on the branch `verstas/<session>` in your
    real checkout, one commit per ticket, without touching the branch you

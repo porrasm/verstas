@@ -8,6 +8,24 @@ import { DEFAULT_PACKS, packHosts, PACK_NAMES } from "../network/packs.js";
  * agent API, which validates against the same schemas.
  */
 
+// --- Agents (drivers) ------------------------------------------------------
+
+/**
+ * Which coding agent runs a worker. Every driver honours the same contract
+ * (docs/DRIVERS.md); Claude Code is the reference and the default, so a
+ * session that never chooses runs exactly as before.
+ */
+export const driverNameSchema = z.enum(["claude", "codex", "cursor"]);
+export type DriverName = z.infer<typeof driverNameSchema>;
+export const DRIVER_NAMES = driverNameSchema.options;
+
+/** One agent choice: the driver and, optionally, the model it should use (any id the CLI accepts; empty means the account's default). */
+export const agentSpecSchema = z.object({
+  driver: driverNameSchema.default("claude"),
+  model: z.string().max(100).optional(),
+});
+export type AgentSpec = z.infer<typeof agentSpecSchema>;
+
 // --- Tickets ---------------------------------------------------------------
 
 export const ticketStateSchema = z.enum([
@@ -73,6 +91,14 @@ export const ticketSchema = z.object({
   attempts: z.number().int().nonnegative().default(0),
   /** The agent may not reprioritize or re-dep a pinned ticket. */
   pinned: z.boolean().default(false),
+  /**
+   * Run this ticket's implementer on this agent instead of the session's
+   * worker: a fresh worker on that driver and model, judged by the session's
+   * reviewer as usual. For tickets that need a particular strength (visual
+   * judgement of rendered output, say). In lead mode the lead hands such a
+   * ticket over with board_run instead of doing it itself.
+   */
+  agent: agentSpecSchema.optional(),
   report: z.string().max(20_000).optional(),
   diff: diffStatSchema.optional(),
   cost: costSchema.optional(),
@@ -177,6 +203,7 @@ export const ticketImportSchema = z.object({
   acceptance: z.array(z.string().min(1).max(2000)).optional(),
   notes: z.array(z.string().min(1).max(20_000)).optional(),
   pinned: z.boolean().optional(),
+  agent: agentSpecSchema.optional(),
 });
 export type TicketImport = z.infer<typeof ticketImportSchema>;
 
@@ -491,22 +518,6 @@ export const sessionStateSchema = z.enum([
 ]);
 export type SessionState = z.infer<typeof sessionStateSchema>;
 
-/**
- * Which coding agent runs a worker. Every driver honours the same contract
- * (docs/DRIVERS.md); Claude Code is the reference and the default, so a
- * session that never chooses runs exactly as before.
- */
-export const driverNameSchema = z.enum(["claude", "codex", "cursor"]);
-export type DriverName = z.infer<typeof driverNameSchema>;
-export const DRIVER_NAMES = driverNameSchema.options;
-
-/** One agent choice: the driver and, optionally, the model it should use (any id the CLI accepts; empty means the account's default). */
-export const agentSpecSchema = z.object({
-  driver: driverNameSchema.default("claude"),
-  model: z.string().max(100).optional(),
-});
-export type AgentSpec = z.infer<typeof agentSpecSchema>;
-
 /** Per-role agents. `worker` runs implementer, planner, setup and prompts; `reviewer` defaults to the worker's agent. */
 export const sessionAgentsSchema = z.object({
   worker: agentSpecSchema.optional(),
@@ -520,21 +531,30 @@ export type WorkerRole = "implementer" | "reviewer" | "planner" | "setup" | "pro
  * The agent for a role. Older sessions carry only `model`; that is the
  * worker's Claude model, so they keep running unchanged.
  */
-export const agentFor = (s: { model?: string; agents?: SessionAgents }, role: WorkerRole): AgentSpec => {
+export const agentFor = (s: { model?: string; agents?: SessionAgents }, role: WorkerRole, ticket?: { agent?: AgentSpec }): AgentSpec => {
+  // A ticket's own agent applies to the implementer that works it; the reviewer stays the session's, so the review is independent of what wrote the code.
+  if (role === "implementer" && ticket?.agent) return ticket.agent;
   const worker: AgentSpec = s.agents?.worker ?? { driver: "claude", model: s.model || undefined };
   if (role === "reviewer" && s.agents?.reviewer) return s.agents.reviewer;
   return worker;
 };
 
-/** Every driver a session uses, worker first. */
-export const sessionDrivers = (s: { model?: string; agents?: SessionAgents; caps?: { reviewer?: boolean } }): DriverName[] => {
+/** Drivers named by tickets that are not done yet. */
+export const boardDrivers = (board: { tickets: readonly { agent?: AgentSpec; state: TicketState }[] }): DriverName[] => [...new Set(board.tickets.filter((t) => t.agent && t.state !== "done").map((t) => t.agent!.driver))];
+
+/** Every driver a session uses, worker first; with the board, the tickets' own agents too. */
+export const sessionDrivers = (s: { model?: string; agents?: SessionAgents; caps?: { reviewer?: boolean } }, board?: { tickets: readonly { agent?: AgentSpec; state: TicketState }[] }): DriverName[] => {
   const out = [agentFor(s, "implementer").driver];
   if (s.caps?.reviewer !== false) {
     const r = agentFor(s, "reviewer").driver;
     if (!out.includes(r)) out.push(r);
   }
+  for (const d of board ? boardDrivers(board) : []) if (!out.includes(d)) out.push(d);
   return out;
 };
+
+/** "codex · gpt-5.1" for a badge or a board line. */
+export const describeAgent = (a: AgentSpec): string => `${a.driver}${a.model ? ` · ${a.model}` : ""}`;
 
 export const sessionSchema = z.object({
   id: sessionIdSchema,

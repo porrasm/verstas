@@ -105,7 +105,7 @@ test("claim, submit and handoff are shown to a lead only", async () => {
   const { visibleTools } = await import("../../src/worker/mcp-server.js");
   const lead = visibleTools("lead").map((t) => t.name);
   const worker = visibleTools("implementer").map((t) => t.name);
-  for (const name of ["board_claim", "board_submit", "handoff", "chores_sweep", "chores_submit"]) {
+  for (const name of ["board_claim", "board_run", "board_submit", "handoff", "chores_sweep", "chores_submit"]) {
     expect(lead).toContain(name);
     expect(worker).not.toContain(name);
   }

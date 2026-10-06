@@ -5,6 +5,8 @@ reference driver is Claude Code (`src/worker/worker.ts`, shipped in the
 image as `/opt/verstas/worker.js`). The same worker also drives Codex CLI
 and Cursor CLI (`src/worker/driver-*.ts`): a session chooses its agents
 under "Agent options", per role, and the reviewer may be a different agent
+(a single ticket may also name its own agent, `docs/BOARD.md`, for work
+that needs that agent's particular strength)
 than the worker. Any other agent can replace the worker by honouring the
 same contract; the loop does not change.
 

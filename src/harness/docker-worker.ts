@@ -9,7 +9,7 @@ import { now, type SetupResult } from "../core/types.js";
 import { secretValues, type Secrets } from "../config.js";
 import { writeAllowlist } from "../sessions/sessions.js";
 import { readWorkerStream, RunManager, type Shell, type WorkerDone, type WorkerRunner } from "./run.js";
-import { CODEX_SERIALIZE_AFTER_DAYS, codexAuthAgeDays, credentialFor, driverInfo, missingCredentialError, missingCredentials } from "./drivers.js";
+import { CODEX_SERIALIZE_AFTER_DAYS, codexAuthAgeDays, credentialFor, driverInfo, missingCredentialError, missingCredentials, whyDriverNeeded } from "./drivers.js";
 import type { Job } from "../worker/worker.js";
 
 /**
@@ -171,12 +171,13 @@ export type RunManagerConfig = {
  */
 export const ensureSessionSandbox = async (c: RunManagerConfig, session: Session, envFile: string, needsCredentials: boolean): Promise<void> => {
   // No secrets in the container's environment (see dockerWorker); fail early if a run will need a credential it does not have.
+  const h = await c.hub.get(session.id);
   if (needsCredentials) {
-    const missing = missingCredentials(await c.credentials.secrets(), session);
-    if (missing.length) throw missingCredentialError(missing[0]!);
+    // The session's roles and the tickets' own agents: a ticket that names a driver without a credential fails now, not after the lead reaches it.
+    const missing = missingCredentials(await c.credentials.secrets(), session, h.board);
+    if (missing.length) throw missingCredentialError(missing[0]!, whyDriverNeeded(session, h.board, missing[0]!));
   }
   await writeEnvFile(envFile, { VERSTAS_SESSION: session.id });
-  const h = await c.hub.get(session.id);
   // Sessions created before the proxy directory existed get it here.
   await writeAllowlist(h.paths, session.allowlist);
   // sudo logs here (see the image's sudoers); it must exist before the first sudo, including a recipe replay.

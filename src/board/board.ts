@@ -277,6 +277,7 @@ export const importBoard = (
         spec: inc.spec ?? existing.spec,
         acceptance: inc.acceptance ?? existing.acceptance,
         pinned: inc.pinned ?? existing.pinned,
+        agent: inc.agent ?? existing.agent,
         state: canSetState && inc.state ? inc.state : existing.state,
         notes: [
           ...existing.notes,
@@ -305,6 +306,7 @@ export const importBoard = (
         notes: (inc.notes ?? []).map((text) => ({ at, by: opts.by, text })),
         attempts: 0,
         pinned: inc.pinned ?? false,
+        agent: inc.agent,
         createdAt: at,
         updatedAt: at,
       };
@@ -560,7 +562,7 @@ export const parseMarkdownBoard = (md: string): BoardImport => {
       cur.acceptance = [...(cur.acceptance ?? []), check[1]!.trim()];
       continue;
     }
-    const kv = /^\s*((?:Repo|Deps|Priority|Size|Kind|State|Pinned)\s*:\s*[^·|]+(?:\s*[·|]\s*(?:Repo|Deps|Priority|Size|Kind|State|Pinned)\s*:\s*[^·|]+)*)\s*$/i.exec(raw);
+    const kv = /^\s*((?:Repo|Deps|Priority|Size|Kind|State|Pinned|Agent)\s*:\s*[^·|]+(?:\s*[·|]\s*(?:Repo|Deps|Priority|Size|Kind|State|Pinned|Agent)\s*:\s*[^·|]+)*)\s*$/i.exec(raw);
     if (kv) {
       for (const part of kv[1]!.split(/\s*[·|]\s*/)) {
         const [k, ...v] = part.split(":");
@@ -573,6 +575,11 @@ export const parseMarkdownBoard = (md: string): BoardImport => {
         else if (key === "kind" && /^(feature|bug|followup|chore)$/i.test(val)) cur.kind = val.toLowerCase() as TicketKind;
         else if (key === "state" && /^(backlog|ready)$/i.test(val)) cur.state = val.toLowerCase() as "backlog" | "ready";
         else if (key === "pinned") cur.pinned = /^(true|yes)$/i.test(val);
+        else if (key === "agent") {
+          // "codex/gpt-5.1" or "codex gpt-5.1" or just "codex"
+          const m = /^(claude|codex|cursor)(?:\s*[\/ ]\s*(\S.*))?$/i.exec(val);
+          if (m) cur.agent = { driver: m[1]!.toLowerCase() as "claude" | "codex" | "cursor", model: m[2]?.trim() || undefined };
+        }
       }
       continue;
     }

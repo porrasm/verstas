@@ -16,6 +16,8 @@ export type Ticket = {
   notes: { at: string; by: string; text: string }[];
   attempts: number;
   pinned: boolean;
+  /** Runs this ticket's implementer on its own agent instead of the session's worker. */
+  agent?: AgentSpec;
   report?: string;
   diff?: { added: number; removed: number; files: number };
   cost?: { usd?: number };

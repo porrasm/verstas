@@ -153,6 +153,8 @@ const boardFormat = (repos: readonly string[]): string[] => {
     "- `kind`: feature | bug | followup | chore. `size`: S (under half a day) | M | L. Lower `priority` runs first. `deps` are ids that must be done first. `state`: backlog or ready.",
     `- \`repo\` must be one of: ${repos.length ? repos.join(", ") : "(the session's repository names)"}; a ticket with another name is refused.`,
     "- Acceptance criteria must be checkable by a reviewer who did not write the code. Prefer ten small tickets over thirty vague ones. Each ticket is worked by a fresh agent with the spec, the acceptance criteria and the last five reports as its only context, so specs must say where and how.",
+    '- `agent` (optional): `{ "driver": "claude" | "codex" | "cursor", "model": "…" }` runs this ticket\'s implementer on that agent instead of the session\'s worker: a fresh worker, judged by the session\'s reviewer. Use it only for tickets that need that agent\'s particular strength (for example judging rendered images); the driver needs a credential in the user\'s Settings. In lead mode the lead hands such a ticket to its agent with `board_run` rather than doing it itself.',
+    "- Chores (small fixes not worth a ticket) can be listed under `chores` (`{ \"text\": …, \"where\": … }`); a lead sweeps them in batches without a reviewer.",
     `- One worker gets ${caps.workerMinutes} minutes and ${caps.workerTurns} model turns by default, then the ticket goes back to the board. Size tickets so one worker finishes one.`,
   ];
 };

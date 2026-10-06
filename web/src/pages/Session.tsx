@@ -32,7 +32,7 @@ import {
   type Totals,
   type VEvent,
 } from "../api";
-import { AgentOptionsButton } from "./AgentOptions";
+import { AgentOptionsButton, useDrivers } from "./AgentOptions";
 
 const COLUMNS: { key: string; title: string; states: string[] }[] = [
   { key: "backlog", title: "Backlog", states: ["backlog"] },
@@ -1410,6 +1410,7 @@ const TicketCard = ({ t, doneIds, request, active, open, onOpen, onRetry, onAppr
         <span className="k">{t.size}</span>
         {t.priority <= 2 && <span className="k" title={`priority ${t.priority}`}>p{t.priority}</span>}
         {t.pinned && <span className="pin" title="Pinned: the agent may not reprioritise it">⚲</span>}
+        {t.agent && <span className="k" title={`Runs on its own agent: ${t.agent.driver}${t.agent.model ? ` (${t.agent.model})` : ""}`}>{t.agent.driver}</span>}
       </div>
       <div className="title">{t.title}</div>
       {(t.deps.length > 0 || t.attempts > 0 || t.diff || active) && (
@@ -1933,8 +1934,9 @@ const TicketDrawer = ({ ticket, board, held, sessionId, onClose, onOpen, onActio
   const [note, setNote] = useState("");
   const neededBy = board.tickets.filter((t) => t.deps.includes(ticket.id));
   const [edit, setEdit] = useState(false);
-  const toDraft = (t: Ticket) => ({ title: t.title, spec: t.spec, acceptance: t.acceptance.join("\n"), priority: t.priority, size: t.size, repo: t.repo ?? "", deps: t.deps.join(", ") });
+  const toDraft = (t: Ticket) => ({ title: t.title, spec: t.spec, acceptance: t.acceptance.join("\n"), priority: t.priority, size: t.size, repo: t.repo ?? "", deps: t.deps.join(", "), agentDriver: t.agent?.driver ?? "", agentModel: t.agent?.model ?? "" });
   const [draft, setDraft] = useState(toDraft(ticket));
+  const drivers = useDrivers();
   const [reports, setReports] = useState<{ runId: number; text: string }[]>([]);
   useEffect(() => {
     setDraft(toDraft(ticket));
@@ -1960,6 +1962,7 @@ const TicketDrawer = ({ ticket, board, held, sessionId, onClose, onOpen, onActio
         size: draft.size,
         repo: draft.repo || null,
         deps: draft.deps.split(/[,\s]+/).filter(Boolean),
+        agent: draft.agentDriver ? { driver: draft.agentDriver, model: draft.agentModel.trim() || undefined } : null,
       }),
     )
       .then(() => setEdit(false))
@@ -1997,6 +2000,7 @@ const TicketDrawer = ({ ticket, board, held, sessionId, onClose, onOpen, onActio
           {ticket.diff && <span className="mono">+{ticket.diff.added} −{ticket.diff.removed} in {ticket.diff.files} file{ticket.diff.files === 1 ? "" : "s"}</span>}
           {ticket.cost?.usd ? <span>cost <b>{fmtUsd(ticket.cost.usd)}</b></span> : null}
           {ticket.pinned && <span className="pill sig">pinned</span>}
+          {ticket.agent && <span title="This ticket's implementer runs on its own agent; the reviewer stays the session's">agent <b>{ticket.agent.driver}</b>{ticket.agent.model ? <span className="mono"> {ticket.agent.model}</span> : null}</span>}
         </div>
         {held && <div className="banner signal">A worker holds this ticket. Stop the run to edit or move it.</div>}
         <div className="row">
@@ -2016,6 +2020,20 @@ const TicketDrawer = ({ ticket, board, held, sessionId, onClose, onOpen, onActio
               <label>Size<select value={draft.size} onChange={(e) => setDraft({ ...draft, size: e.target.value })}><option>S</option><option>M</option><option>L</option></select></label>
               <label>Repo<input value={draft.repo} onChange={(e) => setDraft({ ...draft, repo: e.target.value })} /></label>
               <label>Deps <span className="help">ticket ids, comma separated</span><input value={draft.deps} onChange={(e) => setDraft({ ...draft, deps: e.target.value })} /></label>
+              <label>
+                Own agent <span className="help">Optional: this ticket's implementer runs on this agent instead of the session's worker (a fresh worker; the reviewer stays the session's). In lead mode the lead hands it over with board_run.</span>
+                <select value={draft.agentDriver} onChange={(e) => setDraft({ ...draft, agentDriver: e.target.value, agentModel: "" })}>
+                  <option value="">session's worker</option>
+                  {drivers.map((d) => <option key={d.name} value={d.name}>{d.title}{d.configured ? "" : " (no credential)"}</option>)}
+                </select>
+              </label>
+              {draft.agentDriver && (
+                <label>
+                  Model <span className="help">Any id that CLI accepts; empty uses the account's default</span>
+                  <input className="mono" list="ticket-agent-models" value={draft.agentModel} onChange={(e) => setDraft({ ...draft, agentModel: e.target.value })} placeholder="account default" />
+                  <datalist id="ticket-agent-models">{(drivers.find((d) => d.name === draft.agentDriver)?.models ?? []).map((m) => <option key={m} value={m} />)}</datalist>
+                </label>
+              )}
             </div>
             <div className="row"><button className="pri" onClick={save}>Save</button><button className="quiet" onClick={() => { setDraft(toDraft(ticket)); setEdit(false); }}>Cancel</button></div>
           </div>

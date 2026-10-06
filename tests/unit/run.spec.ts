@@ -1317,3 +1317,72 @@ test("recover releases a sweep the host left in flight", async () => {
     await fs.rm(s.root, { recursive: true, force: true });
   }
 });
+
+// --- a ticket's own agent ----------------------------------------------------------
+
+test("loop mode: a ticket with its own agent is implemented on that driver and model; the reviewer stays the session's", async () => {
+  const s = await makeSession({ agents: { worker: { driver: "claude", model: "opus" } } });
+  const h0 = await s.hub.get(s.id);
+  await h0.mutate((d) => ({ next: { board: importBoard(d.board, { tickets: [{ id: "T-1", title: "Schema", agent: { driver: "codex", model: "gpt-5.1" } }] }).board } }));
+  const shell = fakeShell();
+  const worker = fakeWorker(s.hub, s.id, async (job) => {
+    if (job.role === "implementer") await fileReport(s.hub, s.id, job.ticket!, "done");
+    return { text: job.role === "reviewer" ? "VERDICT: ok" : "" };
+  });
+  const mgr = manager(s, shell, worker);
+  try {
+    const run = await (await mgr.start(s.id)).done;
+    expect(run.ticketsDone).toBe(2);
+    const byTicket = (id: string) => worker.jobs.filter((j) => j.ticket === id).map((j) => `${j.role}:${j.driver}:${j.model ?? ""}`);
+    expect(byTicket("T-1")).toEqual(["implementer:codex:gpt-5.1", "reviewer:claude:opus"]);
+    expect(byTicket("T-2")).toEqual(["implementer:claude:opus", "reviewer:claude:opus"]);
+    const events = (await fs.readFile(path.join(s.paths.runs, "1", "events.jsonl"), "utf8")).split("\n").filter(Boolean).map((l) => JSON.parse(l) as VerstasEvent);
+    expect(events.some((e) => e.kind === "status" && e.text.includes("own agent: codex · gpt-5.1"))).toBe(true);
+    // The session has no openai pack; the run added it for the ticket's agent.
+    expect(h0.session.packs).toContain("openai");
+    expect(h0.session.allowlist).toContain("api.openai.com");
+  } finally {
+    await fs.rm(s.root, { recursive: true, force: true });
+  }
+});
+
+test("lead mode: the lead hands a ticket with its own agent to the harness with board_run and gets the verdict; the ticket's commit is its own", async () => {
+  const s = await makeSession({ mode: "lead" });
+  const h0 = await s.hub.get(s.id);
+  await h0.mutate((d) => ({ next: { board: importBoard(d.board, { tickets: [{ id: "T-3", title: "Visual pass", state: "ready", agent: { driver: "cursor" } }] }).board } }));
+  const implementers: string[] = [];
+  const r = await leadRun(s, async (api, job) => {
+    if (job.role === "implementer") {
+      implementers.push(`${job.ticket}:${job.driver}`);
+      await fileReport(s.hub, s.id, job.ticket!, "looked at the galleries");
+      return { text: "" };
+    }
+    expect(await finishTicket(api, "T-1")).toMatchObject({ state: "done" });
+    expect((await api("POST", "/tickets/T-3/claim", {})).json.error).toContain("board_run");
+    expect((await api("POST", "/tickets/T-3/run", {})).status).toBe(200);
+    // Wait like board_run does.
+    for (;;) {
+      await new Promise((res) => setTimeout(res, 5));
+      const t = (await api("GET", "/tickets/T-3")).json;
+      if (t.state !== "in_progress" && t.state !== "review") {
+        expect(t.state).toBe("done");
+        break;
+      }
+    }
+    expect(await finishTicket(api, "T-2")).toMatchObject({ state: "done" });
+    return { text: "board done" };
+  });
+  try {
+    const run = await (await r.mgr.start(s.id)).done;
+    expect(run.state).toBe("finished");
+    expect(run.ticketsDone).toBe(3);
+    expect(implementers).toEqual(["T-3:cursor"]);
+    expect(r.jobs.map((j) => j.role)).toEqual(["lead", "reviewer", "implementer", "reviewer", "reviewer"]);
+    expect(r.shell.commits).toEqual(["T-1: Schema", "T-3: Visual pass", "T-2: Engine"]);
+    const h = await s.hub.get(s.id);
+    expect(h.board.tickets.find((t) => t.id === "T-3")!.notes.map((n) => n.text)).toEqual(expect.arrayContaining([expect.stringContaining("Handed to its own agent (cursor)"), expect.stringContaining("Reviewed ok")]));
+  } finally {
+    r.close();
+    await fs.rm(s.root, { recursive: true, force: true });
+  }
+});

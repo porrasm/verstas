@@ -311,6 +311,7 @@ export const ticketSummary = (t: DraftTicket) => ({
   deps: t.deps ?? [],
   state: t.state ?? "ready",
   pinned: t.pinned ?? false,
+  agent: t.agent,
   acceptance: (t.acceptance ?? []).length,
   specChars: (t.spec ?? "").length,
 });

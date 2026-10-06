@@ -5,6 +5,7 @@ import {
   actionDetailSchema,
   choreIdSchema,
   choreStateSchema,
+  describeAgent,
   ideaSchema,
   messageSchema,
   now,
@@ -44,6 +45,8 @@ export type AgentRunHooks = {
   claimRefusal?(run: RunToken): string | undefined;
   /** The lead filed a request or a halt on the ticket it holds; the run parks the ticket so the lead can move on. */
   requested?(run: RunToken, ticketId: string): void;
+  /** The lead handed a ticket that names its own agent to the harness: a fresh implementer on that agent works it, then the judge. */
+  delegated?(run: RunToken, ticketId: string): void;
   /** The lead took a batch of chores (board.sweep is now `working`). */
   sweepStarted?(run: RunToken, ids: string[]): void;
   /** The lead submitted its sweep with one result per chore; the run judges it (checks, size, commit) and settles the chores. */
@@ -90,6 +93,7 @@ const summary = (t: Ticket) => ({
   deps: t.deps,
   repo: t.repo,
   pinned: t.pinned,
+  agent: t.agent,
 });
 
 export const createAgentApi = (hub: SessionHub, tokens: RunTokens, hooks?: AgentRunHooks): express.Express => {
@@ -438,12 +442,48 @@ export const createAgentApi = (hub: SessionHub, tokens: RunTokens, hooks?: Agent
           const open = t.deps.filter((dep) => !d.board.tickets.some((x) => x.id === dep && x.state === "done"));
           throw new BoardError(`${id} waits on ${open.join(", ")}, not done yet`, "illegal_transition");
         }
+        if (t.agent) throw new BoardError(`${id} runs on its own agent (${describeAgent(t.agent)}): hand it over with board_run when you hold nothing, instead of claiming it`, "forbidden_move");
         return { next: { board: transition(d.board, id, "in_progress", { by: "agent", text: `Claimed by the lead (judged attempts so far: ${t.attempts})` }) } };
       });
       tokens.update(token, { currentTicket: id });
       // A ticket that waited on the user comes back with the outcome.
       const answered = h.inbox.requests.filter((x) => x.ticketId === id && x.state !== "open").at(-1);
       res.json({ ok: true, id, state: "in_progress", ...(answered ? { answer: requestOutcome(answered) } : {}) });
+    }),
+  );
+
+  /** A ticket with its own agent: the lead does not work it; the harness runs a fresh implementer on that agent, then the judge, while the lead waits. */
+  r.post(
+    "/tickets/:id/run",
+    wrap(async (req, res) => {
+      if (!leadOnly(req, res)) return;
+      const id = ticketIdSchema.parse(req.params.id);
+      const refusal = hooks!.claimRefusal?.(req.run);
+      if (refusal) {
+        res.status(409).json({ error: refusal });
+        return;
+      }
+      if (!hooks!.delegated) {
+        res.status(409).json({ error: "This run cannot hand tickets to another agent" });
+        return;
+      }
+      const h = await hub.get(req.run.sessionId);
+      const agent = await h.mutate((d) => {
+        const held = req.run.currentTicket ? d.board.tickets.find((t) => t.id === req.run.currentTicket && HELD.has(t.state)) : undefined;
+        if (held) throw new BoardError(`You hold ${held.id} (${held.state}); the other agent needs the working tree to itself, so submit first`, "forbidden_move");
+        const sweeping = sweepInFlight(d.board);
+        if (sweeping) throw new BoardError(`Sweep ${sweeping.n} is ${sweeping.state}; finish it with chores_submit first`, "forbidden_move");
+        const t = getTicket(d.board, id);
+        if (!t.agent) throw new BoardError(`${id} names no agent of its own; claim it and do it yourself`, "forbidden_move");
+        if (t.state !== "ready") throw new BoardError(`${id} is ${t.state}, not ready`, "illegal_transition");
+        if (!canStart(d.board, t)) {
+          const open = t.deps.filter((dep) => !d.board.tickets.some((x) => x.id === dep && x.state === "done"));
+          throw new BoardError(`${id} waits on ${open.join(", ")}, not done yet`, "illegal_transition");
+        }
+        return { next: { board: transition(d.board, id, "in_progress", { by: "agent", text: `Handed to its own agent (${describeAgent(t.agent)}) by the lead` }) }, result: t.agent };
+      });
+      hooks!.delegated(req.run, id);
+      res.json({ ok: true, id, state: "in_progress", agent, next: "A fresh worker on that agent does the ticket and the reviewer judges it. Wait for the verdict (board_run waits for you); claim nothing meanwhile." });
     }),
   );
 

@@ -117,9 +117,9 @@ export type CreateSessionInput = {
 };
 
 /** The packs plus the one each chosen agent's backend lives in (the Claude pack is always on through packHosts). */
-export const withAgentPacks = (packs: readonly string[], s: { model?: string; agents?: SessionAgents; caps?: { reviewer?: boolean } }): string[] => {
+export const withAgentPacks = (packs: readonly string[], s: { model?: string; agents?: SessionAgents; caps?: { reviewer?: boolean } }, board?: Parameters<typeof sessionDrivers>[1]): string[] => {
   const out = [...packs];
-  for (const d of sessionDrivers(s)) {
+  for (const d of sessionDrivers(s, board)) {
     const p = driverPack(d);
     if (!out.includes(p)) out.push(p);
   }

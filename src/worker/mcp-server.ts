@@ -114,6 +114,23 @@ export const submitSweepAndWait = async (results: unknown[], waitMs = SWEEP_WAIT
   }
 };
 
+/** Hand a ticket to its own agent, then wait until the harness settled it (done, back to ready, blocked or waiting). */
+export const runAndWait = async (id: string, waitMs = SUBMIT_WAIT_MS * 4, pollMs = SUBMIT_POLL_MS): Promise<unknown> => {
+  const path = `/tickets/${encodeURIComponent(id)}`;
+  const before = ((await api("GET", path)) as TicketView).notes?.length ?? 0;
+  const started = await api("POST", `${path}/run`, {});
+  const until = Date.now() + waitMs;
+  for (;;) {
+    await new Promise((r) => setTimeout(r, pollMs));
+    const t = (await api("GET", path)) as TicketView;
+    if (t.state !== "in_progress" && t.state !== "review") {
+      const verdict = t.state === "done" ? "accepted" : t.state === "ready" ? "not done yet: read the notes; run it again or leave it" : t.state === "waiting" ? "parked on a request to the user" : t.state;
+      return { id, state: t.state, verdict, attempts: t.attempts, agent: (started as { agent?: unknown }).agent, notes: (t.notes ?? []).slice(before).filter((n) => n.by !== "agent").map((n) => n.text) };
+    }
+    if (Date.now() >= until) return { id, state: t.state, verdict: "still being worked by its agent", note: "Call board_get_ticket on it later; claim nothing until it is settled." };
+  }
+};
+
 export const TOOLS: Tool[] = [
   {
     name: "budget",
@@ -129,6 +146,14 @@ export const TOOLS: Tool[] = [
       "Take a ready ticket whose dependencies are done: it moves to in_progress and is yours. Hold one ticket at a time: submit it (or park it with a request) before claiming the next. Claim before you change files for it.",
     inputSchema: obj({ id: str("Ticket id", 20) }, ["id"]),
     call: (a) => api("POST", `/tickets/${encodeURIComponent(String(a.id))}/claim`, {}),
+  },
+  {
+    name: "board_run",
+    leadOnly: true,
+    description:
+      "Hand a ready ticket that names its own agent (board_list_tickets shows `agent`) to that agent: a fresh worker on that driver and model does the ticket in the shared working tree, then the reviewer judges it as usual. You must hold no ticket and no sweep. Waits for the verdict and returns it with the harness's notes; claim nothing meanwhile. A ticket without an agent is yours to claim.",
+    inputSchema: obj({ id: str("Ticket id", 20) }, ["id"]),
+    call: (a) => runAndWait(String(a.id)),
   },
   {
     name: "board_submit",
@@ -148,7 +173,7 @@ export const TOOLS: Tool[] = [
   },
   {
     name: "board_list_tickets",
-    description: "List the board's tickets (id, title, state, kind, size, priority, deps, repo). Optionally filter by state.",
+    description: "List the board's tickets (id, title, state, kind, size, priority, deps, repo, and `agent` when the ticket runs on its own agent instead of the session's worker). Optionally filter by state.",
     inputSchema: obj({ state: { type: "string", enum: ["backlog", "ready", "in_progress", "review", "waiting", "blocked", "done"] } }, []),
     call: (a) => api("GET", `/board${a.state ? `?state=${encodeURIComponent(String(a.state))}` : ""}`),
   },
@@ -185,6 +210,13 @@ export const TOOLS: Tool[] = [
         repo: str("Which clone under /workspace", 100),
         deps: { type: "array", items: str("Ticket id", 20), maxItems: 20 },
         priority: { type: "integer", minimum: 0, maximum: 1000 },
+        agent: {
+          type: "object",
+          description: "Optional: run this ticket's implementer on another agent (driver claude | codex | cursor, model any id that CLI accepts). Only when the work needs that agent's strength; the driver must have a credential in the user's Settings.",
+          properties: { driver: { type: "string", enum: ["claude", "codex", "cursor"] }, model: str("Model id", 100) },
+          required: ["driver"],
+          additionalProperties: false,
+        },
       },
       ["title", "kind", "spec"],
     ),

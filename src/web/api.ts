@@ -8,6 +8,7 @@ import express, { type Request, type Response } from "express";
 import { z } from "zod";
 import {
   agentFor,
+  agentSpecSchema,
   capsSchema,
   choreIdSchema,
   sessionModeSchema,
@@ -1267,6 +1268,8 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
     spec: z.string().max(50_000).optional(),
     acceptance: z.array(z.string().min(1).max(2000)).optional(),
     pinned: z.boolean().optional(),
+    /** null clears the ticket's own agent. */
+    agent: agentSpecSchema.nullable().optional(),
   });
 
   api.post(
@@ -1291,7 +1294,7 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
       const h = await d.hub.get(param(req, "id"));
       const ticket = await h.mutate((docs) => {
         const t = getTicket(docs.board, tid);
-        const next: Ticket = { ...t, ...Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined)), repo: patch.repo === null ? undefined : (patch.repo ?? t.repo), updatedAt: now() } as Ticket;
+        const next: Ticket = { ...t, ...Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined)), repo: patch.repo === null ? undefined : (patch.repo ?? t.repo), agent: patch.agent === null ? undefined : (patch.agent ?? t.agent), updatedAt: now() } as Ticket;
         const board = replaceTicket(docs.board, next);
         validateDeps(board.tickets);
         validateRepos([next], docs.session.repos.map((x) => x.name));
