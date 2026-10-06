@@ -1441,9 +1441,10 @@ const TicketCard = ({ t, doneIds, request, active, open, onOpen, onRetry, onAppr
 // --- manual ticket ------------------------------------------------------------
 
 const NewTicketForm = ({ session, board, onCancel, onCreate }: { session: Session; board: Board; onCancel: () => void; onCreate: (body: Record<string, unknown>) => Promise<void> }) => {
-  const [f, setF] = useState({ title: "", kind: "feature", repo: session.repos[0]?.name ?? "", size: "S", priority: "100", deps: "", state: "ready", spec: "", acceptance: "" });
+  const [f, setF] = useState({ title: "", kind: "feature", repo: session.repos[0]?.name ?? "", size: "S", priority: "100", deps: "", state: "ready", spec: "", acceptance: "", agentDriver: "", agentModel: "" });
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
+  const drivers = useDrivers();
   const submit = async () => {
     setErr("");
     setBusy(true);
@@ -1458,6 +1459,7 @@ const NewTicketForm = ({ session, board, onCancel, onCreate }: { session: Sessio
         state: f.state,
         spec: f.spec,
         acceptance: f.acceptance.split(/\n/).map((x) => x.trim()).filter(Boolean),
+        ...(f.agentDriver ? { agent: { driver: f.agentDriver, model: f.agentModel.trim() || undefined } } : {}),
       });
     } catch (e) {
       setErr((e as Error).message);
@@ -1475,6 +1477,20 @@ const NewTicketForm = ({ session, board, onCancel, onCreate }: { session: Sessio
         <label>Kind<select value={f.kind} onChange={(e) => setF({ ...f, kind: e.target.value })}><option>feature</option><option>bug</option><option>followup</option><option>chore</option></select></label>
         <label>Repository<select value={f.repo} onChange={(e) => setF({ ...f, repo: e.target.value })}><option value="">(none)</option>{session.repos.map((r) => <option key={r.name} value={r.name}>{r.name}</option>)}</select></label>
         <label>Size<select value={f.size} onChange={(e) => setF({ ...f, size: e.target.value })}><option>S</option><option>M</option><option>L</option></select></label>
+        <label>
+          Own agent <span className="help">Optional: a fresh worker on this agent does the ticket instead of the session's worker</span>
+          <select value={f.agentDriver} onChange={(e) => setF({ ...f, agentDriver: e.target.value, agentModel: "" })}>
+            <option value="">session's worker</option>
+            {drivers.map((d) => <option key={d.name} value={d.name}>{d.title}{d.configured ? "" : " (no credential)"}</option>)}
+          </select>
+        </label>
+        {f.agentDriver && (
+          <label>
+            Model <span className="help">Any id that CLI accepts; empty uses the account's default</span>
+            <input className="mono" list="new-ticket-agent-models" value={f.agentModel} onChange={(e) => setF({ ...f, agentModel: e.target.value })} placeholder="account default" />
+            <datalist id="new-ticket-agent-models">{(drivers.find((d) => d.name === f.agentDriver)?.models ?? []).map((m) => <option key={m} value={m} />)}</datalist>
+          </label>
+        )}
         <label>Priority <span className="help">lower runs first</span><input type="number" min={0} max={1000} value={f.priority} onChange={(e) => setF({ ...f, priority: e.target.value })} /></label>
         <label>Depends on <span className="help">ids, e.g. {ids.slice(-2).join(", ") || "T-1"}</span><input className="mono" value={f.deps} onChange={(e) => setF({ ...f, deps: e.target.value })} /></label>
       </div>
