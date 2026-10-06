@@ -1197,11 +1197,12 @@ const RemoteToggle = ({ session, onSet }: { session: Session; onSet: (remote: bo
   const where = remote?.baseUrl || "the remote dashboard";
   const toggle = () => {
     if (on) return void onSet(false);
-    if (confirm(`Show "${session.name}" on ${where}?\n\nIts tickets (titles, specs, reports, notes), inbox, setup verdict, prompts and a short activity log are sent there while Verstas runs. Tool output, file contents and diffs are not.`)) void onSet(true);
+    if (confirm(`Show "${session.name}" on ${where}?\n\nIts tickets (titles, specs, reports, notes), requests, your prompts to the box and a short activity log are sent there while Verstas runs, from initialization on. Tool output, file contents and diffs are not.`)) void onSet(true);
   };
+  const plan = !session.initializedAt;
   return (
-    <button className={`chip ${on ? "on" : ""}`} onClick={toggle} aria-pressed={on} title={on ? `Shown on ${where}. Click to stop sending it.` : `Not shared. Click to show this session on ${where}.`}>
-      {on ? "On remote dashboard" : "Remote dashboard: off"}
+    <button className={`chip ${on ? "on" : ""}`} onClick={toggle} aria-pressed={on} title={on ? (plan ? `Shown on ${where} once initialized. Click to stop.` : `Shown on ${where}. Click to stop sending it.`) : `Not shared. Click to show this session on ${where}.`}>
+      {on ? (plan ? "On remote dashboard once initialized" : "On remote dashboard") : "Remote dashboard: off"}
     </button>
   );
 };

@@ -8,6 +8,10 @@ import { SESSION_ID_PATTERN, ticketIdSchema, ticketKindSchema } from "../core/ty
  * then goes through the same handler (and validation) as a click in the
  * local UI. Nothing here deletes a session, edits settings, the allowlist,
  * caps or secrets, applies work to a repository, or reads files.
+ *
+ * Kept to what a phone needs overnight (docs/REMOTE.md): start, pause and
+ * stop, ask the box, answer requests, add tickets and approve them. Setup,
+ * planning and ticket editing stay in the app.
  */
 
 const sessionId = z.string().regex(SESSION_ID_PATTERN);
@@ -16,7 +20,7 @@ const short = (n: number) => z.string().max(n);
 export const remoteCommandSchema = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("run"),
-    payload: z.object({ sessionId, action: z.enum(["start", "pause", "stop", "setup", "plan", "prompt"]), prompt: short(20_000).optional() }),
+    payload: z.object({ sessionId, action: z.enum(["start", "pause", "stop", "prompt"]), prompt: short(20_000).optional() }),
   }),
   z.object({
     kind: z.literal("decide"),
@@ -39,18 +43,8 @@ export const remoteCommandSchema = z.discriminatedUnion("kind", [
       priority: z.number().int().min(0).max(1000).optional(),
     }),
   }),
-  z.object({
-    kind: z.literal("ticket.move"),
-    payload: z.object({ sessionId, ticketId: ticketIdSchema, state: z.enum(["backlog", "ready", "blocked", "done"]), note: short(2000).optional() }),
-  }),
-  z.object({
-    kind: z.literal("ticket.update"),
-    payload: z.object({ sessionId, ticketId: ticketIdSchema, title: z.string().min(1).max(200).optional(), spec: short(50_000).optional(), priority: z.number().int().min(0).max(1000).optional() }),
-  }),
-  z.object({ kind: z.literal("ticket.note"), payload: z.object({ sessionId, ticketId: ticketIdSchema, text: z.string().min(1).max(20_000) }) }),
+  z.object({ kind: z.literal("ticket.approve"), payload: z.object({ sessionId, ticketId: ticketIdSchema }) }),
   z.object({ kind: z.literal("tickets.approveAll"), payload: z.object({ sessionId }) }),
-  z.object({ kind: z.literal("setup.confirm"), payload: z.object({ sessionId, start: z.boolean().default(false) }) }),
-  z.object({ kind: z.literal("message.read"), payload: z.object({ sessionId, messageId: z.string().regex(/^M-\d+$/) }) }),
 ]);
 export type RemoteCommand = z.infer<typeof remoteCommandSchema>;
 
@@ -70,19 +64,9 @@ export const toApiCall = (c: RemoteCommand): ApiCall => {
       const { sessionId: _, ...t } = c.payload;
       return { method: "POST", path: `${s}/tickets`, body: t };
     }
-    case "ticket.move":
-      return { method: "POST", path: `${s}/tickets/${e(c.payload.ticketId)}/state`, body: { state: c.payload.state, note: c.payload.note } };
-    case "ticket.update": {
-      const { sessionId: _, ticketId, ...patch } = c.payload;
-      return { method: "PUT", path: `${s}/tickets/${e(ticketId)}`, body: patch };
-    }
-    case "ticket.note":
-      return { method: "POST", path: `${s}/tickets/${e(c.payload.ticketId)}/notes`, body: { text: c.payload.text } };
+    case "ticket.approve":
+      return { method: "POST", path: `${s}/tickets/${e(c.payload.ticketId)}/state`, body: { state: "ready" } };
     case "tickets.approveAll":
       return { method: "POST", path: `${s}/tickets/approve-all`, body: {} };
-    case "setup.confirm":
-      return { method: "POST", path: `${s}/setup/confirm`, body: { start: c.payload.start } };
-    case "message.read":
-      return { method: "POST", path: `${s}/messages/${e(c.payload.messageId)}/read`, body: {} };
   }
 };

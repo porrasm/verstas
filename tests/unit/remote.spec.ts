@@ -54,10 +54,10 @@ test("events: tool results and cost never leave; every line is short and has onl
 
 const makeRoot = async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "verstas-remote-"));
-  const add = async (id: string, remote: boolean) => {
+  const add = async (id: string, remote: boolean, initialized = true) => {
     const paths = sessionPaths(root, id);
     await fs.mkdir(paths.runs, { recursive: true });
-    await writeJsonAtomic(paths.session, sessionSchema.parse({ id, name: id, goal: "g", createdAt: now(), remote, repos: [{ name: "app", sourcePath: "/x", branch: "main", runBranch: "verstas/x" }] }));
+    await writeJsonAtomic(paths.session, sessionSchema.parse({ id, name: id, goal: "g", createdAt: now(), initializedAt: initialized ? T : null, remote, repos: [{ name: "app", sourcePath: "/x", branch: "main", runBranch: "verstas/x" }] }));
     await saveBoard(paths.dir, importBoard(emptyBoard("g"), { tickets: [{ id: "T-1", title: "First", state: "ready", spec: "s".repeat(10_000) }] }).board);
     await writeJsonAtomic(
       paths.inbox,
@@ -66,7 +66,9 @@ const makeRoot = async () => {
   };
   await add("shared-one", true);
   await add("private-one", false);
-  return { root, hub: new SessionHub(root), ids: ["shared-one", "private-one"] };
+  // Ticked but still a plan: nothing to run or watch, so it is not sent.
+  await add("plan-one", true, false);
+  return { root, hub: new SessionHub(root), ids: ["shared-one", "private-one", "plan-one"] };
 };
 
 test("a session's view caps long text and names the hosts a pack would add", async () => {
@@ -74,6 +76,8 @@ test("a session's view caps long text and names the hosts a pack would add", asy
   const h = await hub.get("shared-one");
   const v = remoteSession({ ...h.snapshot(), run: undefined, active: false, totals: { usd: 0, runs: 0, lastActivityAt: T }, events: [] });
   expect(v.tickets[0]!.spec.length).toBeLessThanOrEqual(4000);
+  // Only what the dashboard shows: nothing about setup, agents, settings or messages.
+  expect(Object.keys(v).sort()).toEqual(["active", "events", "id", "name", "prompts", "requests", "state", "tickets", "totals"]);
   const detail = v.requests[0]!.actions[0]!.detail as { kind: string; hosts?: string[] };
   expect(detail.kind).toBe("pack");
   expect(detail.hosts?.length).toBeGreaterThan(0);
@@ -82,11 +86,16 @@ test("a session's view caps long text and names the hosts a pack would add", asy
 test("commands: known kinds map to the UI API; anything else is refused", () => {
   const ok = remoteCommandSchema.parse({ kind: "decide", payload: { sessionId: "shared-one", requestId: "R-1", actions: [{ id: "a1", decision: "approve" }] } });
   expect(toApiCall(ok)).toEqual({ method: "POST", path: "/sessions/shared-one/requests/R-1", body: { answer: undefined, actions: [{ id: "a1", decision: "approve" }], declineAll: false } });
-  const move = remoteCommandSchema.parse({ kind: "ticket.move", payload: { sessionId: "shared-one", ticketId: "T-1", state: "ready" } });
-  expect(toApiCall(move).path).toBe("/sessions/shared-one/tickets/T-1/state");
+  const approve = remoteCommandSchema.parse({ kind: "ticket.approve", payload: { sessionId: "shared-one", ticketId: "T-1" } });
+  expect(toApiCall(approve)).toEqual({ method: "POST", path: "/sessions/shared-one/tickets/T-1/state", body: { state: "ready" } });
   for (const bad of [
     { kind: "session.delete", payload: { sessionId: "shared-one" } },
-    { kind: "ticket.move", payload: { sessionId: "shared-one", ticketId: "T-1", state: "in_progress" } },
+    // Gone from the dashboard: editing, moving anywhere but ready, setup and planning stay in the app.
+    { kind: "ticket.move", payload: { sessionId: "shared-one", ticketId: "T-1", state: "done" } },
+    { kind: "ticket.update", payload: { sessionId: "shared-one", ticketId: "T-1", title: "x" } },
+    { kind: "setup.confirm", payload: { sessionId: "shared-one", start: true } },
+    { kind: "run", payload: { sessionId: "shared-one", action: "setup" } },
+    { kind: "run", payload: { sessionId: "shared-one", action: "plan" } },
     { kind: "run", payload: { sessionId: "../../config", action: "start" } },
     { kind: "decide", payload: { sessionId: "shared-one", requestId: "R-1/../x", actions: [] } },
   ]) {
@@ -128,7 +137,7 @@ const fakeRelay = async () => {
         results.push({ id: url.split("/").pop()!, body: JSON.parse(raw) });
         return json({ ok: true });
       }
-      if (url === "/api/verstas/host/hello") return json({ ok: true, protocol: 1, name: "test mac" });
+      if (url === "/api/verstas/host/hello") return json({ ok: true, protocol: 2, name: "test mac" });
       res.writeHead(404).end();
     });
   });
@@ -145,7 +154,7 @@ const waitFor = async (cond: () => boolean, ms = 5000) => {
   }
 };
 
-test("client: pushes only ticked sessions, carries out commands for them, refuses the rest, says goodbye", async () => {
+test("client: pushes only ticked, initialized sessions, carries out commands for them, refuses the rest, says goodbye", async () => {
   const { hub, ids } = await makeRoot();
   const relay = await fakeRelay();
   const calls: { method: string; path: string; body: unknown }[] = [];
@@ -173,11 +182,13 @@ test("client: pushes only ticked sessions, carries out commands for them, refuse
     relay.enqueue({ id: "c1", kind: "run", payload: { sessionId: "shared-one", action: "start" } });
     relay.enqueue({ id: "c2", kind: "run", payload: { sessionId: "private-one", action: "start" } });
     relay.enqueue({ id: "c3", kind: "settings.change", payload: { sessionId: "shared-one" } });
-    await waitFor(() => relay.results.length === 3);
+    relay.enqueue({ id: "c4", kind: "run", payload: { sessionId: "plan-one", action: "start" } });
+    await waitFor(() => relay.results.length === 4);
     expect(relay.results.map((r) => [r.id, (r.body as { ok: boolean }).ok])).toEqual([
       ["c1", true],
       ["c2", false],
       ["c3", false],
+      ["c4", false],
     ]);
     expect((relay.results[1]!.body as { error: string }).error).toContain("not shared");
     expect(calls).toEqual([{ method: "POST", path: "/sessions/shared-one/run", body: { action: "start", prompt: undefined } }]);

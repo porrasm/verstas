@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import type { Config } from "../config.js";
-import type { Run, VerstasEvent } from "../core/types.js";
+import { isInitialized, type Run, type VerstasEvent } from "../core/types.js";
 import type { SessionHub } from "../sessions/hub.js";
 import { allRuns, runTotals } from "../sessions/runs.js";
 import { remoteCommandSchema, toApiCall, type ApiCall } from "./commands.js";
@@ -161,7 +161,8 @@ export class RemoteClient {
 
   private async isShared(sessionId: string): Promise<boolean> {
     try {
-      return (await this.d.hub.get(sessionId)).session.remote;
+      const s = (await this.d.hub.get(sessionId)).session;
+      return s.remote && isInitialized(s);
     } catch {
       return false;
     }
@@ -206,7 +207,8 @@ export class RemoteClient {
       } catch {
         continue;
       }
-      if (!h.session.remote) {
+      // A plan is not sent: there is nothing to run or watch until it is initialized.
+      if (!h.session.remote || !isInitialized(h.session)) {
         this.rings.delete(id);
         continue;
       }
