@@ -62,6 +62,21 @@ ${session.setupScripts.length ? session.setupScripts.map((x) => `  - ${x.name}: 
   The harness stops you at a cap; file your report early rather than late.
 - Commits are made by the harness after you finish, one per ticket. Do not
   commit, do not rewrite history, do not create branches.
+${versionRule(session)}`;
+
+/** The session's version rule for VERSTAS.md, or nothing when it has none. */
+export const versionRule = (session: Pick<Session, "caps">): string =>
+  session.caps.versionBump === "none"
+    ? ""
+    : `- Versioning: a ticket that changes what the app does (a feature, a fix a
+  user would notice) bumps the app's ${session.caps.versionBump} version once, in the same
+  change: package.json "version", a project file's <Version> (.csproj,
+  Directory.Build.props), pyproject.toml, Cargo.toml, wherever the
+  repository keeps it, and any place that must match it (a lockfile's
+  root entry, a version test). Only one bump per ticket, even across
+  attempts. Docs-only and test-only tickets and chore sweeps do not bump.
+  If notes/brief.md says the project versions differently, or the
+  repository has no version, follow that instead.
 `;
 
 /** Where a lead's rules can be replaced without a rebuild: read for every new lead. */
@@ -89,7 +104,7 @@ Rules that apply to every role:
 Role: implementer. Definition of done for your ticket:
 1. The change is made in the right repository under /workspace.
 2. Tests for the change exist and pass; typecheck and lint are clean where the repository has them.
-3. Documentation the change affects is updated.
+3. Documentation the change affects is updated, and the version is bumped if /workspace/VERSTAS.md asks for it.
 4. You filed a report with \`board_report\`: what you did, where, how you verified it, what is left. Five to fifteen lines.
 5. You left notes for the next worker, who starts with a fresh context and knows only what is written down: a trap, a command, a decision, a slow test goes into /workspace/notes/learnings.md (one line each); a wrong line in brief.md or env.md gets fixed.
 Then reply with one line and stop. If you cannot finish within the caps, file the report with what is done and what is left; the harness will requeue the ticket if the reviewer thinks it is fixable.`,
@@ -132,7 +147,7 @@ Role: the user's direct request. The user typed the task below on the session pa
 Role: lead. You work this session's board until nothing you can start is left. Nobody picks tickets for you: you choose the order, decide when to read and when to build, and may use subagents for research or for independent parts of a ticket. What is fixed is the contract with the board:
 
 1. Claim a ticket with \`board_claim\` before you change files for it. You hold one ticket at a time; the repositories have one working tree, and each ticket becomes one commit. A ticket that names its own agent (\`agent\` on the board line) is not yours to implement: when you hold nothing, \`board_run\` it; a fresh worker on that agent does it in the working tree, the reviewer judges it, and you get the verdict. Pick its moment like any other ticket's.
-2. When its work is finished (the change made, tests for it passing, the docs it affects updated), file the report with \`board_report\` and submit it with \`board_submit\`. The harness runs the checks and an independent reviewer, commits, and moves it to done, or back to ready with the reviewer's notes, or to blocked. You never mark a ticket done yourself. Read the verdict: fix and resubmit, or leave the ticket and come back to it later.
+2. When its work is finished (the change made, tests for it passing, the docs it affects updated, the version bumped if VERSTAS.md asks for it), file the report with \`board_report\` and submit it with \`board_submit\`. The harness runs the checks and an independent reviewer, commits, and moves it to done, or back to ready with the reviewer's notes, or to blocked. You never mark a ticket done yourself. Read the verdict: fix and resubmit, or leave the ticket and come back to it later.
 3. A ticket that needs something only the user can give: one \`request\` with everything, while you hold it. The ticket parks and you are free to claim the next one.
 4. Keep notes/ true for whoever comes after you, as every worker does: traps and commands in learnings.md, a wrong line in brief.md or env.md fixed.
 5. Watch your context with \`budget\`. When it has become noise (the session has moved on from what you first read, you keep re-reading the same files, or the context is large), finish or park what you hold if you can, then \`handoff\` with a note: what is in flight, what you tried, what you learned that is not in notes/ yet, what to do next. A fresh lead starts from that note.

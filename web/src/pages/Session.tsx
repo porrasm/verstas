@@ -1964,6 +1964,7 @@ const SessionSettings = ({ session, onSave, part = "all" }: { session: Session; 
     sweepMaxLines: String(session.caps.sweepMaxLines ?? 400),
     sweepMaxFiles: String(session.caps.sweepMaxFiles ?? 15),
     choreSweepAt: String(session.caps.choreSweepAt ?? 10),
+    versionBump: (session.caps.versionBump ?? "minor") as string,
     choreApproval: session.caps.choreApproval ?? false,
     memory: session.limits.memory,
     cpus: String(session.limits.cpus),
@@ -1991,7 +1992,7 @@ const SessionSettings = ({ session, onSave, part = "all" }: { session: Session; 
         ...(part !== "caps" ? { allowlist: f.allow.split(/\n/).map((s) => s.trim()).filter(Boolean), packs: f.packs } : {}),
         ...(part !== "network"
           ? {
-              caps: { workerMinutes: Number(f.workerMinutes), workerTurns: Number(f.workerTurns), budgetUsd: Number(f.budgetUsd), runTickets: Number(f.runTickets), ticketAttempts: Number(f.ticketAttempts), reviewer: f.reviewer, resumeWorker: f.resumeWorker, leadMinutes: Number(f.leadMinutes), leadTurns: Number(f.leadTurns), sweepMaxLines: Number(f.sweepMaxLines), sweepMaxFiles: Number(f.sweepMaxFiles), choreApproval: f.choreApproval, choreSweepAt: Number(f.choreSweepAt) },
+              caps: { workerMinutes: Number(f.workerMinutes), workerTurns: Number(f.workerTurns), budgetUsd: Number(f.budgetUsd), runTickets: Number(f.runTickets), ticketAttempts: Number(f.ticketAttempts), reviewer: f.reviewer, resumeWorker: f.resumeWorker, leadMinutes: Number(f.leadMinutes), leadTurns: Number(f.leadTurns), sweepMaxLines: Number(f.sweepMaxLines), sweepMaxFiles: Number(f.sweepMaxFiles), choreApproval: f.choreApproval, choreSweepAt: Number(f.choreSweepAt), versionBump: f.versionBump as "minor" | "patch" | "none" },
               limits: { memory: f.memory, cpus: Number(f.cpus) },
               mode: f.mode,
             }
@@ -2057,6 +2058,14 @@ const SessionSettings = ({ session, onSave, part = "all" }: { session: Session; 
           <label className="chk" title="Chores filed by reviewers and workers wait for your approval before a sweep may take them. Off: they are swept as they come."><input type="checkbox" checked={f.choreApproval} onChange={(e) => set("choreApproval", e.target.checked)} /> Approve workers' chores before they are swept</label>
           {f.mode !== "lead" && <label className="chk" title="Claude Code only. The next ticket's implementer continues the previous one's conversation instead of re-reading the repositories. The reviewer always starts fresh."><input type="checkbox" checked={f.resumeWorker} onChange={(e) => set("resumeWorker", e.target.checked)} /> Implementers continue one conversation</label>}
           </div>
+          <label>
+            Version bump <span className="help">What a ticket that changes the app bumps; the project's notes can say otherwise</span>
+            <select value={f.versionBump} onChange={(e) => set("versionBump", e.target.value)}>
+              <option value="minor">Minor (1.4.0 to 1.5.0)</option>
+              <option value="patch">Patch (1.4.0 to 1.4.1)</option>
+              <option value="none">No version rule</option>
+            </select>
+          </label>
           <label>Memory <span className="help">Container limit, e.g. 4g</span><input value={f.memory} onChange={(e) => set("memory", e.target.value)} /></label>
           <label>CPUs<input type="number" step="0.5" min={0.5} value={f.cpus} onChange={(e) => set("cpus", e.target.value)} /></label>
         </div>

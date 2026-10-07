@@ -466,6 +466,12 @@ export const capsSchema = z.object({
    * line off; the lead then sweeps when it sees fit.
    */
   choreSweepAt: z.number().int().min(0).max(1000).default(10),
+  /**
+   * Which part of the app's version a ticket that changes what the app does
+   * bumps (package.json "version", a project file's <Version>, ...), unless
+   * the project's notes say it versions differently. "none": no rule.
+   */
+  versionBump: z.enum(["minor", "patch", "none"]).default("minor"),
 });
 export type Caps = z.infer<typeof capsSchema>;
 
