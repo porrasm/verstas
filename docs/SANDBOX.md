@@ -309,9 +309,41 @@ to `verstas-session-<id>:latest` (`docker commit`; the workspace bind mount
 and the home volume are not part of it). A recreated container starts from
 that image while the base image is the one it was taken from; otherwise the
 recipe is replayed on the base image. The snapshot holds whatever the agent
-installed, so it is exactly as trusted as the session: it is never used for
-another session and never pushed anywhere. `verstas doctor` lists
-labelled resources without a matching directory and offers to remove them.
+installed, so it is exactly as trusted as the session: it is never pushed
+anywhere, and another session uses it only when you start that session
+from this one's environment (below). `verstas doctor` lists labelled
+resources without a matching directory and offers to remove them.
+
+## A session from another session's environment
+
+"Start from: Environment of <session>" on the New session page (or "New
+session from this environment" on a session page) gives a fresh board on a
+copy of an initialized session's box. Everything is copied, nothing is
+shared, and the source is never modified:
+
+- The **home volume** is copied into the new session's own volume by a
+  throwaway root container on no network, the source mounted read-only
+  (`cp -a`, so owners and modes survive). Refused while the source has a
+  run going: a volume copied while a worker writes to it is inconsistent.
+- The **snapshot**, when the source has a usable one, becomes the new
+  session's own image, built `FROM` it under the new session's label. Not
+  a `docker tag`: a tag shares the image id and so the old label, and
+  deleting the source would delete it.
+- **Settings** (image, recipes, root scripts, network, limits, caps,
+  agents, mode, setup instructions) and the box's notes (env.md, setup.sh,
+  tools/, INDEX.md; brief.md and learnings.md unless you untick them; all
+  notes but the handoff state.md on request; attachments on request).
+- **Repositories** are fresh clones from your checkouts, or from the
+  source's run branch to carry its unapplied commits: bundled inside the
+  source's container and cloned from the bundle, which is pure data.
+- The confirmed **readiness** comes along when the setup instructions are
+  unchanged, and initialization then skips the setup worker; changed
+  instructions leave it out so the setup worker checks the box again.
+
+The new session comes up initialized through the usual path. If any step
+fails, its volume, snapshot image and directory are removed. It inherits
+the source's trust: whatever the source's agents put in the volume or the
+snapshot is in the copy.
 
 ## Residual risks, stated plainly
 

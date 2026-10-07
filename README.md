@@ -63,7 +63,10 @@ Then, in the web app:
    container exists yet. Or let an assistant prepare a draft first
    (**Connect an assistant** on the New session page, `docs/DRAFTS.md`);
    creating from its review page brings its repositories, packs, recipes
-   and board along.
+   and board along. **Start from: Environment of <session>** instead
+   starts a fresh board on a copy of an initialized session's box (home
+   volume, snapshot, settings, notes) and comes up initialized without
+   running setup again (`docs/SANDBOX.md`).
 3. **Session page, while it is a plan**: a setup sheet, section by
    section: repositories (cloned fresh at initialization, at the branch
    you pick), the board (write or import tickets), the environment (setup

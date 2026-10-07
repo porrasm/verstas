@@ -7,7 +7,7 @@ import { SettingsPage } from "./pages/Settings";
 import { ScriptsPage } from "./pages/Scripts";
 import { DraftPage } from "./pages/Draft";
 
-/** Hash routing: #/ sessions, #/new (?draft=<id>), #/s/<id>, #/s/<id>/t/<ticket>, #/d/<draft>, #/scripts, #/settings. */
+/** Hash routing: #/ sessions, #/new (?draft=<id> or ?from=<session>), #/s/<id>, #/s/<id>/t/<ticket>, #/d/<draft>, #/scripts, #/settings. */
 const useRoute = (): string => {
   const [hash, setHash] = useState(location.hash || "#/");
   useEffect(() => {
@@ -32,7 +32,7 @@ export const App = () => {
   const m = /^#\/s\/([^/]+)(?:\/t\/([^/]+))?/.exec(route);
   if (m) page = <SessionPage id={decodeURIComponent(m[1]!)} ticketId={m[2] ? decodeURIComponent(m[2]) : null} />;
   else if (/^#\/d\/[^/?]+/.test(route)) page = <DraftPage id={decodeURIComponent(/^#\/d\/([^/?]+)/.exec(route)![1]!)} />;
-  else if (route.startsWith("#/new")) page = <NewSessionPage key={route} draftId={new URLSearchParams(route.split("?")[1] ?? "").get("draft")} />;
+  else if (route.startsWith("#/new")) page = <NewSessionPage key={route} draftId={new URLSearchParams(route.split("?")[1] ?? "").get("draft")} fromSession={new URLSearchParams(route.split("?")[1] ?? "").get("from")} />;
   else if (route.startsWith("#/scripts")) page = <ScriptsPage />;
   else if (route.startsWith("#/settings")) page = <SettingsPage status={status} />;
   else page = <SessionsPage status={status} />;

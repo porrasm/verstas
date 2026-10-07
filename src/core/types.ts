@@ -663,6 +663,12 @@ export const sessionSchema = z.object({
    * setup, as long as the base image has not changed since.
    */
   snapshot: z.object({ image: z.string(), at: z.string(), baseImageId: z.string() }).optional(),
+  /**
+   * Set on a session started from another session's environment: which one,
+   * when, and whether its confirmed readiness came along (the requirements
+   * were the same), in which case initialization skips the setup worker.
+   */
+  environmentFrom: z.object({ session: z.string(), at: z.string(), readinessCarried: z.boolean() }).optional(),
   /** The setup worker's last verdict, and when it was accepted (at initialization, or by you). */
   readiness: readinessSchema.optional(),
   /** Per-session auto-approval rules (P2); present in the schema so files stay forward-compatible. */

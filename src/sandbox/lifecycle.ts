@@ -9,6 +9,9 @@ import {
   SANDBOX_VERSION,
   SPEC_LABEL,
   commitArgs,
+  copyHomeVolumeArgs,
+  copySnapshotArgs,
+  copySnapshotDockerfile,
   connectProxyToBridgeArgs,
   createHomeVolumeArgs,
   listSnapshotImagesArgs,
@@ -240,6 +243,25 @@ export const usableSnapshot = async (cfg: SandboxConfig, session: Session): Prom
   if (!snap) return undefined;
   const [base, img] = await Promise.all([imageId(cfg.docker, session.image), imageId(cfg.docker, snap.image)]);
   return base && img && base === snap.baseImageId ? snap.image : undefined;
+};
+
+/** The source session's home volume copied into a new volume of `toSessionId`. Minutes for a multi-GB toolchain. */
+export const copyHomeVolume = async (cfg: SandboxConfig, from: Session, toSessionId: string): Promise<void> => {
+  await cfg.docker.run(createHomeVolumeArgs(toSessionId));
+  await cfg.docker.run(copyHomeVolumeArgs(from.id, toSessionId, from.image), { timeoutMs: 60 * 60_000 });
+};
+
+/**
+ * The source's snapshot as the new session's own, relabelled image, or
+ * undefined when the source has none usable (none taken, or its base image
+ * changed since). The record keeps the source's time and base image id, so
+ * usableSnapshot judges the copy as it would the original.
+ */
+export const copySnapshot = async (cfg: SandboxConfig, from: Session, toSessionId: string): Promise<Session["snapshot"]> => {
+  const image = await usableSnapshot(cfg, from);
+  if (!image || !from.snapshot) return undefined;
+  await cfg.docker.run(copySnapshotArgs(toSessionId), { input: copySnapshotDockerfile(image), timeoutMs: 15 * 60_000 });
+  return { image: snapshotImageName(toSessionId), at: from.snapshot.at, baseImageId: from.snapshot.baseImageId };
 };
 
 export const removeSnapshots = async (cfg: SandboxConfig, sessionId: string): Promise<void> => {

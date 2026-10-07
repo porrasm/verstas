@@ -1447,3 +1447,26 @@ test("a ticket with no review whose implementer did not finish gets another atte
     await fs.rm(s.root, { recursive: true, force: true });
   }
 });
+
+test("a session from another's environment with its readiness carried over initializes without a setup worker; without it, setup runs", async () => {
+  for (const carried of [true, false]) {
+    const s = await makeSession({ reviewer: false, initialized: false });
+    try {
+      const h0 = await s.hub.get(s.id);
+      const at = now();
+      await h0.mutate((d) => ({
+        next: {
+          session: { ...d.session, environmentFrom: { session: "2026-10-01-old", at, readinessCarried: carried }, readiness: carried ? { verdict: "ready" as const, at, summary: "from the old box", checks: [], confirmedAt: at } : undefined },
+        },
+      }));
+      const worker = fakeWorker(s.hub, s.id, async () => ({ text: "SETUP: ready\nFine." }));
+      const run = await (await manager(s, fakeShell(), worker).start(s.id, { init: true })).done;
+      expect(run.state).toBe("finished");
+      const h = await s.hub.get(s.id);
+      expect(h.session.initializedAt).toBeTruthy();
+      expect(worker.jobs.map((j) => j.role)).toEqual(carried ? [] : ["setup"]);
+    } finally {
+      await fs.rm(s.root, { recursive: true, force: true });
+    }
+  }
+});

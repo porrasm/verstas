@@ -1,6 +1,9 @@
 import { test, expect } from "@playwright/test";
 import {
   connectProxyToBridgeArgs,
+  copyHomeVolumeArgs,
+  copySnapshotArgs,
+  copySnapshotDockerfile,
   createNetworkArgs,
   execArgs,
   ownWorkspaceArgs,
@@ -143,4 +146,24 @@ test("handing the workspace to the agent runs as root and touches only files the
   expect(args.slice(0, 3)).toEqual(["exec", "-u", "root"]);
   expect(args).toContain("verstas-nuppi-mvp");
   expect(args.slice(args.indexOf("find"))).toEqual(["find", "/workspace", "-xdev", "!", "-user", "1000", "-exec", "chown", "-h", "1000:1000", "{}", "+"]);
+});
+
+test("a home volume is copied by a throwaway root container on no network, the source read-only", () => {
+  const a = copyHomeVolumeArgs("2026-10-01-old", "2026-10-07-new", "verstas-devbox:local");
+  expect(a.slice(0, 2)).toEqual(["run", "--rm"]);
+  expect(a.join(" ")).toContain("--network none");
+  expect(a.join(" ")).toContain("-u 0");
+  expect(a).toContain("verstas-2026-10-01-old-home:/from:ro");
+  expect(a).toContain("verstas-2026-10-07-new-home:/to");
+  expect(a.slice(-3)).toEqual(["verstas-devbox:local", "-c", "cp -a /from/. /to/"]);
+});
+
+test("a copied snapshot is a new image under the new session's label, not a tag of the old one", () => {
+  const a = copySnapshotArgs("2026-10-07-new");
+  expect(a[0]).toBe("build");
+  expect(a).toContain("verstas-session-2026-10-07-new:latest");
+  expect(a).toContain("verstas.session=2026-10-07-new");
+  expect(a.at(-1)).toBe("-");
+  expect(a).not.toContain("tag");
+  expect(copySnapshotDockerfile("verstas-session-2026-10-01-old:latest")).toBe("FROM verstas-session-2026-10-01-old:latest\n");
 });

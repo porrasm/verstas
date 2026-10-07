@@ -82,6 +82,13 @@ export const cloneFromBundle = async (bundleFile: string, dest: string, runBranc
   return { commit: await git(["-C", dest, "rev-parse", "HEAD"]) };
 };
 
+/** A clone made by cloneFromBundle, moved onto a new session's run branch; returns its base commit. */
+export const startRunBranch = async (dest: string, runBranch: string): Promise<string> => {
+  if (!BRANCH_RE.test(runBranch) || runBranch.startsWith("-")) throw new Error(`Bad branch name: ${runBranch}`);
+  await git(["-C", dest, "checkout", "-q", "-b", runBranch]);
+  return git(["-C", dest, "rev-parse", "HEAD"]);
+};
+
 export const ZIP_MAX_FILE_BYTES = 200 * 1024 * 1024;
 export const ZIP_MAX_TOTAL_BYTES = 2 * 1024 * 1024 * 1024;
 export const ZIP_MAX_ENTRIES = 50_000;

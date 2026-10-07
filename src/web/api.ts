@@ -38,11 +38,12 @@ import { emptyBoard, addChore, addNote, BoardError, exportBoard, getTicket, impo
 import { codexAuthRefreshedAt, configSchema, loadConfig, loadSecrets, saveConfig, saveSecrets, verstasHome, workTargetSchema, type Config } from "../config.js";
 import { codexAuthAgeDays, configuredDrivers, DRIVERS } from "../harness/drivers.js";
 import type { SessionHub } from "../sessions/hub.js";
-import { createSession, deleteSessionDir, listSessions, makeSessionId, provisionSession, removeClones, repoPick, RESERVED_WORKSPACE_NAMES, sessionPaths, withAgentPacks, writeRecipeFiles } from "../sessions/sessions.js";
+import { createSession, deleteSessionDir, listSessions, makeSessionId, provisionSession, removeClones, repoPick, RESERVED_WORKSPACE_NAMES, sessionPaths, withAgentPacks, writeAllowlist, writeRecipeFiles } from "../sessions/sessions.js";
+import { copyEnvironmentFiles, environmentSettings } from "../sessions/from-environment.js";
 import { applyBundle, ApplyError } from "../sessions/apply.js";
 import { importArchive, readArchive, writeArchive } from "../sessions/archive.js";
 import type { SessionHandle } from "../sessions/hub.js";
-import { listSandboxes, removeSandbox, sandboxStatus, snapshotSandbox, stopAllSandboxes, stopSandbox, type SandboxConfig } from "../sandbox/lifecycle.js";
+import { copyHomeVolume, copySnapshot, listSandboxes, removeSandbox, sandboxStatus, snapshotSandbox, stopAllSandboxes, stopSandbox, type SandboxConfig } from "../sandbox/lifecycle.js";
 import { dockerAvailable } from "../sandbox/docker.js";
 import type { RunManager } from "../harness/run.js";
 import { dockerShell, ensureSessionSandbox, runSetup, type RunManagerConfig } from "../harness/docker-worker.js";
@@ -52,7 +53,7 @@ import { allowlistFor, detectPacksInRepo, NETWORK_PACKS, packHosts } from "../ne
 import { allRuns, lastRun, runTotals } from "../sessions/runs.js";
 import { RemoteClient } from "../remote/client.js";
 import { isLoopback } from "../remote/http.js";
-import { extractZip, listBranches } from "../sessions/workspace.js";
+import { cloneFromBundle, extractZip, listBranches, runBranchName, startRunBranch } from "../sessions/workspace.js";
 import { DraftError, draftBoardText, validateDraft, type Draft } from "../drafts/draft.js";
 import type { DraftStore } from "../drafts/store.js";
 import type { McpSetup } from "../drafts/setup.js";
@@ -554,6 +555,19 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
     setupMode: setupModeSchema.optional(),
     /** The draft this form was filled from; it is marked as having become this session. */
     draftId: z.string().max(90).optional(),
+    /** Start from another session's environment instead of a blank plan (src/sessions/from-environment.ts). */
+    fromEnvironment: z
+      .object({
+        session: z.string().min(1).max(200),
+        /** brief.md and learnings.md. */
+        projectNotes: z.boolean().default(true),
+        /** Every note but state.md. */
+        allNotes: z.boolean().default(false),
+        attachments: z.boolean().default(false),
+        /** Branch to clone per repository name; default the source's branch. The source's run branch brings its unapplied commits. */
+        branches: z.record(z.string(), z.string().max(200)).default({}),
+      })
+      .optional(),
   });
 
   /** Zip uploads from /uploads become extracted attachments of the session; the uploads are removed. */
@@ -571,10 +585,80 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
     return extracts;
   };
 
+  /**
+   * A new session on another session's environment: settings, the chosen
+   * notes, a copy of its home volume and its snapshot, fresh clones, then the
+   * usual initialization (no setup worker when the readiness carried over).
+   * The source is never modified; on any failure everything made for the new
+   * session goes.
+   */
+  const createFromEnvironment = async (input: z.infer<typeof createBody>, res: Response): Promise<void> => {
+    const opts = input.fromEnvironment!;
+    const src = await d.hub.get(opts.session);
+    // A volume copied while a worker writes to it is an inconsistent copy.
+    if (notWhileRunning(res, src.id)) return;
+    if (!isInitialized(src.session)) throw Object.assign(new Error(`${src.id} is not initialized: it has no environment to start from`), { status: 409 });
+    const cfg = d.getConfig();
+    const pasted = input.board?.trim() ? parseBoardPaste(input.board) : undefined;
+    const created = await createSession(cfg.sessionsRoot, { name: input.name, goal: input.goal, repos: [], zips: [], setupScripts: src.session.setupScripts, image: src.session.image, packs: src.session.packs, allowlist: src.session.allowlist });
+    const id = created.session.id;
+    const dst = created.paths;
+    try {
+      const files = await copyEnvironmentFiles(src.paths, dst, opts);
+      await copyHomeVolume(d.sandbox, src.session, id);
+      const snapshot = await copySnapshot(d.sandbox, src.session, id);
+      const repos: Session["repos"] = [];
+      for (const r of src.session.repos) {
+        const branch = opts.branches[r.name] ?? r.branch;
+        const runBranch = runBranchName(id);
+        if (branch !== r.runBranch) {
+          repos.push({ name: r.name, sourcePath: r.sourcePath, branch, runBranch });
+          continue;
+        }
+        // The source's unapplied commits: bundled inside its container, cloned here from the bundle, which is pure data (Boundary 5).
+        await ensureSessionSandbox(d.runConfig, src.session, path.join(src.paths.dir, "sandbox.env"), false);
+        const sh = dockerShell(d.sandbox, src.id);
+        const inBox = `/workspace/.verstas/export/${r.name}.from-env.bundle`;
+        await sh.exec(["mkdir", "-p", "/workspace/.verstas/export"]);
+        const b = await sh.exec(["git", "bundle", "create", inBox, r.runBranch], { workdir: `/workspace/${r.name}`, timeoutMs: 600_000 });
+        if (b.code !== 0) throw new Error(`bundle ${r.name}: ${b.stderr.slice(-500)}`);
+        const onHost = path.join(src.paths.workspace, ".verstas", "export", `${r.name}.from-env.bundle`);
+        const bundle = path.join(dst.dir, `${r.name}.bundle`);
+        await fs.copyFile(onHost, bundle);
+        await fs.rm(onHost, { force: true });
+        const dest = path.join(dst.workspace, r.name);
+        await cloneFromBundle(bundle, dest, r.runBranch);
+        const baseCommit = await startRunBranch(dest, runBranch);
+        await fs.rm(bundle, { force: true });
+        repos.push({ name: r.name, sourcePath: r.sourcePath, branch, runBranch, baseCommit });
+      }
+      const settings = environmentSettings(src.session, { requirements: input.requirements }, now());
+      const h = await d.hub.get(id);
+      await h.mutate((docs) => ({ next: { session: { ...docs.session, ...settings, repos, snapshot, attachments: opts.attachments ? src.session.attachments : [] } } }));
+      await writeRecipeFiles(dst, settings.setupScripts);
+      await writeAllowlist(dst, settings.allowlist);
+      if (pasted) await h.mutate((docs) => ({ next: { board: importBoard(docs.board, pasted, { by: "user", defaultState: "ready" }).board } }));
+      const { repos: provisioned, clones } = await provisionSession(cfg.sessionsRoot, h.session);
+      await h.mutate((docs) => ({ next: { session: { ...docs.session, repos: provisioned } } }));
+      const ctl = await d.runs.start(id, { init: true, start: false });
+      res.status(201).json({ session: h.session, run: ctl.run, clones, copied: { ...files, snapshot: Boolean(snapshot), readiness: settings.environmentFrom!.readinessCarried } });
+    } catch (e) {
+      d.runs.stopNow(id);
+      await removeSandbox(d.sandbox, id, { everything: true }).catch(() => undefined);
+      await deleteSessionDir(cfg.sessionsRoot, id).catch(() => undefined);
+      d.hub.forget(id);
+      throw e;
+    }
+  };
+
   api.post(
     "/sessions",
     wrap(async (req, res) => {
       const input = createBody.parse(req.body);
+      if (input.fromEnvironment) {
+        await createFromEnvironment(input, res);
+        return;
+      }
       const cfg = d.getConfig();
       if (input.draftId) {
         const draft = await d.drafts.get(input.draftId);

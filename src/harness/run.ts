@@ -402,8 +402,10 @@ export class RunManager implements AgentRunHooks {
       // initialization): the worker runs again and the run stops.
       if (opts.init || opts.setup) {
         proceed = false;
-        const agentic = opts.setup || h.session.setupMode !== "skip";
-        if (opts.init) await status(agentic ? "init: container up; a setup worker makes the box fit for the repositories" : "init: container up; no setup worker (skipped)");
+        // A session started from another's environment with the same requirements has that box's confirmed readiness: nothing for a setup worker to check.
+        const carried = Boolean(opts.init && h.session.environmentFrom?.readinessCarried && h.session.readiness?.confirmedAt);
+        const agentic = opts.setup || (h.session.setupMode !== "skip" && !carried);
+        if (opts.init) await status(agentic ? "init: container up; a setup worker makes the box fit for the repositories" : carried ? `init: container up from ${h.session.environmentFrom!.session}'s environment; its readiness carries over, no setup worker` : "init: container up; no setup worker (skipped)");
         let ready = true;
         if (agentic) {
           await setSessionState("checking");

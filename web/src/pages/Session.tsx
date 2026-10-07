@@ -984,7 +984,8 @@ const EnvironmentPanel = ({ env }: { env: Env }) => {
         <Divider />
         <NotesSection env={env} />
         <Divider />
-        <div className="small">
+        <div className="row small">
+          <a className="btn quiet sm" href={`#/new?from=${encodeURIComponent(env.session.id)}`} title="A fresh board on a copy of this box: settings, home volume, snapshot and notes; this session is not changed">New session from this environment</a>
           <ResetEnvironment env={env} />
         </div>
         {msg && <div className="muted small">{msg}</div>}

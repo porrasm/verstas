@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, useLive, type Config, type DraftDetail } from "../api";
+import { api, isInitialized, useLive, type Config, type DraftDetail, type SessionSummary } from "../api";
 import { ConnectAssistant } from "./ConnectAssistant";
 
 /**
@@ -10,9 +10,20 @@ import { ConnectAssistant } from "./ConnectAssistant";
  *
  * With `draftId` (#/new?draft=<id>) the session takes the draft's
  * repositories, requirements, packs, recipes and board as well.
+ *
+ * With "Start from: Environment of <session>" (#/new?from=<id>) it starts on
+ * a copy of that session's box instead: its settings, home volume, snapshot
+ * and chosen notes, fresh clones of its repositories, and it comes up
+ * initialized (docs/BOARD.md, Sessions from an environment).
  */
-export const NewSessionPage = ({ draftId = null }: { draftId?: string | null }) => {
+export const NewSessionPage = ({ draftId = null, fromSession = null }: { draftId?: string | null; fromSession?: string | null }) => {
   const [cfg, setCfg] = useState<Config | null>(null);
+  const [sources, setSources] = useState<SessionSummary[]>([]);
+  const [from, setFrom] = useState(fromSession ?? "");
+  const [copy, setCopy] = useState({ projectNotes: true, allNotes: false, attachments: false });
+  const [requirements, setRequirements] = useState<string | null>(null);
+  const [branches, setBranches] = useState<Record<string, string>>({});
+  const [unapplied, setUnapplied] = useState<Record<string, number | null>>({});
   const [name, setName] = useState("");
   const [board, setBoard] = useState("");
   const [preview, setPreview] = useState<{ ok: boolean; error?: string; tickets?: { id: string; title: string; repo?: string; state: string }[] } | null>(null);
@@ -61,8 +72,42 @@ export const NewSessionPage = ({ draftId = null }: { draftId?: string | null }) 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [board, draftRepos.join(",")]);
 
+  // Sessions whose environment a new one can start from: initialized, and no run active (the volume would change while copied).
+  useEffect(() => {
+    api<SessionSummary[]>("GET", "/sessions")
+      .then((rows) => setSources(rows.filter((r) => !r.error && isInitialized(r.session) && r.run?.state !== "running")))
+      .catch(() => setSources([]));
+  }, []);
+  const source = sources.find((r) => r.session.id === from)?.session;
+  useEffect(() => {
+    setRequirements(source ? source.requirements : null);
+    setBranches({});
+    setUnapplied({});
+    if (!source) return;
+    api<{ repos: { name: string; commits: number | null }[] }>("GET", `/sessions/${encodeURIComponent(source.id)}/commits`)
+      .then((r) => setUnapplied(Object.fromEntries(r.repos.map((x) => [x.name, x.commits]))))
+      .catch(() => undefined);
+  }, [source?.id]);
+
   const create = async () => {
     setErr("");
+    if (source) {
+      setBusy("copying the environment (a large home volume takes minutes)…");
+      try {
+        const r = await api<{ session: { id: string } }>("POST", "/sessions", {
+          name,
+          board: board.trim() || undefined,
+          requirements: requirements ?? undefined,
+          fromEnvironment: { session: source.id, ...copy, branches },
+        });
+        location.hash = `#/s/${encodeURIComponent(r.session.id)}`;
+      } catch (e) {
+        setErr((e as Error).message);
+      } finally {
+        setBusy("");
+      }
+      return;
+    }
     setBusy("creating…");
     try {
       const x = draft?.draft;
@@ -115,7 +160,41 @@ export const NewSessionPage = ({ draftId = null }: { draftId?: string | null }) 
           <button className="quiet sm end" onClick={() => void loadDraft()}>Reload from the draft (replaces your edits)</button>
         </div>
       )}
-      {!x && <ConnectAssistant />}
+      {!x && !source && <ConnectAssistant />}
+
+      {!x && (
+        <section className="card stack">
+          <h3>Start from</h3>
+          <select value={from} onChange={(e) => setFrom(e.target.value)} aria-label="Start from">
+            <option value="">Blank: a plan you set up and initialize</option>
+            {sources.map((r) => <option key={r.session.id} value={r.session.id}>Environment of {r.session.name}</option>)}
+          </select>
+          {from && !source && <div className="small warn">{sources.length ? "That session is not initialized or has a run going; pick another." : "Loading sessions…"}</div>}
+          {source && (
+            <>
+              <p className="lead">
+                A fresh board on a copy of <strong>{source.name}</strong>'s box: its settings (image, recipes, network, agents, caps, limits, mode), a copy of its home volume and snapshot, the notes below, and fresh clones of its repositories. It comes up initialized{requirements === null || requirements.trim() === source.requirements.trim() ? ", without a setup worker" : "; the setup worker checks the box against the changed setup instructions"}. {source.name} itself is not changed.
+              </p>
+              <label className="chk"><input type="checkbox" checked={copy.projectNotes} onChange={(e) => setCopy({ ...copy, projectNotes: e.target.checked })} /> Copy brief.md and learnings.md (env.md, setup.sh, tools/ and INDEX.md always come along)</label>
+              <label className="chk"><input type="checkbox" checked={copy.allNotes} onChange={(e) => setCopy({ ...copy, allNotes: e.target.checked })} /> Copy all notes (never the last lead's handoff, state.md)</label>
+              <label className="chk"><input type="checkbox" checked={copy.attachments} onChange={(e) => setCopy({ ...copy, attachments: e.target.checked })} /> Copy attachments ({source.attachments.length})</label>
+              {source.repos.map((r) => (
+                <label key={r.name}>
+                  {r.name} <span className="help">Branch to clone from <span className="mono">{r.sourcePath}</span></span>
+                  <select value={branches[r.name] ?? r.branch} onChange={(e) => setBranches({ ...branches, [r.name]: e.target.value })}>
+                    <option value={r.branch}>{r.branch} (what {source.name} started from)</option>
+                    {(unapplied[r.name] ?? 0) > 0 && <option value={r.runBranch}>{r.runBranch} ({unapplied[r.name]} commit{unapplied[r.name] === 1 ? "" : "s"} of {source.name}, not applied)</option>}
+                  </select>
+                </label>
+              ))}
+              <label>
+                Setup instructions <span className="help">Unchanged, the box's confirmed readiness carries over. Changed, the setup worker checks the box again.</span>
+                <textarea value={requirements ?? ""} onChange={(e) => setRequirements(e.target.value)} style={{ minHeight: 90 }} />
+              </label>
+            </>
+          )}
+        </section>
+      )}
 
       <section className="card">
         <h3>Name</h3>

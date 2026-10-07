@@ -94,6 +94,40 @@ export const commitArgs = (sessionId: string): string[] => [
 ];
 export const listSnapshotImagesArgs = (sessionId: string): string[] => ["image", "ls", "-q", "--no-trunc", "--filter", `label=${LABEL_KEY}=${sessionId}`];
 
+/**
+ * Copies one session's home volume into another's (created first with
+ * createHomeVolumeArgs): a throwaway root container on no network, the
+ * source mounted read-only. `cp -a` keeps owners and modes, so the agent
+ * user's toolchains and caches arrive as they were.
+ */
+export const copyHomeVolumeArgs = (fromSessionId: string, toSessionId: string, image: string): string[] => [
+  "run",
+  "--rm",
+  "--network",
+  "none",
+  "-u",
+  "0",
+  "--entrypoint",
+  "sh",
+  "-v",
+  `${homeVolumeName(fromSessionId)}:/from:ro`,
+  "-v",
+  `${homeVolumeName(toSessionId)}:/to`,
+  image,
+  "-c",
+  "cp -a /from/. /to/",
+];
+
+/**
+ * A copy of another session's snapshot as this session's own image, under
+ * this session's label. Not a docker tag: a tag shares the image id, which
+ * carries the old session's label, so deleting that session
+ * (removeSnapshots, image rm -f <id>) would delete it too. The Dockerfile
+ * (FROM <source image>) goes on stdin; there is no build context.
+ */
+export const copySnapshotArgs = (toSessionId: string): string[] => ["build", "-q", "-t", snapshotImageName(toSessionId), "--label", `${LABEL_KEY}=${toSessionId}`, "-"];
+export const copySnapshotDockerfile = (fromImage: string): string => `FROM ${fromImage}\n`;
+
 /** Idempotent: creating an existing volume is a no-op. */
 export const createHomeVolumeArgs = (sessionId: string): string[] => ["volume", "create", ...label(sessionId), homeVolumeName(sessionId)];
 export const rmVolumeArgs = (sessionId: string): string[] => ["volume", "rm", "-f", homeVolumeName(sessionId)];
