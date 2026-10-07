@@ -612,7 +612,7 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
         const branch = opts.branches[r.name] ?? r.branch;
         const runBranch = runBranchName(id);
         if (branch !== r.runBranch) {
-          repos.push({ name: r.name, sourcePath: r.sourcePath, branch, runBranch });
+          repos.push({ name: r.name, sourcePath: r.sourcePath, branch, runBranch, check: r.check });
           continue;
         }
         // The source's unapplied commits: bundled inside its container, cloned here from the bundle, which is pure data (Boundary 5).
@@ -630,7 +630,7 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
         await cloneFromBundle(bundle, dest, r.runBranch);
         const baseCommit = await startRunBranch(dest, runBranch);
         await fs.rm(bundle, { force: true });
-        repos.push({ name: r.name, sourcePath: r.sourcePath, branch, runBranch, baseCommit });
+        repos.push({ name: r.name, sourcePath: r.sourcePath, branch, runBranch, baseCommit, check: r.check });
       }
       const settings = environmentSettings(src.session, { requirements: input.requirements }, now());
       const h = await d.hub.get(id);
@@ -725,6 +725,20 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
         return { next: { session: { ...docs.session, repos: [...docs.session.repos, spec], packs, allowlist: [...new Set([...docs.session.allowlist, ...packHosts(packs)])] } } };
       });
       res.status(201).json({ ok: true, repo: spec, packs: found });
+    }),
+  );
+
+  /** A repository's own check (repo.check): set or cleared at any time; the next submission uses it. */
+  api.put(
+    "/sessions/:id/repos/:name/check",
+    wrap(async (req, res) => {
+      const { check } = z.object({ check: z.string().max(2000).nullable() }).parse(req.body);
+      const h = await d.hub.get(param(req, "id"));
+      const name = param(req, "name");
+      if (!h.session.repos.some((r) => r.name === name)) throw Object.assign(new Error(`No repository ${name} in this session`), { status: 404 });
+      const value = check?.trim() || undefined;
+      await h.mutate((docs) => ({ next: { session: { ...docs.session, repos: docs.session.repos.map((r) => (r.name === name ? { ...r, check: value } : r)) } } }));
+      res.json({ ok: true, check: value ?? null });
     }),
   );
 

@@ -69,6 +69,21 @@ A bare array of tickets is accepted as well.
   tickets always take the session's setting. A card whose mode differs
   from the session's shows a badge.
 
+### The repository's check
+
+Each repository may have a **check**: one bash command run in its clone,
+such as `bash scripts/check.sh`, set by you under Environment on the
+session page. With one set, the harness runs it once per submitted ticket
+(and per chore sweep) in place of its npm and pytest guesses. A failure
+is retried once, to absorb a flaky test; a second failure sends the
+ticket back to the implementer or the lead with the log's last lines and
+no reviewer is started. A pass reaches the reviewer as authoritative,
+with the instruction not to run it again. VERSTAS.md tells the workers
+the check runs at submission, so they run only the tests of what they
+changed instead of the whole suite (and stop sleeping on it). Logs:
+`/workspace/.verstas/logs/<ticket>-<repo>-check.log`. Mode `none` runs no
+check.
+
 ### States
 
 `backlog` → `ready` → `in_progress` → `review` → `done`, with `waiting`

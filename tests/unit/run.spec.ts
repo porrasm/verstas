@@ -1470,3 +1470,82 @@ test("a session from another's environment with its readiness carried over initi
     }
   }
 });
+
+/** A shell whose repository check (bash -lc) exits with the given codes in turn. */
+const checkShell = (codes: number[]) => {
+  const base = fakeShell();
+  let i = 0;
+  const checks: string[] = [];
+  return {
+    ...base,
+    checks,
+    async exec(cmd: readonly string[], opts?: { workdir?: string; timeoutMs?: number }) {
+      if (cmd[0] === "bash" && cmd[1] === "-lc") {
+        checks.push(cmd[2]!);
+        const code = codes[Math.min(i++, codes.length - 1)]!;
+        return { code, stdout: code === 0 ? "Passed! 1125 tests" : "Failed! preview.spec.ts:67 timed out", stderr: "" };
+      }
+      return base.exec(cmd, opts);
+    },
+  };
+};
+
+const withCheck = async (s: Awaited<ReturnType<typeof makeSession>>, check = "bash scripts/check.sh") => {
+  const h = await s.hub.get(s.id);
+  await h.mutate((d) => ({ next: { session: { ...d.session, repos: d.session.repos.map((r) => ({ ...r, check })) }, board: importBoard(emptyBoard("g"), { tickets: [{ id: "T-1", title: "Leaf", state: "ready", repo: "app" }] }).board } }));
+};
+
+test("with the repository's check configured, the harness runs it once instead of guessing; the reviewer is told not to rerun it", async () => {
+  const s = await makeSession();
+  try {
+    await withCheck(s);
+    const shell = checkShell([0]);
+    const worker = fakeWorker(s.hub, s.id, async (job, hub, id) => {
+      if (job.role === "implementer") await fileReport(hub, id, job.ticket!, "done");
+      if (job.role === "reviewer") return { text: "VERDICT: ok\nFine." };
+      return {};
+    });
+    const events: VerstasEvent[] = [];
+    s.hub.on("event", (e: { event: VerstasEvent }) => events.push(e.event));
+    const run = await (await manager(s, shell, worker).start(s.id)).done;
+    expect(run.ticketsDone).toBe(1);
+    expect(shell.checks).toEqual(["bash scripts/check.sh"]);
+    expect(shell.calls.some((c) => c.join(" ").startsWith("npm run"))).toBe(false);
+    expect(events.filter((e) => e.kind === "gate").map((e) => (e as { name: string }).name)).toEqual(["check app"]);
+    const prompt = await fs.readFile(onHost(s, worker.jobs.find((j) => j.role === "reviewer")!.promptFile), "utf8");
+    expect(prompt).toContain("The repository's check (run by the harness, passed)");
+    expect(prompt).toContain("Do not run it again");
+    expect(await fs.readFile(path.join(s.paths.workspace, ".verstas", "logs", "T-1-app-check.log"), "utf8")).toContain("Passed!");
+    expect(await fs.readFile(path.join(s.paths.workspace, "VERSTAS.md"), "utf8")).toContain("runs each repository's full check once: `bash scripts/check.sh` in /workspace/app");
+  } finally {
+    await fs.rm(s.root, { recursive: true, force: true });
+  }
+});
+
+test("a check that fails twice sends the ticket back with the log's tail and no reviewer; a flaky first failure passes on the retry", async () => {
+  for (const [codes, expectDone] of [[[1, 1], false], [[1, 0], true]] as const) {
+    const s = await makeSession({ attempts: 1 });
+    try {
+      await withCheck(s);
+      const shell = checkShell([...codes]);
+      const worker = fakeWorker(s.hub, s.id, async (job, hub, id) => {
+        if (job.role === "implementer") await fileReport(hub, id, job.ticket!, "done");
+        if (job.role === "reviewer") return { text: "VERDICT: ok\nFine." };
+        return {};
+      });
+      await (await manager(s, shell, worker).start(s.id)).done;
+      const t = getTicket((await s.hub.get(s.id)).board, "T-1");
+      expect(shell.checks).toHaveLength(2);
+      if (expectDone) {
+        expect(t.state).toBe("done");
+        expect(worker.jobs.map((j) => j.role)).toEqual(["implementer", "reviewer"]);
+      } else {
+        expect(t.state).toBe("blocked");
+        expect(worker.jobs.map((j) => j.role)).toEqual(["implementer"]);
+        expect(t.notes.some((n) => n.text.includes("failed twice; no reviewer ran") && n.text.includes("preview.spec.ts:67 timed out"))).toBe(true);
+      }
+    } finally {
+      await fs.rm(s.root, { recursive: true, force: true });
+    }
+  }
+});

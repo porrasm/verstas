@@ -135,6 +135,9 @@ export type Ticket = z.infer<typeof ticketSchema>;
 export const reviewModeFor = (t: Pick<Ticket, "review">, caps: { reviewer: boolean }): ReviewMode => t.review ?? (caps.reviewer ? "full" : "checks");
 
 /** How a ticket's time was spent, in seconds; see ticketTiming. */
+/** One check the harness ran on a submission: a guessed npm/pytest gate, or the repository's own check (`check: true`), whose failure is a verdict. */
+export type GateResult = { name: string; ok: boolean; summary: string; check?: boolean; command?: string; tail?: string; log?: string };
+
 export type TicketTiming = { working: number; judging: number; waitingOnYou: number; requeued: number; agent: number; total: number };
 
 const secondsBetween = (from: string, to: string): number => Math.max(0, (Date.parse(to) - Date.parse(from)) / 1000);
@@ -420,6 +423,14 @@ export const repoSpecSchema = z.object({
   runBranch: z.string().min(1).max(200),
   /** The commit the clone started from; the feature branch's base when applying. */
   baseCommit: z.string().optional(),
+  /**
+   * The repository's own check, a bash command run in its clone (for
+   * example `bash scripts/check.sh`). Yours only. When set, the harness runs
+   * it once per submitted ticket and per chore sweep instead of guessing
+   * npm scripts: a failure goes back to the implementer without a reviewer,
+   * a pass is evidence the reviewer does not repeat. Absent, the guesses.
+   */
+  check: z.string().min(1).max(2000).optional(),
 });
 export type RepoSpec = z.infer<typeof repoSpecSchema>;
 

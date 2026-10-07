@@ -184,7 +184,10 @@ host.docker.internal:host-gateway`).
   review mode (`full`, `checks`, `none`), which decides whether that
   reviewer and those gates run, is yours alone: the agent API strips it
   from tickets an agent files and no agent route changes it, so an agent
-  cannot judge its own work by filing it as "no review".
+  cannot judge its own work by filing it as "no review". The same goes
+  for a repository's check command: only you set it. The script it runs
+  lives in the repository, so an agent can change that script in a
+  ticket; the change is in the diff the reviewer reads.
 - The proxy allows plain HTTP only to `host.docker.internal:4701` and only
   under the path prefix `/agent/`. The UI and the session management API
   live on **4700**, bound to `127.0.0.1`, which no container can reach.

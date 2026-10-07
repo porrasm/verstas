@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
-import { agentFor, boardDrivers, describeAgent, DRIVER_NAMES, eventSchema, isInitialized, matchesAnyGlob, now, requestOutcome, reviewModeFor, runSchema, SWEEP_PROTECTED_GLOBS, type AgentSpec, type Board, type DriverName, type Readiness, type Run, type Session, type SweepResult, type Ticket, type TicketState, type VerstasEvent } from "../core/types.js";
+import { agentFor, boardDrivers, describeAgent, DRIVER_NAMES, type GateResult, eventSchema, isInitialized, matchesAnyGlob, now, requestOutcome, reviewModeFor, runSchema, SWEEP_PROTECTED_GLOBS, type AgentSpec, type Board, type DriverName, type Readiness, type Run, type Session, type SweepResult, type Ticket, type TicketState, type VerstasEvent } from "../core/types.js";
 import { addNote, canStart, getTicket, hasOpenWork, nextReady, openChores, releaseSweep, replaceTicket, settleSweep, sweepInFlight, transition, validateRepos } from "../board/board.js";
 import { writeJsonAtomic } from "../board/store.js";
 import type { SessionHandle, SessionHub } from "../sessions/hub.js";
@@ -802,7 +802,7 @@ export class RunManager implements AgentRunHooks {
       if (d.numstat.files) touched.push(repo.name);
       for (const p of d.paths) if (matchesAnyGlob(p, SWEEP_PROTECTED_GLOBS)) protectedHits.push(`${repo.name}/${p}`);
     }
-    const gates: { name: string; ok: boolean; summary: string }[] = [];
+    const gates: GateResult[] = [];
     for (const name of touched.length ? touched : h.session.repos.slice(0, 1).map((r) => r.name)) gates.push(...(await this.runGates(h.id, `/workspace/${name}`, log)));
     const failed = gates.filter((g) => !g.ok);
     const lines = added + removed;
@@ -959,9 +959,15 @@ export class RunManager implements AgentRunHooks {
     // With "none" the implementer's word is the verdict: it finished, or it gets another attempt.
     let verdict: "ok" | "fixable" | "blocked";
     let verdictNote = "";
+    // The repository's own check is authoritative (you configured it): a failure goes back without a reviewer.
+    const failedCheck = gates.find((g) => g.check && !g.ok);
     if (mode === "none") {
       verdict = impl.ok ? "ok" : "fixable";
       if (!impl.ok) verdictNote = `implementer stopped (${impl.stopReason})`;
+    } else if (failedCheck) {
+      verdict = "fixable";
+      verdictNote = `the repository's check failed twice (${failedCheck.command}); its log is ${failedCheck.log}`;
+      await h.mutate((docs) => ({ next: { board: addNote(docs.board, ticketId, "harness", `The check \`${failedCheck.command}\` failed twice; no reviewer ran. Last lines of ${failedCheck.log}:\n\n${failedCheck.tail}`) } }));
     } else if (mode === "full") {
       if (signal.aborted) return "requeued";
       const rev = await this.runJob(h, run, { role: "reviewer", ticket: ticketId, promptText: await this.withNotes(h, reviewerPrompt(getTicket(h.board, ticketId), stat, diff, gates, { ok: impl.ok, stopReason: impl.stopReason })) }, log, signal);
@@ -1146,10 +1152,39 @@ export class RunManager implements AgentRunHooks {
   }
 
   /** Gates are whatever the repository itself offers: npm scripts and pytest. */
-  private async runGates(sessionId: string, repoDir: string, log: (e: VerstasEvent) => Promise<void>, ticketId?: string): Promise<{ name: string; ok: boolean; summary: string }[]> {
+  /**
+   * The checks for one repository. With the repository's own check
+   * configured (repo.check), that command alone, once, retried once when it
+   * fails so a flaky test does not cost an attempt; its log goes under
+   * .verstas/logs. Without one, the guessed npm scripts and pytest.
+   */
+  private async runGates(sessionId: string, repoDir: string, log: (e: VerstasEvent) => Promise<void>, ticketId?: string): Promise<GateResult[]> {
     const clock = this.deps.now ?? now;
     const sh = this.deps.shell(sessionId);
-    const results: { name: string; ok: boolean; summary: string }[] = [];
+    const h = await this.deps.hub.get(sessionId);
+    const repo = h.session.repos.find((r) => `/workspace/${r.name}` === repoDir);
+    if (repo?.check) {
+      const runCheck = () => sh.exec(["bash", "-lc", repo.check!], { workdir: repoDir, timeoutMs: 30 * 60_000 });
+      const t0 = Date.now();
+      let r = await runCheck();
+      let retried = false;
+      if (r.code !== 0) {
+        retried = true;
+        await log({ kind: "status", t: clock(), ticket: ticketId, text: `check failed in ${repo.name} (exit ${r.code}); running it once more in case a test is flaky` });
+        r = await runCheck();
+      }
+      const out = (r.stdout + "\n" + r.stderr).trim();
+      const ok = r.code === 0;
+      const rel = `${WORKSPACE_FILES}/logs/${ticketId ?? "sweep"}-${repo.name}-check.log`;
+      await fs.mkdir(path.join(h.paths.workspace, WORKSPACE_FILES, "logs"), { recursive: true });
+      await fs.writeFile(path.join(h.paths.workspace, rel), out);
+      const secs = Math.round((Date.now() - t0) / 1000);
+      const summary = `${ok ? (retried ? "passed on the second run (the first failed: a flaky test?)" : "passed") : `failed twice (exit ${r.code})`} in ${secs} s: ${out.slice(-300).replace(/\s+/g, " ")}`;
+      const result: GateResult = { name: `check ${repo.name}`, ok, summary, check: true, command: repo.check, tail: out.slice(-3000), log: `/workspace/${rel}` };
+      await log({ kind: "gate", t: clock(), ticket: ticketId, name: result.name, ok, summary });
+      return [result];
+    }
+    const results: GateResult[] = [];
     const pkg = await sh.exec(["cat", "package.json"], { workdir: repoDir, timeoutMs: 10_000 });
     const scripts = pkg.code === 0 ? safeScripts(pkg.stdout) : {};
     const candidates: [string, string[]][] = [];

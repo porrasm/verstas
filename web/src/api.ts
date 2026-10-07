@@ -89,7 +89,7 @@ export type Session = {
   /** Legacy: the worker's Claude model from before `agents`; read through agentFor. */
   model?: string;
   agents?: SessionAgents;
-  repos: { name: string; sourcePath: string; branch: string; runBranch: string; baseCommit?: string }[];
+  repos: { name: string; sourcePath: string; branch: string; runBranch: string; baseCommit?: string; /** The repository's own check command. */ check?: string }[];
   attachments: { name: string; dir: string; bytes: number; skipped: string[]; description?: string }[];
   allowlist: string[];
   packs: string[];

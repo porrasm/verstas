@@ -750,6 +750,12 @@ const RepoSection = ({ env, bare }: { env: Env; bare?: boolean }) => {
           {!initialized && <button className="quiet sm" onClick={() => removeRepo(x.name)} disabled={busy || active}>remove</button>}
         </div>
       ))}
+      {session.repos.map((x) => (
+        <label key={`check-${x.name}`} style={{ marginTop: 6 }}>
+          Check for {x.name} <span className="help">The repository's full check, run by Verstas once per submitted ticket and chore sweep (a failure goes back without a reviewer; the reviewer does not repeat a pass). Empty: Verstas guesses npm scripts.</span>
+          <CheckCommand value={x.check ?? ""} disabled={busy} onSave={(v) => act(() => api("PUT", `${base}/repos/${encodeURIComponent(x.name)}/check`, { check: v || null }), v ? `Check for ${x.name} saved.` : `Check for ${x.name} cleared.`)} />
+        </label>
+      ))}
       {!initialized && adding === null && free.length > 0 && <button className="sm" style={{ marginTop: 6 }} onClick={startAdd} disabled={busy || active}>Add repository</button>}
       {!initialized && adding === null && free.length === 0 && choices.length === 0 && <div className="muted" style={{ marginTop: 4 }}>No work targets: add repositories in <a href="#/settings">Settings</a>.</div>}
       {adding && (
@@ -771,6 +777,30 @@ const RepoSection = ({ env, bare }: { env: Env; bare?: boolean }) => {
         </div>
       )}
     </div>
+  );
+};
+
+/** A repository's check command; saved when the field loses focus or on Enter. */
+const CheckCommand = ({ value, disabled, onSave }: { value: string; disabled: boolean; onSave: (v: string) => Promise<unknown> }) => {
+  const [text, setText] = useState(value);
+  useEffect(() => setText(value), [value]);
+  const save = () => {
+    if (text.trim() !== value.trim()) void onSave(text.trim()).catch(() => setText(value));
+  };
+  return (
+    <input
+      className="mono"
+      value={text}
+      maxLength={2000}
+      disabled={disabled}
+      placeholder="bash scripts/check.sh"
+      onChange={(e) => setText(e.target.value)}
+      onBlur={save}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+        if (e.key === "Escape") setText(value);
+      }}
+    />
   );
 };
 

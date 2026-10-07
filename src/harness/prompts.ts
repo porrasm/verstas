@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { verstasHome } from "../config.js";
-import { attachmentLines, describeAgent, type Board, type Session, type Ticket } from "../core/types.js";
+import { attachmentLines, describeAgent, type Board, type GateResult, type Session, type Ticket } from "../core/types.js";
 import { NETWORK_PACKS } from "../network/packs.js";
 
 /**
@@ -62,7 +62,21 @@ ${session.setupScripts.length ? session.setupScripts.map((x) => `  - ${x.name}: 
   The harness stops you at a cap; file your report early rather than late.
 - Commits are made by the harness after you finish, one per ticket. Do not
   commit, do not rewrite history, do not create branches.
-${versionRule(session)}`;
+${checkRule(session)}${versionRule(session)}`;
+
+/** The repositories' checks for VERSTAS.md: the harness runs them at submission, so workers need not run the whole thing and wait. */
+export const checkRule = (session: Pick<Session, "repos">): string => {
+  const withCheck = session.repos.filter((r) => r.check);
+  if (!withCheck.length) return "";
+  return `- Checks: when a ticket is submitted (and when a chore sweep is), the harness
+  runs each repository's full check once: ${withCheck.map((r) => `\`${r.check}\` in /workspace/${r.name}`).join("; ")}.
+  A failure comes back to you with the log's last lines, before any
+  reviewer; a flaky failure is retried once. So do not run the whole check
+  yourself and never \`sleep\` waiting on one: run the tests of the code
+  you changed (a filtered test run, the one spec), then submit. The log of
+  the last check is under /workspace/.verstas/logs/.
+`;
+};
 
 /** The session's version rule for VERSTAS.md, or nothing when it has none. */
 export const versionRule = (session: Pick<Session, "caps">): string =>
@@ -210,16 +224,13 @@ export const reviewerPrompt = (
   ticket: Ticket,
   diffStat: string,
   diff: string,
-  gates: { name: string; ok: boolean; summary: string }[],
+  gates: GateResult[],
   implementer: { ok: boolean; stopReason: string } = { ok: true, stopReason: "success" },
 ): string => `${ticketBlock(ticket)}
 ## Implementer's report
 ${ticket.report ?? "(no report was filed)"}
 ${implementer.ok ? "" : `\nThe implementer did not finish cleanly (${implementer.stopReason}); judge what is there.\n`}
-## Checks the harness ran (evidence, not a verdict)
-The harness guessed these from the repository (npm scripts, pytest). A failure may come from this change, or from something the box or a later ticket provides (a browser, a service). Decide which; only a failure this ticket should have prevented makes it fixable.
-${gates.map((g) => `- ${g.ok ? "ok" : "FAILED"} ${g.name}: ${g.summary}`).join("\n") || "- none found"}
-
+${checkSection(gates)}
 ## Diff (stat)
 ${diffStat || "(empty: no files changed. That is fine when the ticket's deliverable is a report, an investigation or a note; judge the report against the acceptance criteria.)"}
 
@@ -228,7 +239,21 @@ ${diffStat || "(empty: no files changed. That is fine when the ticket's delivera
 ${diff.length > 60_000 ? diff.slice(0, 60_000) + "\n… (truncated; read the files for the rest)" : diff}
 \`\`\`
 
-Run the tests yourself if the gates did not. Do the code pass over every hunk above (read the files when the diff is truncated). Reply starting with VERDICT: ok | fixable | blocked.`;
+${gates.some((g) => g.check) ? "Do not run the repository's check again; run only what the criteria name and the tests of the changed code." : "Run the tests yourself if the gates did not."} Do the code pass over every hunk above (read the files when the diff is truncated). Reply starting with VERDICT: ok | fixable | blocked.`;
+
+/** What the reviewer is told about the checks: the repository's own check, which passed (a failed one never reaches a reviewer), or the harness's guesses. */
+const checkSection = (gates: GateResult[]): string => {
+  const own = gates.filter((g) => g.check);
+  if (own.length)
+    return `## The repository's check (run by the harness, passed)
+${own.map((g) => `- \`${g.command}\` in ${g.name.replace(/^check /, "")}: ${g.summary} (log: ${g.log})`).join("\n")}
+This is the project's full check, configured by the user, and it passed on this change. Do not run it again: that costs minutes and tells you nothing new. Read its log if you need detail, and run only the commands the acceptance criteria name and the tests of the code this change touches.
+`;
+  return `## Checks the harness ran (evidence, not a verdict)
+The harness guessed these from the repository (npm scripts, pytest). A failure may come from this change, or from something the box or a later ticket provides (a browser, a service). Decide which; only a failure this ticket should have prevented makes it fixable.
+${gates.map((g) => `- ${g.ok ? "ok" : "FAILED"} ${g.name}: ${g.summary}`).join("\n") || "- none found"}
+`;
+};
 
 export const setupPrompt = (session: Session, board: Board, answers: string[], mode: "setup" | "brief"): string => `${mode === "brief" ? "# Brief only\nRefresh /workspace/notes/brief.md (and env.md if it is out of date) against the repositories and the board as they are today. Install nothing unless a command you need to verify is missing. Still reply with a SETUP line.\n\n" : ""}# Set up the environment
 Make this box a sensible place to develop the repositories below: their toolchains at the versions they pin, their dependencies installed from their lockfiles, the services their tests need, their own build and test commands verified by running them, and env.md written for the workers. Work out what is needed from the repositories and the board; do not implement any ticket, and do not install things only one later ticket would need.
