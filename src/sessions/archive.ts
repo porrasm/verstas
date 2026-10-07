@@ -188,12 +188,15 @@ export type ImportInput = {
   /** This machine's dev-box image. */
   image: string;
   /**
-   * Replace the session of the same id here. Its environment (container,
-   * home volume, snapshot) is removed once the import is unpacked and
-   * cloned; its directory is swapped out and deleted only after the
-   * imported one is in place.
+   * Replace the session of the same id here. Its environment is removed
+   * once the import is unpacked and cloned (all of it, or only the
+   * container, proxy and network when the home volume and snapshot are
+   * kept: see replacementOf); its directory is swapped out and deleted only
+   * after the imported one is in place. `snapshot` is the replaced
+   * session's snapshot record, kept on the imported session when the
+   * environment stays; usableSnapshot drops it if the base image changed.
    */
-  replace?: { removeEnvironment: () => Promise<void> };
+  replace?: { removeEnvironment: () => Promise<void>; snapshot?: Session["snapshot"] };
 };
 
 export type ImportResult = {
@@ -270,7 +273,7 @@ export const importArchive = async (i: ImportInput): Promise<ImportResult> => {
       repos.push({ ...r, sourcePath: target?.path ?? r.sourcePath });
     }
 
-    // The session as a plan of this machine: its image, no snapshot and no setup verdict; Initialize brings those.
+    // The session as a plan of this machine: its image and no setup verdict; Initialize brings those. A replaced session's kept snapshot stays.
     const session: Session = sessionSchema.parse({
       ...exported,
       id: i.id,
@@ -279,7 +282,7 @@ export const importArchive = async (i: ImportInput): Promise<ImportResult> => {
       repos,
       initializedAt: null,
       readiness: undefined,
-      snapshot: undefined,
+      snapshot: i.replace?.snapshot,
       setup: [],
       state: "setup",
     });

@@ -9,6 +9,9 @@ import { createSession, loadSession, provisionSession, saveSession, sessionPaths
 import { ARCHIVE_FORMAT, importArchive, readArchive, writeArchive } from "../../src/sessions/archive.js";
 import { loadBoard, saveBoard, writeJsonAtomic } from "../../src/board/store.js";
 import { emptyBoard } from "../../src/board/board.js";
+import { replacementOf, type SandboxConfig } from "../../src/sandbox/lifecycle.js";
+import type { DockerRunner } from "../../src/sandbox/docker.js";
+import { sessionSchema } from "../../src/core/types.js";
 
 const execFileP = promisify(execFile);
 const git = async (cwd: string, ...args: string[]) => (await execFileP("git", args, { cwd })).stdout.trim();
@@ -153,6 +156,55 @@ test("import: an existing id is refused, a copy takes a new id, replace swaps th
   } finally {
     await fs.rm(tmp, { recursive: true, force: true });
   }
+});
+
+test("import replace keeping the environment: the snapshot record stays on the imported session; without it, none", async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "verstas-archive-"));
+  try {
+    const w = await workedSession(tmp);
+    const out = path.join(tmp, "s.ver");
+    await writeArchive({ root: w.root, session: w.session, bundles: [{ repo: "nuppi", file: w.bundle }], outFile: out });
+    const snapshot = { image: `verstas-session-${w.session.id}:latest`, at: "2026-10-06T00:00:00.000Z", baseImageId: "sha256:base" };
+    await importArchive({ root: w.root, file: out, id: w.session.id, workTargets: [], image: "img", replace: { removeEnvironment: async () => undefined, snapshot } });
+    const kept = await loadSession(w.root, w.session.id);
+    expect(kept.snapshot).toEqual(snapshot);
+    // Still a plan: Initialize runs the setup worker against the imported board and requirements.
+    expect(kept.initializedAt).toBeNull();
+    expect(kept.readiness).toBeUndefined();
+    await importArchive({ root: w.root, file: out, id: w.session.id, workTargets: [], image: "img", replace: { removeEnvironment: async () => undefined } });
+    expect((await loadSession(w.root, w.session.id)).snapshot).toBeUndefined();
+  } finally {
+    await fs.rm(tmp, { recursive: true, force: true });
+  }
+});
+
+test("replacementOf: keeping the environment removes only the container, proxy and network; otherwise the volume and snapshots go too", async () => {
+  const session = sessionSchema.parse({ id: "2026-10-06-keep", name: "k", createdAt: "2026-10-06T00:00:00.000Z", snapshot: { image: "verstas-session-2026-10-06-keep:latest", at: "2026-10-06T00:00:00.000Z", baseImageId: "sha256:b" } });
+  const calls: string[][] = [];
+  const docker: DockerRunner = {
+    spawn: () => {
+      throw new Error("no spawn");
+    },
+    async run(args) {
+      calls.push([...args]);
+      return { code: 0, stdout: args[0] === "image" && args[1] === "ls" ? "sha256:snap\n" : "", stderr: "" };
+    },
+  };
+  const cfg = { docker, proxyDistHostPath: "/p", workerDistHostPath: "/w", agentApiPort: 4701, linuxHost: false } as SandboxConfig;
+  const keep = replacementOf(cfg, session, true);
+  expect(keep.snapshot).toEqual(session.snapshot);
+  await keep.removeEnvironment();
+  const kept = calls.map((c) => c.join(" "));
+  expect(kept.some((c) => c.includes("verstas-2026-10-06-keep-proxy"))).toBe(true);
+  expect(kept.some((c) => c.startsWith("network rm"))).toBe(true);
+  expect(kept.some((c) => c.startsWith("volume rm") || c.startsWith("image"))).toBe(false);
+  calls.length = 0;
+  const all = replacementOf(cfg, session, false);
+  expect(all.snapshot).toBeUndefined();
+  await all.removeEnvironment();
+  const gone = calls.map((c) => c.join(" "));
+  expect(gone).toContain("volume rm -f verstas-2026-10-06-keep-home");
+  expect(gone).toContain("image rm -f sha256:snap");
 });
 
 test("a plan travels without bundles; its picks point at this machine's work targets", async () => {

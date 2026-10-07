@@ -89,10 +89,12 @@ export const SessionsPage = ({ status }: { status: Status | null }) => {
   };
   /** An archive whose id exists here waits for your choice: replace that session or import a copy. */
   const [clash, setClash] = useState<{ upload: string; id: string; name: string } | null>(null);
+  /** On replace, keep this machine's home volume and snapshot of the session: Initialize after the import is then quick. */
+  const [keepEnv, setKeepEnv] = useState(true);
   const runImport = async (uploadId: string, as?: "replace" | "copy"): Promise<string> => {
     setClash(null);
     try {
-      const r = await api<{ session: { id: string; name: string }; unmapped: string[]; skipped: string[] }>("POST", "/sessions/import", { upload: uploadId, as });
+      const r = await api<{ session: { id: string; name: string }; unmapped: string[]; skipped: string[] }>("POST", "/sessions/import", { upload: uploadId, as, ...(as === "replace" ? { keepEnvironment: keepEnv } : {}) });
       const unmapped = r.unmapped.length ? ` No work target here for ${r.unmapped.join(", ")}: add one with the same name to apply its work to a repository here (exporting bundles works regardless).` : "";
       return `Imported ${r.session.name} (${r.session.id}). Open it and press Initialize: the container, recipes and setup are rebuilt here; the clones, board and notes are kept.${unmapped}`;
     } catch (e) {
@@ -136,7 +138,10 @@ export const SessionsPage = ({ status }: { status: Status | null }) => {
       </div>
       {clash && (
         <div className="banner warn">
-          <span>A session <code>{clash.id}</code> ({clash.name}) exists here already. Replace it with the imported one (its container, clones and history here are removed), or import a copy under a new id?</span>
+          <span>
+            A session <code>{clash.id}</code> ({clash.name}) exists here already. Replace it with the imported one (its container, clones and history here are removed), or import a copy under a new id?
+            <label className="chk small" title="Replace removes the container, proxy and network either way. Kept, the home volume (toolchains, caches) and the snapshot stay, so Initialize after the import finds everything installed."><input type="checkbox" checked={keepEnv} onChange={(e) => setKeepEnv(e.target.checked)} /> Keep this machine's environment (home volume and snapshot)</label>
+          </span>
           <span className="end row" style={{ gap: 6 }}>
             <button className="warn solid sm" onClick={() => importArchive(clash.upload, "replace")} disabled={Boolean(busy)}>Replace</button>
             <button className="sm" onClick={() => importArchive(clash.upload, "copy")} disabled={Boolean(busy)}>Import a copy</button>

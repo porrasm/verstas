@@ -314,6 +314,13 @@ anywhere, and another session uses it only when you start that session
 from this one's environment (below). `verstas doctor` lists labelled
 resources without a matching directory and offers to remove them.
 
+Importing an archive over the same session on the same machine ("Replace",
+with "Keep this machine's environment" ticked, the default) removes the
+container, proxy and network but keeps the home volume and the snapshot,
+and the imported session keeps the snapshot record. Archives never carry
+a volume or an image, so an import on another machine, or as a copy, has
+neither.
+
 ## A session from another session's environment
 
 "Start from: Environment of <session>" on the New session page (or "New

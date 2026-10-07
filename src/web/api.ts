@@ -43,7 +43,7 @@ import { copyEnvironmentFiles, environmentSettings } from "../sessions/from-envi
 import { applyBundle, ApplyError } from "../sessions/apply.js";
 import { importArchive, readArchive, writeArchive } from "../sessions/archive.js";
 import type { SessionHandle } from "../sessions/hub.js";
-import { copyHomeVolume, copySnapshot, listSandboxes, removeSandbox, sandboxStatus, snapshotSandbox, stopAllSandboxes, stopSandbox, type SandboxConfig } from "../sandbox/lifecycle.js";
+import { copyHomeVolume, copySnapshot, listSandboxes, replacementOf, removeSandbox, sandboxStatus, snapshotSandbox, stopAllSandboxes, stopSandbox, type SandboxConfig } from "../sandbox/lifecycle.js";
 import { dockerAvailable } from "../sandbox/docker.js";
 import type { RunManager } from "../harness/run.js";
 import { dockerShell, ensureSessionSandbox, runSetup, type RunManagerConfig } from "../harness/docker-worker.js";
@@ -1255,7 +1255,14 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
   api.post(
     "/sessions/import",
     wrap(async (req, res) => {
-      const body = z.object({ upload: z.string().regex(/^[a-f0-9]{16}$/), as: z.enum(["replace", "copy"]).optional() }).parse(req.body);
+      const body = z
+        .object({
+          upload: z.string().regex(/^[a-f0-9]{16}$/),
+          as: z.enum(["replace", "copy"]).optional(),
+          /** With replace: keep this machine's home volume and snapshot of the session, so Initialize is quick. */
+          keepEnvironment: z.boolean().default(false),
+        })
+        .parse(req.body);
       const file = path.join(uploadsDir, `${body.upload}.zip`);
       const { session: incoming } = readArchive(file);
       const cfg = d.getConfig();
@@ -1278,7 +1285,7 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
         name,
         workTargets: cfg.workTargets,
         image: cfg.devboxImage,
-        replace: replace ? { removeEnvironment: () => removeSandbox(d.sandbox, id, { everything: true }).catch(() => undefined) } : undefined,
+        replace: replace ? replacementOf(d.sandbox, (await d.hub.get(id)).session, body.keepEnvironment) : undefined,
       });
       d.hub.forget(id);
       await fs.rm(file, { force: true });

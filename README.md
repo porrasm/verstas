@@ -166,8 +166,13 @@ Then, in the web app:
    brings it in as a plan with its clones in place, and **Initialize**
    rebuilds the environment there (recipes, `notes/setup.sh`, the setup
    worker). Importing a session whose id exists asks whether to replace it
-   (the way back) or import a copy. Repositories are matched to work
-   targets by name, for Apply. Format: `src/sessions/archive.ts`.
+   (the way back) or import a copy. Replacing keeps this machine's home
+   volume and snapshot of the session by default ("Keep this machine's
+   environment"), so the Initialize that follows finds everything
+   installed and is quick; it still runs the setup worker, since the
+   imported board and setup instructions may differ. A copy has a new id
+   and so no environment here. Repositories are matched to work targets by
+   name, for Apply. Format: `src/sessions/archive.ts`.
 11. **Delete** the session when done. Its containers, network and directory
    go with it.
 

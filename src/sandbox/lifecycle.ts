@@ -245,6 +245,18 @@ export const usableSnapshot = async (cfg: SandboxConfig, session: Session): Prom
   return base && img && base === snap.baseImageId ? snap.image : undefined;
 };
 
+/**
+ * What replacing a session by an import removes. Keeping the environment,
+ * only the container, proxy and network go: the home volume and the
+ * snapshot stay, and the snapshot record carries over, so Initialize after
+ * the import starts from them and its recipes find everything in place.
+ * Otherwise all of it goes, as on delete.
+ */
+export const replacementOf = (cfg: SandboxConfig, existing: Session, keepEnvironment: boolean): { removeEnvironment: () => Promise<void>; snapshot?: Session["snapshot"] } => ({
+  removeEnvironment: () => removeSandbox(cfg, existing.id, { everything: !keepEnvironment }).catch(() => undefined),
+  snapshot: keepEnvironment ? existing.snapshot : undefined,
+});
+
 /** The source session's home volume copied into a new volume of `toSessionId`. Minutes for a multi-GB toolchain. */
 export const copyHomeVolume = async (cfg: SandboxConfig, from: Session, toSessionId: string): Promise<void> => {
   await cfg.docker.run(createHomeVolumeArgs(toSessionId));
