@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
-import { agentFor, boardDrivers, describeAgent, DRIVER_NAMES, eventSchema, isInitialized, matchesAnyGlob, now, requestOutcome, runSchema, SWEEP_PROTECTED_GLOBS, type AgentSpec, type Board, type DriverName, type Readiness, type Run, type Session, type SweepResult, type Ticket, type TicketState, type VerstasEvent } from "../core/types.js";
+import { agentFor, boardDrivers, describeAgent, DRIVER_NAMES, eventSchema, isInitialized, matchesAnyGlob, now, requestOutcome, reviewModeFor, runSchema, SWEEP_PROTECTED_GLOBS, type AgentSpec, type Board, type DriverName, type Readiness, type Run, type Session, type SweepResult, type Ticket, type TicketState, type VerstasEvent } from "../core/types.js";
 import { addNote, canStart, getTicket, hasOpenWork, nextReady, openChores, releaseSweep, replaceTicket, settleSweep, sweepInFlight, transition, validateRepos } from "../board/board.js";
 import { writeJsonAtomic } from "../board/store.js";
 import type { SessionHandle, SessionHub } from "../sessions/hub.js";
@@ -936,9 +936,11 @@ export class RunManager implements AgentRunHooks {
     const move = (to: TicketState, note: string) => this.move(h, ticketId, to, note, log);
 
     if (signal.aborted) return "requeued";
-    // Gates, diff, review.
+    // The ticket's own review mode, or the session's (docs/BOARD.md).
+    const mode = reviewModeFor(ticket, caps);
+    // Gates, diff, review. "none" runs no gates.
     const repoDir = ticket.repo && h.session.repos.some((r) => r.name === ticket.repo) ? `/workspace/${ticket.repo}` : h.session.repos[0] ? `/workspace/${h.session.repos[0].name}` : "/workspace";
-    const gates = await this.runGates(h.id, repoDir, log, ticketId);
+    const gates = mode === "none" ? [] : await this.runGates(h.id, repoDir, log, ticketId);
     const { stat, numstat, diff } = await this.stageAndDiff(h.id, repoDir);
     const changed = numstat.files > 0;
     const summary = `Implementer ${impl.ok ? "finished" : `stopped (${impl.stopReason})`}; ${numstat.files} files, +${numstat.added} −${numstat.removed}`;
@@ -952,9 +954,13 @@ export class RunManager implements AgentRunHooks {
     // verdict on their own. Without a reviewer the harness decides from what
     // it can see: the implementer finished, the gates pass, and there is a
     // change or at least a report.
+    // With "none" the implementer's word is the verdict: it finished, or it gets another attempt.
     let verdict: "ok" | "fixable" | "blocked";
     let verdictNote = "";
-    if (caps.reviewer) {
+    if (mode === "none") {
+      verdict = impl.ok ? "ok" : "fixable";
+      if (!impl.ok) verdictNote = `implementer stopped (${impl.stopReason})`;
+    } else if (mode === "full") {
       if (signal.aborted) return "requeued";
       const rev = await this.runJob(h, run, { role: "reviewer", ticket: ticketId, promptText: await this.withNotes(h, reviewerPrompt(getTicket(h.board, ticketId), stat, diff, gates, { ok: impl.ok, stopReason: impl.stopReason })) }, log, signal);
       addCost(run, rev.costUsd);
@@ -994,7 +1000,7 @@ export class RunManager implements AgentRunHooks {
         const t = getTicket(docs.board, ticketId);
         return { next: { board: replaceTicket(docs.board, { ...t, diff: numstat, cost: { ...(t.cost ?? { inputTokens: 0, outputTokens: 0 }), usd: (t.cost?.usd ?? 0) + impl.costUsd } }) } };
       });
-      await move("done", `${caps.reviewer ? "Reviewed ok" : "Accepted"}${changed ? "" : " (no files changed)"}${verdictNote ? `: ${verdictNote}` : ""}`);
+      await move("done", `${mode === "full" ? "Reviewed ok" : mode === "checks" ? "Accepted" : "Accepted without review"}${changed ? "" : " (no files changed)"}${verdictNote ? `: ${verdictNote}` : ""}`);
       run.ticketsDone++;
       return "done";
     }

@@ -180,7 +180,11 @@ host.docker.internal:host-gateway`).
   request inbox, nothing else. Its role limits it further: a worker
   cannot move tickets at all; a lead may claim a ready ticket and submit
   the one it holds, but never move one to `done`, which only the
-  harness's judge does after gates and an independent reviewer.
+  harness's judge does after gates and an independent reviewer. A ticket's
+  review mode (`full`, `checks`, `none`), which decides whether that
+  reviewer and those gates run, is yours alone: the agent API strips it
+  from tickets an agent files and no agent route changes it, so an agent
+  cannot judge its own work by filing it as "no review".
 - The proxy allows plain HTTP only to `host.docker.internal:4701` and only
   under the path prefix `/agent/`. The UI and the session management API
   live on **4700**, bound to `127.0.0.1`, which no container can reach.

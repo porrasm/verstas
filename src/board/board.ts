@@ -8,6 +8,7 @@ import {
   type BoardImport,
   type Chore,
   type ChoreImport,
+  type ReviewMode,
   type Sweep,
   type SweepResult,
   type Ticket,
@@ -296,6 +297,7 @@ export const importBoard = (
         acceptance: inc.acceptance ?? existing.acceptance,
         pinned: inc.pinned ?? existing.pinned,
         agent: inc.agent ?? existing.agent,
+        review: opts.by === "user" ? (inc.review ?? existing.review) : existing.review,
         ...(canSetState && inc.state && inc.state !== existing.state ? withStateClock(existing, inc.state, at) : {}),
         state: canSetState && inc.state ? inc.state : existing.state,
         notes: [
@@ -326,6 +328,7 @@ export const importBoard = (
         attempts: 0,
         pinned: inc.pinned ?? false,
         agent: inc.agent,
+        review: opts.by === "user" ? inc.review : undefined,
         stateSince: at,
         createdAt: at,
         updatedAt: at,
@@ -582,7 +585,7 @@ export const parseMarkdownBoard = (md: string): BoardImport => {
       cur.acceptance = [...(cur.acceptance ?? []), check[1]!.trim()];
       continue;
     }
-    const kv = /^\s*((?:Repo|Deps|Priority|Size|Kind|State|Pinned|Agent)\s*:\s*[^·|]+(?:\s*[·|]\s*(?:Repo|Deps|Priority|Size|Kind|State|Pinned|Agent)\s*:\s*[^·|]+)*)\s*$/i.exec(raw);
+    const kv = /^\s*((?:Repo|Deps|Priority|Size|Kind|State|Pinned|Agent|Review)\s*:\s*[^·|]+(?:\s*[·|]\s*(?:Repo|Deps|Priority|Size|Kind|State|Pinned|Agent|Review)\s*:\s*[^·|]+)*)\s*$/i.exec(raw);
     if (kv) {
       for (const part of kv[1]!.split(/\s*[·|]\s*/)) {
         const [k, ...v] = part.split(":");
@@ -595,6 +598,7 @@ export const parseMarkdownBoard = (md: string): BoardImport => {
         else if (key === "kind" && /^(feature|bug|followup|chore)$/i.test(val)) cur.kind = val.toLowerCase() as TicketKind;
         else if (key === "state" && /^(backlog|ready)$/i.test(val)) cur.state = val.toLowerCase() as "backlog" | "ready";
         else if (key === "pinned") cur.pinned = /^(true|yes)$/i.test(val);
+        else if (key === "review" && /^(full|checks|none)$/i.test(val)) cur.review = val.toLowerCase() as ReviewMode;
         else if (key === "agent") {
           // "codex/gpt-5.1" or "codex gpt-5.1" or just "codex"
           const m = /^(claude|codex|cursor)(?:\s*[\/ ]\s*(\S.*))?$/i.exec(val);

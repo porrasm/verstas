@@ -186,7 +186,7 @@ export const createAgentApi = (hub: SessionHub, tokens: RunTokens, hooks?: Agent
   r.post(
     "/tickets",
     wrap(async (req, res) => {
-      const input = ticketImportSchema.omit({ id: true, state: true, pinned: true }).parse(req.body);
+      const input = ticketImportSchema.omit({ id: true, state: true, pinned: true, review: true }).parse(req.body);
       const h = await hub.get(req.run.sessionId);
       const result = await h.mutate((d) => {
         const r = importBoard(d.board, { tickets: [input] }, { by: "agent", role: req.run.role, defaultState: "backlog" });

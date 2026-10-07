@@ -73,6 +73,15 @@ export const costSchema = z.object({
   usd: z.number().nonnegative().optional(),
 });
 
+/**
+ * How a ticket is judged: `full` runs the gates and the reviewer, `checks`
+ * the gates alone (accepted when they pass, the implementer finished and
+ * there is a change or a report), `none` neither (accepted when the
+ * implementer finished). Only you set it; agents' tickets take the session's.
+ */
+export const reviewModeSchema = z.enum(["full", "checks", "none"]);
+export type ReviewMode = z.infer<typeof reviewModeSchema>;
+
 export const ticketSchema = z.object({
   id: ticketIdSchema,
   title: z.string().min(1).max(200),
@@ -99,6 +108,8 @@ export const ticketSchema = z.object({
    * ticket over with board_run instead of doing it itself.
    */
   agent: agentSpecSchema.optional(),
+  /** How the ticket is judged; absent, the session's setting applies (see reviewModeFor). Set by you only. */
+  review: reviewModeSchema.optional(),
   report: z.string().max(20_000).optional(),
   diff: diffStatSchema.optional(),
   cost: costSchema.optional(),
@@ -119,6 +130,9 @@ export const ticketSchema = z.object({
   updatedAt: z.string(),
 });
 export type Ticket = z.infer<typeof ticketSchema>;
+
+/** The ticket's own review mode, or the session's: the reviewer on means full, off means checks. */
+export const reviewModeFor = (t: Pick<Ticket, "review">, caps: { reviewer: boolean }): ReviewMode => t.review ?? (caps.reviewer ? "full" : "checks");
 
 /** How a ticket's time was spent, in seconds; see ticketTiming. */
 export type TicketTiming = { working: number; judging: number; waitingOnYou: number; requeued: number; agent: number; total: number };
@@ -245,6 +259,8 @@ export const ticketImportSchema = z.object({
   notes: z.array(z.string().min(1).max(20_000)).optional(),
   pinned: z.boolean().optional(),
   agent: agentSpecSchema.optional(),
+  /** Yours only: the agent API leaves it out, and an agent's import ignores it. */
+  review: reviewModeSchema.optional(),
 });
 export type TicketImport = z.infer<typeof ticketImportSchema>;
 

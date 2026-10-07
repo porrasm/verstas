@@ -23,6 +23,7 @@ result imports as is. Markdown is accepted too (below).
       "state": "ready",         // backlog | ready (default backlog)
       "pinned": false,          // true: the agent may not reprioritize it
       "agent": { "driver": "codex", "model": "gpt-5.1" }, // optional: this ticket's own agent
+      "review": "checks",       // optional: full | checks | none (default: the session's)
       "spec": "Pure module in src/engine. Input: control value 0..1 ...",
       "acceptance": [
         "unit tests cover 7-bit and 14-bit CC, note on/off, pitch bend",
@@ -39,7 +40,7 @@ A bare array of tickets is accepted as well.
 ### Import rules
 
 - A ticket whose `id` exists on the board **updates** it: title, kind, repo,
-  size, priority, deps, spec, acceptance, pinned. Notes are appended. The
+  size, priority, deps, spec, acceptance, pinned, agent, review. Notes are appended. The
   state changes only if the current state is `backlog` or `ready`; a ticket
   in flight keeps its state.
 - A ticket without an id, or with an unknown one, is **appended** with the
@@ -58,6 +59,15 @@ A bare array of tickets is accepted as well.
   lead may not claim such a ticket; it hands it over with `board_run`,
   which runs the worker and the judge while the lead waits. Use it for
   tickets that need a particular strength, such as judging rendered images.
+- `review` is optional and yours only: `full` runs the gates and the
+  reviewer, `checks` the gates alone (accepted when they pass, the
+  implementer finished and there is a change or a report), `none` neither
+  (accepted when the implementer finished; "Accepted without review").
+  Absent, the session's Reviewer setting applies: on means `full`, off
+  means `checks`. Use `checks` or `none` for a doc update or a trivial
+  change. Agents cannot set it: the agent API drops it, and an agent's
+  tickets always take the session's setting. A card whose mode differs
+  from the session's shows a badge.
 
 ### States
 
@@ -151,8 +161,8 @@ Emit events to an injected sink.
 - Level-2 or level-3 headings start tickets. The leading `T-n` and the size
   in parentheses are optional.
 - One line of `Key: value` pairs separated by `·` or `|` sets repo, deps,
-  priority, size, kind, state, pinned and agent (`Agent: codex/gpt-5.1`, or
-  just the driver).
+  priority, size, kind, state, pinned, agent (`Agent: codex/gpt-5.1`, or
+  just the driver) and review (`Review: none`).
 - Checklist items are acceptance criteria. Everything else is the spec.
 - A heading `## Chores` starts the chore list: every `- ` item under it is
   one chore, written `text — where` or `text (where)`.

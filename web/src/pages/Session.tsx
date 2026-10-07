@@ -13,6 +13,7 @@ import {
   fmtTime,
   fmtUsd,
   isInitialized,
+  REVIEW_LABEL,
   STATE_LABEL,
   ticketTiming,
   upload,
@@ -25,6 +26,7 @@ import {
   type Inbox,
   type NetworkPack,
   type Readiness,
+  type ReviewMode,
   type Run,
   type Sandbox,
   type Session,
@@ -1379,7 +1381,7 @@ const RequestItem = ({ r, onDecide, onOpenTicket }: { r: AgentRequest; onDecide:
 // --- board ------------------------------------------------------------------
 
 /** "12m / 25m" against the worker cap, or the elapsed time alone in lead mode. Counted from the last state change, in the browser. */
-const inProgressClock = (t: Ticket, clock: TicketClock, now: number): string => {
+const inProgressClock = (t: Ticket, clock: TicketView, now: number): string => {
   const secs = t.stateSince ? Math.max(0, (now - new Date(t.stateSince).getTime()) / 1000) : 0;
   return clock.capMinutes ? `${fmtSpan(secs)} / ${clock.capMinutes}m` : fmtSpan(secs);
 };
@@ -1389,10 +1391,10 @@ const timingLine = (x: { total: number; agent: number; judging: number; waitingO
   [`Took ${fmtSpan(x.total)}`, `agent ${fmtSpan(x.agent)}`, x.judging >= 1 ? `judging ${fmtSpan(x.judging)}` : "", x.waitingOnYou >= 1 ? `waiting on you ${fmtSpan(x.waitingOnYou)}` : "", x.requeued >= 1 ? `requeued ${fmtSpan(x.requeued)}` : ""].filter(Boolean).join(" · ");
 
 /** What a ticket's timer is measured against: in loop mode the worker cap applies to one ticket; a lead's cap spans tickets, so there is none. */
-type TicketClock = { mode: "loop" | "lead"; capMinutes?: number };
-const ticketClock = (session: Session): TicketClock => (session.mode === "lead" ? { mode: "lead" } : { mode: "loop", capMinutes: session.caps.workerMinutes });
+type TicketView = { mode: "loop" | "lead"; capMinutes?: number; /** The session's review mode, for tickets that set none. */ review: ReviewMode };
+const ticketClock = (session: Session): TicketView => ({ ...(session.mode === "lead" ? { mode: "lead" as const } : { mode: "loop" as const, capMinutes: session.caps.workerMinutes }), review: session.caps.reviewer ? "full" : "checks" });
 
-const BoardView = ({ board, inbox, run, active, clock, openId, onOpen, onRetry, onApprove, onShowLog }: { board: Board; inbox: Inbox; run?: Run; active: boolean; clock: TicketClock; openId: string | null; onOpen: (tid: string) => void; onRetry: (tid: string) => void; onApprove: (tid: string) => void; onShowLog: (tid: string) => void }) => {
+const BoardView = ({ board, inbox, run, active, clock, openId, onOpen, onRetry, onApprove, onShowLog }: { board: Board; inbox: Inbox; run?: Run; active: boolean; clock: TicketView; openId: string | null; onOpen: (tid: string) => void; onRetry: (tid: string) => void; onApprove: (tid: string) => void; onShowLog: (tid: string) => void }) => {
   const doneIds = new Set(board.tickets.filter((t) => t.state === "done").map((t) => t.id));
   return (
     <div className="board-wrap">
@@ -1418,7 +1420,7 @@ const BoardView = ({ board, inbox, run, active, clock, openId, onOpen, onRetry, 
   );
 };
 
-const TicketCard = ({ t, clock, doneIds, request, active, open, onOpen, onRetry, onApprove, onShowLog }: { t: Ticket; clock: TicketClock; doneIds: Set<string>; request?: AgentRequest; active: boolean; open: boolean; onOpen: () => void; onRetry: () => void; onApprove: () => void; onShowLog: () => void }) => {
+const TicketCard = ({ t, clock, doneIds, request, active, open, onOpen, onRetry, onApprove, onShowLog }: { t: Ticket; clock: TicketView; doneIds: Set<string>; request?: AgentRequest; active: boolean; open: boolean; onOpen: () => void; onRetry: () => void; onApprove: () => void; onShowLog: () => void }) => {
   const depsDone = t.deps.filter((d) => doneIds.has(d)).length;
   const depsOk = depsDone === t.deps.length;
   const lastNote = t.notes[t.notes.length - 1];
@@ -1432,6 +1434,7 @@ const TicketCard = ({ t, clock, doneIds, request, active, open, onOpen, onRetry,
         <span className="k">{t.size}</span>
         {t.priority <= 2 && <span className="k" title={`priority ${t.priority}`}>p{t.priority}</span>}
         {t.pinned && <span className="pin" title="Pinned: the agent may not reprioritise it">⚲</span>}
+        {t.review && t.review !== clock.review && <span className="k" title={`${REVIEW_LABEL[t.review]} (the session's is ${REVIEW_LABEL[clock.review].toLowerCase()})`}>{t.review === "none" ? "no review" : t.review === "checks" ? "checks" : "review"}</span>}
         {t.agent && <span className="k" title={`Runs on its own agent: ${t.agent.driver}${t.agent.model ? ` (${t.agent.model})` : ""}`}>{t.agent.driver}</span>}
       </div>
       <div className="title">{t.title}</div>
@@ -1464,8 +1467,18 @@ const TicketCard = ({ t, clock, doneIds, request, active, open, onOpen, onRetry,
 
 // --- manual ticket ------------------------------------------------------------
 
+/** The review choices; "" is the session's setting. */
+const ReviewOptions = ({ sessionReviewer }: { sessionReviewer: boolean }) => (
+  <>
+    <option value="">Session default ({sessionReviewer ? "full review" : "checks only"})</option>
+    <option value="full">Full review: checks and the reviewer</option>
+    <option value="checks">Checks only: no reviewer</option>
+    <option value="none">No review: accepted when the implementer finishes</option>
+  </>
+);
+
 const NewTicketForm = ({ session, board, onCancel, onCreate }: { session: Session; board: Board; onCancel: () => void; onCreate: (body: Record<string, unknown>) => Promise<void> }) => {
-  const [f, setF] = useState({ title: "", kind: "feature", repo: session.repos[0]?.name ?? "", size: "S", priority: "100", deps: "", state: "ready", spec: "", acceptance: "", agentDriver: "", agentModel: "" });
+  const [f, setF] = useState({ title: "", kind: "feature", repo: session.repos[0]?.name ?? "", size: "S", priority: "100", deps: "", state: "ready", spec: "", acceptance: "", agentDriver: "", agentModel: "", review: "" });
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
   const drivers = useDrivers();
@@ -1484,6 +1497,7 @@ const NewTicketForm = ({ session, board, onCancel, onCreate }: { session: Sessio
         spec: f.spec,
         acceptance: f.acceptance.split(/\n/).map((x) => x.trim()).filter(Boolean),
         ...(f.agentDriver ? { agent: { driver: f.agentDriver, model: f.agentModel.trim() || undefined } } : {}),
+        ...(f.review ? { review: f.review } : {}),
       });
     } catch (e) {
       setErr((e as Error).message);
@@ -1515,6 +1529,12 @@ const NewTicketForm = ({ session, board, onCancel, onCreate }: { session: Sessio
             <datalist id="new-ticket-agent-models">{(drivers.find((d) => d.name === f.agentDriver)?.models ?? []).map((m) => <option key={m} value={m} />)}</datalist>
           </label>
         )}
+        <label>
+          Review <span className="help">How the ticket is judged when it is submitted</span>
+          <select value={f.review} onChange={(e) => setF({ ...f, review: e.target.value })}>
+            <ReviewOptions sessionReviewer={session.caps.reviewer} />
+          </select>
+        </label>
         <label>Priority <span className="help">lower runs first</span><input type="number" min={0} max={1000} value={f.priority} onChange={(e) => setF({ ...f, priority: e.target.value })} /></label>
         <label>Depends on <span className="help">ids, e.g. {ids.slice(-2).join(", ") || "T-1"}</span><input className="mono" value={f.deps} onChange={(e) => setF({ ...f, deps: e.target.value })} /></label>
       </div>
@@ -1972,14 +1992,14 @@ const SessionSettings = ({ session, onSave, part = "all" }: { session: Session; 
 
 // --- drawer ------------------------------------------------------------------
 
-const TicketDrawer = ({ ticket, board, clock, held, sessionId, onClose, onOpen, onAction, onShowLog }: { ticket: Ticket; board: Board; clock: TicketClock; held: boolean; sessionId: string; onClose: () => void; onOpen: (tid: string) => void; onAction: (label: string, fn: () => Promise<unknown>) => Promise<void>; onShowLog: () => void }) => {
+const TicketDrawer = ({ ticket, board, clock, held, sessionId, onClose, onOpen, onAction, onShowLog }: { ticket: Ticket; board: Board; clock: TicketView; held: boolean; sessionId: string; onClose: () => void; onOpen: (tid: string) => void; onAction: (label: string, fn: () => Promise<unknown>) => Promise<void>; onShowLog: () => void }) => {
   const [note, setNote] = useState("");
   const neededBy = board.tickets.filter((t) => t.deps.includes(ticket.id));
   const now = useNow();
   const timing = ticketTiming(ticket, clock.mode, now);
   const drawerTiming = !timing ? "" : ticket.state === "done" ? timingLine(timing) : ticket.state === "in_progress" ? `Working for ${inProgressClock(ticket, clock, now)} · ${fmtSpan(timing.total)} since the first claim` : "";
   const [edit, setEdit] = useState(false);
-  const toDraft = (t: Ticket) => ({ title: t.title, spec: t.spec, acceptance: t.acceptance.join("\n"), priority: t.priority, size: t.size, repo: t.repo ?? "", deps: t.deps.join(", "), agentDriver: t.agent?.driver ?? "", agentModel: t.agent?.model ?? "" });
+  const toDraft = (t: Ticket) => ({ title: t.title, spec: t.spec, acceptance: t.acceptance.join("\n"), priority: t.priority, size: t.size, repo: t.repo ?? "", deps: t.deps.join(", "), agentDriver: t.agent?.driver ?? "", agentModel: t.agent?.model ?? "", review: t.review ?? "" });
   const [draft, setDraft] = useState(toDraft(ticket));
   const drivers = useDrivers();
   const [reports, setReports] = useState<{ runId: number; text: string }[]>([]);
@@ -2008,6 +2028,7 @@ const TicketDrawer = ({ ticket, board, clock, held, sessionId, onClose, onOpen, 
         repo: draft.repo || null,
         deps: draft.deps.split(/[,\s]+/).filter(Boolean),
         agent: draft.agentDriver ? { driver: draft.agentDriver, model: draft.agentModel.trim() || undefined } : null,
+        review: draft.review || null,
       }),
     )
       .then(() => setEdit(false))
@@ -2046,6 +2067,7 @@ const TicketDrawer = ({ ticket, board, clock, held, sessionId, onClose, onOpen, 
           {ticket.diff && <span className="mono">+{ticket.diff.added} −{ticket.diff.removed} in {ticket.diff.files} file{ticket.diff.files === 1 ? "" : "s"}</span>}
           {ticket.cost?.usd ? <span>cost <b>{fmtUsd(ticket.cost.usd)}</b></span> : null}
           {ticket.pinned && <span className="pill sig">pinned</span>}
+          {ticket.review && <span title="Set by you for this ticket">{REVIEW_LABEL[ticket.review].toLowerCase()}</span>}
           {ticket.agent && <span title="This ticket's implementer runs on its own agent; the reviewer stays the session's">agent <b>{ticket.agent.driver}</b>{ticket.agent.model ? <span className="mono"> {ticket.agent.model}</span> : null}</span>}
         </div>
         {held && <div className="banner signal">A worker holds this ticket. Stop the run to edit or move it.</div>}
@@ -2080,6 +2102,12 @@ const TicketDrawer = ({ ticket, board, clock, held, sessionId, onClose, onOpen, 
                   <datalist id="ticket-agent-models">{(drivers.find((d) => d.name === draft.agentDriver)?.models ?? []).map((m) => <option key={m} value={m} />)}</datalist>
                 </label>
               )}
+              <label>
+                Review <span className="help">How the ticket is judged when it is submitted. Only you set this; agents' tickets take the session's.</span>
+                <select value={draft.review} onChange={(e) => setDraft({ ...draft, review: e.target.value })}>
+                  <ReviewOptions sessionReviewer={clock.review === "full"} />
+                </select>
+              </label>
             </div>
             <div className="row"><button className="pri" onClick={save}>Save</button><button className="quiet" onClick={() => { setDraft(toDraft(ticket)); setEdit(false); }}>Cancel</button></div>
           </div>

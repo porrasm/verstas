@@ -18,6 +18,8 @@ export type Ticket = {
   pinned: boolean;
   /** Runs this ticket's implementer on its own agent instead of the session's worker. */
   agent?: AgentSpec;
+  /** How the ticket is judged; absent, the session's setting (reviewer on: full, off: checks). */
+  review?: ReviewMode;
   report?: string;
   diff?: { added: number; removed: number; files: number };
   cost?: { usd?: number };
@@ -30,6 +32,9 @@ export type Ticket = {
   createdAt: string;
   updatedAt: string;
 };
+
+export type ReviewMode = "full" | "checks" | "none";
+export const REVIEW_LABEL: Record<ReviewMode, string> = { full: "Full review", checks: "Checks only", none: "No review" };
 
 /** How a ticket's time was spent, in seconds. Mirrors ticketTiming in src/core/types.ts. */
 export type TicketTiming = { working: number; judging: number; waitingOnYou: number; requeued: number; agent: number; total: number };

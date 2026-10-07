@@ -4,7 +4,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { createAgentApi, RunTokens } from "../../src/agent-api/agent-api.js";
-import { importBoard, emptyBoard, transition } from "../../src/board/board.js";
+import { importBoard, emptyBoard, getTicket, transition } from "../../src/board/board.js";
 import { saveBoard, writeJsonAtomic } from "../../src/board/store.js";
 import { SessionHub } from "../../src/sessions/hub.js";
 import { sessionPaths } from "../../src/sessions/sessions.js";
@@ -372,6 +372,21 @@ test("chores: at the sweep line a lead may not claim or hand over until it sweep
     expect((await call("POST", "/tickets/T-1/claim", {})).status).toBe(200);
   } finally {
     await new Promise((r) => server.close(r));
+    await s.close();
+  }
+});
+
+test("agents may not set a ticket's review mode: the agent API leaves it out; a user import keeps it", async () => {
+  const s = await setup();
+  try {
+    const c = await s.call("POST", "/tickets", { title: "Skip my review", kind: "bug", review: "none" });
+    expect(c.status).toBe(201);
+    const h = await s.hub.get(s.id);
+    expect(getTicket(h.board, c.json.id as string).review).toBeUndefined();
+    // An agent-side import ignores it too; yours keeps it.
+    expect(importBoard(h.board, { tickets: [{ title: "x", kind: "bug", review: "none" }] }, { by: "agent", role: "worker" }).board.tickets.at(-1)!.review).toBeUndefined();
+    expect(importBoard(h.board, { tickets: [{ title: "y", review: "checks" }] }).board.tickets.at(-1)!.review).toBe("checks");
+  } finally {
     await s.close();
   }
 });

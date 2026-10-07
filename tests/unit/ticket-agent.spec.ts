@@ -31,3 +31,9 @@ Agent: cursor
   expect(md.tickets[0]!.agent).toEqual({ driver: "codex", model: "gpt-5.1" });
   expect(md.tickets[1]!.agent).toEqual({ driver: "cursor", model: undefined });
 });
+
+test("a markdown paste carries a ticket's review mode", () => {
+  const p = parseBoardPaste("## T-1 · Fix the README typo (S)\nReview: none · Kind: chore\n\nOne word.\n\n## T-2 · Other\nReview: sloppy\n");
+  expect(p.tickets[0]!.review).toBe("none");
+  expect(p.tickets[1]!.review).toBeUndefined();
+});

@@ -1389,3 +1389,61 @@ test("lead mode: the lead hands a ticket with its own agent to the harness with 
     await fs.rm(s.root, { recursive: true, force: true });
   }
 });
+
+test("each ticket is judged by its own review mode, or the session's when it sets none", async () => {
+  // The session has the reviewer off: T-4 (no mode) gets checks only.
+  const s = await makeSession({ reviewer: false });
+  try {
+    const h0 = await s.hub.get(s.id);
+    await h0.mutate((d) => ({
+      next: {
+        board: importBoard(emptyBoard("g"), {
+          tickets: [
+            { id: "T-1", title: "Full", state: "ready", review: "full" },
+            { id: "T-2", title: "Checks", state: "ready", review: "checks" },
+            { id: "T-3", title: "None", state: "ready", review: "none" },
+            { id: "T-4", title: "Default", state: "ready" },
+          ],
+        }).board,
+      },
+    }));
+    const shell = fakeShell();
+    const worker = fakeWorker(s.hub, s.id, async (job, hub, id) => {
+      if (job.role === "implementer") await fileReport(hub, id, job.ticket!, "done");
+      if (job.role === "reviewer") return { text: "VERDICT: ok\nFine." };
+      return {};
+    });
+    const events: VerstasEvent[] = [];
+    s.hub.on("event", (e: { event: VerstasEvent }) => events.push(e.event));
+    const run = await (await manager(s, shell, worker).start(s.id)).done;
+    expect(run.ticketsDone).toBe(4);
+    // Only the full ticket had a reviewer; the none ticket ran no gates.
+    expect(worker.jobs.filter((j) => j.role === "reviewer").map((j) => j.ticket)).toEqual(["T-1"]);
+    expect(events.filter((e) => e.kind === "gate").map((e) => (e as { ticket?: string }).ticket)).toEqual(["T-1", "T-2", "T-4"]);
+    const h = await s.hub.get(s.id);
+    const doneNote = (tid: string) => getTicket(h.board, tid).notes.at(-1)!.text;
+    expect(doneNote("T-1")).toMatch(/^Reviewed ok/);
+    expect(doneNote("T-2")).toMatch(/^Accepted/);
+    expect(doneNote("T-3")).toMatch(/^Accepted without review/);
+    expect(doneNote("T-4")).toMatch(/^Accepted(?! without)/);
+    expect(shell.commits).toEqual(["T-1: Full", "T-2: Checks", "T-3: None", "T-4: Default"]);
+  } finally {
+    await fs.rm(s.root, { recursive: true, force: true });
+  }
+});
+
+test("a ticket with no review whose implementer did not finish gets another attempt, then blocks", async () => {
+  const s = await makeSession({ attempts: 2 });
+  try {
+    const h0 = await s.hub.get(s.id);
+    await h0.mutate((d) => ({ next: { board: importBoard(emptyBoard("g"), { tickets: [{ id: "T-1", title: "Docs", state: "ready", review: "none" }] }).board } }));
+    const shell = fakeShell();
+    const worker = fakeWorker(s.hub, s.id, async () => ({ ok: false, stopReason: "turn_cap" }));
+    await (await manager(s, shell, worker).start(s.id)).done;
+    const h = await s.hub.get(s.id);
+    expect(getTicket(h.board, "T-1").state).toBe("blocked");
+    expect(worker.jobs.map((j) => j.role)).toEqual(["implementer", "implementer"]);
+  } finally {
+    await fs.rm(s.root, { recursive: true, force: true });
+  }
+});
