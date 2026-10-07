@@ -88,6 +88,14 @@ when the sweep touched a protected path (contract documents such as
 with the reason, the chores go back to open, and the changes stay in the
 working tree for the lead to turn into a ticket or revert.
 
+The list has a sweep line, the `choreSweepAt` cap (default 10): with that
+many chores open, the lead sweeps before it starts another ticket, and
+`board_claim` and `board_run` are refused until the list is below the
+line again. Set it to 0 to leave the timing to the lead. Any worker,
+reviewer or lead may drop an open chore that turned out moot or not worth
+its change (`chore_drop`, with the reason); you drop and promote them on
+the session page.
+
 ```jsonc
 {
   "chores": [

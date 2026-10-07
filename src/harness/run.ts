@@ -688,8 +688,9 @@ export class RunManager implements AgentRunHooks {
         const agent = agentFor(h.session, "lead");
         const resume = Boolean(convoId) && agent.driver === "claude";
         const agentSession = agent.driver === "claude" ? (resume ? { id: convoId!, resume: true } : { id: randomUUID(), resume: false }) : undefined;
-        const freshPrompt = () => this.withNotes(h, leadPrompt(h.board, { holds, handoff: handoffNote, onlyChores }));
-        const promptText = resume ? leadContinuePrompt(h.board, holds, { onlyChores }) : await freshPrompt();
+        const sweepAt = h.session.caps.choreSweepAt;
+        const freshPrompt = () => this.withNotes(h, leadPrompt(h.board, { holds, handoff: handoffNote, onlyChores, sweepAt }));
+        const promptText = resume ? leadContinuePrompt(h.board, holds, { onlyChores, sweepAt }) : await freshPrompt();
         const leadAbort = new AbortController();
         const onStop = () => leadAbort.abort();
         ctl.signal.addEventListener("abort", onStop, { once: true });

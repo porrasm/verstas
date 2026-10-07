@@ -10,12 +10,12 @@ import { SessionHub } from "../../src/sessions/hub.js";
 import { sessionPaths } from "../../src/sessions/sessions.js";
 import { inboxSchema, sessionSchema } from "../../src/core/types.js";
 
-const setup = async (opts: { choreApproval?: boolean } = {}) => {
+const setup = async (opts: { choreApproval?: boolean; choreSweepAt?: number } = {}) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "verstas-api-"));
   const id = "2026-10-03-t";
   const paths = sessionPaths(root, id);
   await fs.mkdir(paths.workspace, { recursive: true });
-  await writeJsonAtomic(paths.session, sessionSchema.parse({ id, name: "t", goal: "g", createdAt: "2026-10-03T00:00:00.000Z", repos: [{ name: "app", sourcePath: "/x", branch: "main", runBranch: "verstas/t" }], caps: { choreApproval: opts.choreApproval ?? false } }));
+  await writeJsonAtomic(paths.session, sessionSchema.parse({ id, name: "t", goal: "g", createdAt: "2026-10-03T00:00:00.000Z", repos: [{ name: "app", sourcePath: "/x", branch: "main", runBranch: "verstas/t" }], caps: { choreApproval: opts.choreApproval ?? false, ...(opts.choreSweepAt === undefined ? {} : { choreSweepAt: opts.choreSweepAt }) } }));
   let board = importBoard(emptyBoard("g"), {
     tickets: [
       { id: "T-1", title: "Schema", state: "ready", pinned: true },
@@ -330,6 +330,46 @@ test("chores: a lead's sweep holds the chores, blocks claims, and its submit han
     expect(submitted).toEqual([[{ id: "C-1", outcome: "done", note: "ok" }, { id: "C-2", outcome: "dropped", note: "moot" }]]);
     expect((await call("GET", "/chores/sweep", undefined, lead)).json).toMatchObject({ n: 1, state: "judging" });
     expect((await call("POST", "/chores/sweep/submit", { results: [] }, lead)).status).toBe(409);
+  } finally {
+    await new Promise((r) => server.close(r));
+    await s.close();
+  }
+});
+
+test("chores: at the sweep line a lead may not claim or hand over until it sweeps or drops; anyone drops a chore with a reason", async () => {
+  const s = await setup({ choreSweepAt: 2 });
+  const hooks = { submitted() {}, handoff() {}, claimRefusal: () => undefined, delegated() {} };
+  const app = createAgentApi(s.hub, s.tokens, hooks);
+  const server = app.listen(0, "127.0.0.1");
+  const port = await new Promise<number>((r) => server.on("listening", () => r((server.address() as net.AddressInfo).port)));
+  const leadToken = s.tokens.issue({ sessionId: s.id, runId: 1, role: "lead" });
+  const call = async (method: string, p: string, body: unknown) => {
+    const res = await fetch(`http://127.0.0.1:${port}/agent${p}`, { method, headers: { authorization: `Bearer ${leadToken}`, "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
+    return { status: res.status, json: (await res.json()) as Record<string, unknown> };
+  };
+  try {
+    await s.call("POST", "/chores", { text: "One" });
+    expect((await s.call("GET", "/chores")).json).toMatchObject({ open: 1, sweepAt: 2 });
+    // Below the line: the claim goes through (the ticket is put back by hand for the next step).
+    const first = await call("POST", "/tickets/T-1/claim", {});
+    expect(first.status).toBe(200);
+    const h = await s.hub.get(s.id);
+    await h.mutate((d) => ({ next: { board: transition(d.board, "T-1", "ready", { by: "user", text: "back" }) } }));
+    await s.call("POST", "/chores", { text: "Two" });
+    const refused = await call("POST", "/tickets/T-1/claim", {});
+    expect(refused.status).toBe(403);
+    expect(refused.json.error).toContain("2 chores are open and the session sweeps at 2");
+    // A worker drops one with a reason; the reason and the role stay with the chore.
+    const drop = await s.call("POST", "/chores/C-2/drop", { reason: "fixed by T-2 already" });
+    expect(drop.json).toMatchObject({ ok: true, id: "C-2", state: "dropped" });
+    const after = (await s.call("GET", "/chores")).json as { open: number; chores: { id: string; state: string; outcome?: string }[] };
+    expect(after.open).toBe(1);
+    expect(after.chores.find((c) => c.id === "C-2")).toMatchObject({ state: "dropped", outcome: "Dropped by the worker on T-2: fixed by T-2 already" });
+    expect((await s.call("POST", "/chores/C-2/drop", { reason: "again" })).status).toBe(403);
+    expect((await s.call("POST", "/chores/C-9/drop", { reason: "x" })).status).toBe(404);
+    expect((await s.call("POST", "/chores/C-1/drop", {})).status).toBe(400);
+    // Below the line again: the claim goes through.
+    expect((await call("POST", "/tickets/T-1/claim", {})).status).toBe(200);
   } finally {
     await new Promise((r) => server.close(r));
     await s.close();

@@ -1802,6 +1802,7 @@ const CAP_HELP: Record<string, string> = {
   leadTurns: "Model turns per lead; then a fresh one takes over",
   sweepMaxLines: "A chore sweep's commit may change at most this many lines; over it the sweep is refused",
   sweepMaxFiles: "Files a chore sweep's commit may touch",
+  choreSweepAt: "Open chores at which the lead must sweep before its next ticket (0: never forced)",
 };
 
 /**
@@ -1825,6 +1826,7 @@ const SessionSettings = ({ session, onSave, part = "all" }: { session: Session; 
     leadTurns: String(session.caps.leadTurns ?? 600),
     sweepMaxLines: String(session.caps.sweepMaxLines ?? 400),
     sweepMaxFiles: String(session.caps.sweepMaxFiles ?? 15),
+    choreSweepAt: String(session.caps.choreSweepAt ?? 10),
     choreApproval: session.caps.choreApproval ?? false,
     memory: session.limits.memory,
     cpus: String(session.limits.cpus),
@@ -1852,7 +1854,7 @@ const SessionSettings = ({ session, onSave, part = "all" }: { session: Session; 
         ...(part !== "caps" ? { allowlist: f.allow.split(/\n/).map((s) => s.trim()).filter(Boolean), packs: f.packs } : {}),
         ...(part !== "network"
           ? {
-              caps: { workerMinutes: Number(f.workerMinutes), workerTurns: Number(f.workerTurns), budgetUsd: Number(f.budgetUsd), runTickets: Number(f.runTickets), ticketAttempts: Number(f.ticketAttempts), reviewer: f.reviewer, resumeWorker: f.resumeWorker, leadMinutes: Number(f.leadMinutes), leadTurns: Number(f.leadTurns), sweepMaxLines: Number(f.sweepMaxLines), sweepMaxFiles: Number(f.sweepMaxFiles), choreApproval: f.choreApproval },
+              caps: { workerMinutes: Number(f.workerMinutes), workerTurns: Number(f.workerTurns), budgetUsd: Number(f.budgetUsd), runTickets: Number(f.runTickets), ticketAttempts: Number(f.ticketAttempts), reviewer: f.reviewer, resumeWorker: f.resumeWorker, leadMinutes: Number(f.leadMinutes), leadTurns: Number(f.leadTurns), sweepMaxLines: Number(f.sweepMaxLines), sweepMaxFiles: Number(f.sweepMaxFiles), choreApproval: f.choreApproval, choreSweepAt: Number(f.choreSweepAt) },
               limits: { memory: f.memory, cpus: Number(f.cpus) },
               mode: f.mode,
             }
@@ -1899,11 +1901,11 @@ const SessionSettings = ({ session, onSave, part = "all" }: { session: Session; 
       {part !== "network" && (
         <div className="two">
           {f.mode === "lead" &&
-            (["leadMinutes", "leadTurns", "sweepMaxLines", "sweepMaxFiles"] as const).map((k) => (
+            (["leadMinutes", "leadTurns", "sweepMaxLines", "sweepMaxFiles", "choreSweepAt"] as const).map((k) => (
               <label key={k}>
-                {{ leadMinutes: "Lead minutes", leadTurns: "Lead turns", sweepMaxLines: "Chore sweep: max lines", sweepMaxFiles: "Chore sweep: max files" }[k]}
+                {{ leadMinutes: "Lead minutes", leadTurns: "Lead turns", sweepMaxLines: "Chore sweep: max lines", sweepMaxFiles: "Chore sweep: max files", choreSweepAt: "Chores: sweep at" }[k]}
                 <span className="help">{CAP_HELP[k]}</span>
-                <input type="number" min={1} value={f[k]} onChange={(e) => set(k, e.target.value)} />
+                <input type="number" min={k === "choreSweepAt" ? 0 : 1} value={f[k]} onChange={(e) => set(k, e.target.value)} />
               </label>
             ))}
           {(["workerMinutes", "workerTurns", "budgetUsd", "runTickets", "ticketAttempts"] as const).map((k) => (

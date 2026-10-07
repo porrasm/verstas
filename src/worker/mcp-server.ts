@@ -236,10 +236,17 @@ export const TOOLS: Tool[] = [
     call: (a) => api("GET", `/chores${a.state ? `?state=${encodeURIComponent(String(a.state))}` : ""}`),
   },
   {
+    name: "chore_drop",
+    description:
+      "Drop an open chore that is no longer worth doing: it was fixed along the way, the code it names is gone, or the change would not be an improvement. Any role may drop; give the reason in one line, it stays with the chore. A chore in a lead's current sweep is settled with chores_submit instead.",
+    inputSchema: obj({ id: str("Chore id, e.g. C-3", 20), reason: str("Why it is dropped, one line", 2000) }, ["id", "reason"]),
+    call: (a) => api("POST", `/chores/${encodeURIComponent(String(a.id))}/drop`, { reason: a.reason }),
+  },
+  {
     name: "chores_sweep",
     leadOnly: true,
     description:
-      "Take a batch of open chores to do in one go (you must hold no ticket): the given ids, or the oldest ones up to max. Returns the chores and the size limits of a sweep. Do them, run the repository's own checks yourself, then chores_submit. The batch becomes one commit without a reviewer, so stay within the limits and never touch the project's contract documents or fixtures from a sweep; make that a ticket instead.",
+      "Take a batch of open chores to do in one go (you must hold no ticket): the given ids, or the oldest ones up to max. When the list is at the session's sweep line, board_claim and board_run are refused until a sweep (or chore_drop) brings it below. Returns the chores and the size limits of a sweep. Do them, run the repository's own checks yourself, then chores_submit. The batch becomes one commit without a reviewer, so stay within the limits and never touch the project's contract documents or fixtures from a sweep; make that a ticket instead.",
     inputSchema: obj({ ids: { type: "array", items: str("Chore id, e.g. C-3", 20), maxItems: 50 }, max: { type: "integer", minimum: 1, maximum: 50 } }, []),
     call: (a) => api("POST", `/chores/sweep`, { ids: a.ids, max: a.max }),
   },

@@ -15,11 +15,12 @@ import {
   ticketIdSchema,
   ticketImportSchema,
   type AgentRequest,
+  type Board,
   type Inbox,
   type SweepResult,
   type Ticket,
 } from "../core/types.js";
-import { addChore, addNote, agentAddDep, agentSetPriority, beginSweep, BoardError, canStart, getTicket, importBoard, replaceTicket, sweepInFlight, sweepToJudging, transition, validateRepos, type AgentRole } from "../board/board.js";
+import { addChore, addNote, agentAddDep, agentSetPriority, beginSweep, BoardError, canStart, getTicket, importBoard, openChores, replaceTicket, setChoreState, sweepInFlight, sweepToJudging, transition, validateRepos, type AgentRole } from "../board/board.js";
 import type { SessionHub } from "../sessions/hub.js";
 
 /**
@@ -51,6 +52,13 @@ export type AgentRunHooks = {
   sweepStarted?(run: RunToken, ids: string[]): void;
   /** The lead submitted its sweep with one result per chore; the run judges it (checks, size, commit) and settles the chores. */
   sweepSubmitted?(run: RunToken, results: SweepResult[]): void;
+};
+
+/** The chore list at the session's sweep line: the lead sweeps (or drops) before it starts another ticket. */
+const choreBacklogRefusal = (d: { session: { caps: { choreSweepAt: number } }; board: Board }): void => {
+  const at = d.session.caps.choreSweepAt;
+  const n = openChores(d.board).length;
+  if (at > 0 && n >= at) throw new BoardError(`${n} chores are open and the session sweeps at ${at}: take a batch with chores_sweep (and chores_submit), or chore_drop what is not worth doing, before the next ticket`, "forbidden_move");
 };
 
 /** States in which a ticket still belongs to the lead that claimed it. */
@@ -337,7 +345,7 @@ export const createAgentApi = (hub: SessionHub, tokens: RunTokens, hooks?: Agent
       const h = await hub.get(req.run.sessionId);
       const state = typeof req.query.state === "string" ? choreStateSchema.parse(req.query.state) : undefined;
       const chores = h.board.chores.filter((c) => !state || c.state === state).map(({ id, text, where, repo, state: st, by, fromTicket, outcome, promotedTo }) => ({ id, text, where, repo, state: st, by, fromTicket, outcome, promotedTo }));
-      res.json({ chores, sweep: h.board.sweep ?? null, approvalRequired: h.session.caps.choreApproval });
+      res.json({ chores, sweep: h.board.sweep ?? null, approvalRequired: h.session.caps.choreApproval, sweepAt: h.session.caps.choreSweepAt || null, open: openChores(h.board).length });
     }),
   );
 
@@ -352,6 +360,18 @@ export const createAgentApi = (hub: SessionHub, tokens: RunTokens, hooks?: Agent
         return { next: { board: r.board }, result: { id: r.id, state: d.session.caps.choreApproval ? "proposed" : "open" } };
       });
       res.status(201).json({ ok: true, ...out, note: out.state === "proposed" ? "Kept for the user's approval; a sweep takes it once approved." : "On the chore list; a lead sweeps it in a batch." });
+    }),
+  );
+
+  /** Anyone may drop an open chore that is moot or not worth doing; the reason stays with it. A chore in a sweep is settled by chores_submit. */
+  r.post(
+    "/chores/:id/drop",
+    wrap(async (req, res) => {
+      const id = choreIdSchema.parse(req.params.id);
+      const { reason } = z.object({ reason: z.string().min(1).max(2000) }).parse(req.body);
+      const h = await hub.get(req.run.sessionId);
+      await h.mutate((d) => ({ next: { board: setChoreState(d.board, id, "dropped", `Dropped by the ${req.run.role}${req.run.currentTicket ? ` on ${req.run.currentTicket}` : ""}: ${reason.trim()}`) } }));
+      res.json({ ok: true, id, state: "dropped" });
     }),
   );
 
@@ -436,6 +456,7 @@ export const createAgentApi = (hub: SessionHub, tokens: RunTokens, hooks?: Agent
         if (held && held.id !== id) throw new BoardError(`You hold ${held.id} (${held.state}); submit it, or note why it is stuck, before claiming another`, "forbidden_move");
         const sweeping = sweepInFlight(d.board);
         if (sweeping) throw new BoardError(`Sweep ${sweeping.n} is ${sweeping.state}; finish it with chores_submit before claiming a ticket`, "forbidden_move");
+        if (!held) choreBacklogRefusal(d);
         const t = getTicket(d.board, id);
         if (t.state !== "ready") throw new BoardError(`${id} is ${t.state}, not ready`, "illegal_transition");
         if (!canStart(d.board, t)) {
@@ -473,6 +494,7 @@ export const createAgentApi = (hub: SessionHub, tokens: RunTokens, hooks?: Agent
         if (held) throw new BoardError(`You hold ${held.id} (${held.state}); the other agent needs the working tree to itself, so submit first`, "forbidden_move");
         const sweeping = sweepInFlight(d.board);
         if (sweeping) throw new BoardError(`Sweep ${sweeping.n} is ${sweeping.state}; finish it with chores_submit first`, "forbidden_move");
+        choreBacklogRefusal(d);
         const t = getTicket(d.board, id);
         if (!t.agent) throw new BoardError(`${id} names no agent of its own; claim it and do it yourself`, "forbidden_move");
         if (t.state !== "ready") throw new BoardError(`${id} is ${t.state}, not ready`, "illegal_transition");

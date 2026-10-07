@@ -402,6 +402,13 @@ export const capsSchema = z.object({
   sweepMaxFiles: z.number().int().min(1).max(1000).default(15),
   /** Chores filed by agents wait for your approval before a sweep may take them. */
   choreApproval: z.boolean().default(false),
+  /**
+   * With this many chores open, the lead sweeps before it starts the next
+   * ticket: claims and hand-overs are refused until the list is below the
+   * line again (sweep a batch, or drop what is not worth doing). 0 turns the
+   * line off; the lead then sweeps when it sees fit.
+   */
+  choreSweepAt: z.number().int().min(0).max(1000).default(10),
 });
 export type Caps = z.infer<typeof capsSchema>;
 

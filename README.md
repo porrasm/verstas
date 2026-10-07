@@ -136,8 +136,11 @@ Then, in the web app:
    `~/.verstas/prompts/lead.md`; the next lead reads it.
    **Chores** (both modes keep the list, a lead works it): small fixes
    that are not worth a ticket. Reviewers and workers file them instead of
-   follow-up tickets; a lead sweeps a batch when the board runs dry or the
-   list grows, and Verstas commits the batch as one commit after the
+   follow-up tickets; a lead sweeps a batch when the board runs dry, when
+   it is in those files anyway, and always once the list reaches the
+   session's sweep line (`choreSweepAt`, default 10: claims are refused
+   until it sweeps). Anyone drops a chore that is not worth doing
+   (`chore_drop`). Verstas commits the batch as one commit after the
    checks and a size check, with no reviewer (`docs/BOARD.md`, Chores).
    **A ticket's own agent**: a ticket may name a driver and model of its
    own; its implementer is then a fresh worker on that agent, judged by the
