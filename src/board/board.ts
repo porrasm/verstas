@@ -77,11 +77,29 @@ export const transition = (
   const at = now();
   const updated: Ticket = {
     ...t,
+    ...withStateClock(t, to, at),
     state: to,
     updatedAt: at,
     notes: note ? [...t.notes, { at, by: note.by, text: note.text }] : t.notes,
   };
   return replaceTicket(board, updated);
+};
+
+/**
+ * The timing fields after a move from the ticket's state to `to` at `at`:
+ * the visit that ends is added to timeIn, the clock restarts, and the first
+ * claim is remembered. A ticket from before timing started its clock now.
+ */
+export const withStateClock = (t: Ticket, to: TicketState, at: string): Pick<Ticket, "stateSince" | "timeIn" | "firstClaimAt" | "readyBeforeClaim"> => {
+  const timeIn = { ...t.timeIn };
+  if (t.stateSince) timeIn[t.state] = (timeIn[t.state] ?? 0) + Math.max(0, (Date.parse(at) - Date.parse(t.stateSince)) / 1000);
+  const firstClaim = !t.firstClaimAt && to === "in_progress";
+  return {
+    stateSince: at,
+    timeIn: t.stateSince ? timeIn : t.timeIn,
+    firstClaimAt: firstClaim ? at : t.firstClaimAt,
+    readyBeforeClaim: firstClaim ? (timeIn.ready ?? 0) : t.readyBeforeClaim,
+  };
 };
 
 export const replaceTicket = (board: Board, ticket: Ticket): Board => ({
@@ -278,6 +296,7 @@ export const importBoard = (
         acceptance: inc.acceptance ?? existing.acceptance,
         pinned: inc.pinned ?? existing.pinned,
         agent: inc.agent ?? existing.agent,
+        ...(canSetState && inc.state && inc.state !== existing.state ? withStateClock(existing, inc.state, at) : {}),
         state: canSetState && inc.state ? inc.state : existing.state,
         notes: [
           ...existing.notes,
@@ -307,6 +326,7 @@ export const importBoard = (
         attempts: 0,
         pinned: inc.pinned ?? false,
         agent: inc.agent,
+        stateSince: at,
         createdAt: at,
         updatedAt: at,
       };

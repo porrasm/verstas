@@ -102,10 +102,51 @@ export const ticketSchema = z.object({
   report: z.string().max(20_000).optional(),
   diff: diffStatSchema.optional(),
   cost: costSchema.optional(),
+  /**
+   * Timing, recorded by transition() and the run (all optional: boards from
+   * before this have none and show none). `stateSince` is the last state
+   * change; `timeIn` sums the seconds of every visit to each state;
+   * `agentSeconds` sums the ticket's workers (implementer and reviewer);
+   * `firstClaimAt` is the first move into in_progress.
+   */
+  stateSince: z.string().optional(),
+  timeIn: z.partialRecord(ticketStateSchema, z.number().nonnegative()).optional(),
+  agentSeconds: z.number().nonnegative().optional(),
+  firstClaimAt: z.string().optional(),
+  /** Seconds in ready before the first claim (queueing), so the requeued time can leave it out. */
+  readyBeforeClaim: z.number().nonnegative().optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
 export type Ticket = z.infer<typeof ticketSchema>;
+
+/** How a ticket's time was spent, in seconds; see ticketTiming. */
+export type TicketTiming = { working: number; judging: number; waitingOnYou: number; requeued: number; agent: number; total: number };
+
+const secondsBetween = (from: string, to: string): number => Math.max(0, (Date.parse(to) - Date.parse(from)) / 1000);
+
+/**
+ * A ticket's time, split by what it waited on. Null for a ticket that was
+ * never claimed or carries no timing (an old board). `total` runs from the
+ * first claim to done, or to `at` while the ticket is open. A loop run's
+ * agent time is what its workers reported; a lead does not report per
+ * ticket, so in lead mode the lead's share is the time in in_progress, plus
+ * the reviewer's (and an own-agent implementer's) reported seconds.
+ */
+export const ticketTiming = (t: Ticket, mode: "loop" | "lead", at: string = now()): TicketTiming | null => {
+  if (!t.firstClaimAt || !t.stateSince) return null;
+  // The visit in progress counts too, up to `at`; a done ticket's clock stopped when it got there.
+  const timeIn: Partial<Record<TicketState, number>> = { ...t.timeIn };
+  if (t.state !== "done") timeIn[t.state] = (timeIn[t.state] ?? 0) + secondsBetween(t.stateSince, at);
+  const working = timeIn.in_progress ?? 0;
+  const judging = timeIn.review ?? 0;
+  const waitingOnYou = timeIn.waiting ?? 0;
+  // Time in ready before the first claim is queueing, not requeueing: `ready` counts only from the first claim on.
+  const requeued = Math.max(0, (timeIn.ready ?? 0) - (t.readyBeforeClaim ?? 0));
+  const agent = mode === "lead" ? working + (t.agentSeconds ?? 0) : (t.agentSeconds ?? 0);
+  const total = secondsBetween(t.firstClaimAt, t.state === "done" ? t.stateSince : at);
+  return { working, judging, waitingOnYou, requeued, agent, total };
+};
 
 // --- Chores ----------------------------------------------------------------
 

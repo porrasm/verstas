@@ -147,6 +147,9 @@ test("a ticket that passes gates and review is committed and done; dependents fo
     const h = await s.hub.get(s.id);
     expect(h.board.tickets.map((t) => t.state)).toEqual(["done", "done"]);
     expect(h.board.tickets[0]!.diff).toEqual({ added: 3, removed: 1, files: 1 });
+    // Each ticket's implementer and reviewer reported one second each; the clock ran from the claim.
+    expect(h.board.tickets.map((t) => t.agentSeconds)).toEqual([2, 2]);
+    expect(h.board.tickets.every((t) => t.firstClaimAt && t.stateSince && t.timeIn?.in_progress !== undefined)).toBe(true);
     expect(shell.commits).toEqual(["T-1: Schema", "T-2: Engine"]);
     expect(worker.jobs.map((j) => `${j.role}:${j.ticket}`)).toEqual(["implementer:T-1", "reviewer:T-1", "implementer:T-2", "reviewer:T-2"]);
     expect(events.filter((e) => e.kind === "gate")).toHaveLength(2);

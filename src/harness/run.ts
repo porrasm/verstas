@@ -1081,10 +1081,21 @@ export class RunManager implements AgentRunHooks {
         done = { ...done, agentSession: fresh.agentSession!.id };
       } else if (spec.agentSession) done = { ...done, agentSession: spec.agentSession.id };
       await log(done);
+      await this.addAgentSeconds(h, done);
       return done;
     } finally {
       this.deps.tokens.revoke(token);
     }
+  }
+
+  /** A ticket's worker (implementer or reviewer, never the lead, which spans tickets) adds its time to the ticket's agentSeconds. */
+  private async addAgentSeconds(h: SessionHandle, done: WorkerDone): Promise<void> {
+    if (!done.ticket || done.role === "lead" || !(done.seconds > 0)) return;
+    const id = done.ticket;
+    await h.mutate((docs) => {
+      const t = docs.board.tickets.find((x) => x.id === id);
+      return t ? { next: { board: replaceTicket(docs.board, { ...t, agentSeconds: (t.agentSeconds ?? 0) + done.seconds }) } } : {};
+    });
   }
 
   /** A file under notes/, capped so a runaway note cannot crowd out the ticket. */

@@ -9,10 +9,12 @@ import {
   fmtBytes,
   fmtDateTime,
   fmtDuration,
+  fmtSpan,
   fmtTime,
   fmtUsd,
   isInitialized,
   STATE_LABEL,
+  ticketTiming,
   upload,
   useLive,
   useNow,
@@ -258,6 +260,8 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
   const counts: Record<string, number> = {};
   for (const t of board.tickets) counts[t.state] = (counts[t.state] ?? 0) + 1;
   const done = counts.done ?? 0;
+  const timings = board.tickets.map((t) => ticketTiming(t, session.mode ?? "loop", now)).filter((x) => x !== null);
+  const waitingOnYou = timings.length ? timings.reduce((sum, x) => sum + x.waitingOnYou, 0) : null;
   const status = sessionStatus(session, run, active);
   const sb = sandboxLabel(sandbox);
   const lastActivity = lastEventAt && lastEventAt > (totals?.lastActivityAt ?? "") ? lastEventAt : totals?.lastActivityAt;
@@ -328,6 +332,7 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
         </div>
         <div className="facts">
           {initialized && <span><b>{done}/{board.tickets.length}</b> done</span>}
+          {initialized && waitingOnYou !== null && <span title="Time tickets spent waiting for your answers, summed over the board: how unattended the loop is">waiting on you <b>{fmtSpan(waitingOnYou)}</b></span>}
           {initialized && <span><b>{fmtUsd(totals?.usd ?? 0)}</b> spent{totals && totals.runs > 1 ? ` over ${totals.runs} runs` : ""}{active && run?.cost.usd ? ` · ${fmtUsd(run.cost.usd)} this run` : ""}</span>}
           {run && active && <span>running for <b>{fmtDuration(run.startedAt, undefined, now)}</b></span>}
           {initialized && lastActivity && !active && <span>last activity <b title={fmtDateTime(lastActivity)}>{fmtAgo(lastActivity, now)}</b></span>}
@@ -411,6 +416,7 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
         <TicketDrawer
           ticket={ticket}
           board={board}
+          clock={ticketClock(session)}
           held={active && run?.currentTicket === ticket.id}
           sessionId={id}
           onClose={() => openTicket(null)}
@@ -498,7 +504,7 @@ const RunBody = (p: BodyProps) => {
             </div>
           </div>
         ) : (
-          <BoardView board={board} inbox={inbox} run={run} active={active} openId={p.ticketId} onOpen={p.openTicket} onRetry={onRetry} onApprove={onApprove} onShowLog={p.setLogTicket} />
+          <BoardView board={board} inbox={inbox} run={run} active={active} clock={ticketClock(session)} openId={p.ticketId} onOpen={p.openTicket} onRetry={onRetry} onApprove={onApprove} onShowLog={p.setLogTicket} />
         )}
         <SessionLog {...p} />
       </div>
@@ -553,7 +559,7 @@ const PlanBody = (p: BodyProps) => {
                   <p>Paste a board or write tickets by hand. Or initialize first and let the planner draft them: it reads the repositories, so it needs the box.</p>
                 </div>
               ) : (
-                <BoardView board={board} inbox={inbox} run={run} active={active} openId={p.ticketId} onOpen={p.openTicket} onRetry={onRetry} onApprove={onApprove} onShowLog={p.setLogTicket} />
+                <BoardView board={board} inbox={inbox} run={run} active={active} clock={ticketClock(session)} openId={p.ticketId} onOpen={p.openTicket} onRetry={onRetry} onApprove={onApprove} onShowLog={p.setLogTicket} />
               )}
             </section>
 
@@ -1372,7 +1378,21 @@ const RequestItem = ({ r, onDecide, onOpenTicket }: { r: AgentRequest; onDecide:
 
 // --- board ------------------------------------------------------------------
 
-const BoardView = ({ board, inbox, run, active, openId, onOpen, onRetry, onApprove, onShowLog }: { board: Board; inbox: Inbox; run?: Run; active: boolean; openId: string | null; onOpen: (tid: string) => void; onRetry: (tid: string) => void; onApprove: (tid: string) => void; onShowLog: (tid: string) => void }) => {
+/** "12m / 25m" against the worker cap, or the elapsed time alone in lead mode. Counted from the last state change, in the browser. */
+const inProgressClock = (t: Ticket, clock: TicketClock, now: number): string => {
+  const secs = t.stateSince ? Math.max(0, (now - new Date(t.stateSince).getTime()) / 1000) : 0;
+  return clock.capMinutes ? `${fmtSpan(secs)} / ${clock.capMinutes}m` : fmtSpan(secs);
+};
+
+/** "Took 42m · agent 31m · judging 3m · waiting on you 6m · requeued 2m"; the parts that are zero are left out. */
+const timingLine = (x: { total: number; agent: number; judging: number; waitingOnYou: number; requeued: number }): string =>
+  [`Took ${fmtSpan(x.total)}`, `agent ${fmtSpan(x.agent)}`, x.judging >= 1 ? `judging ${fmtSpan(x.judging)}` : "", x.waitingOnYou >= 1 ? `waiting on you ${fmtSpan(x.waitingOnYou)}` : "", x.requeued >= 1 ? `requeued ${fmtSpan(x.requeued)}` : ""].filter(Boolean).join(" · ");
+
+/** What a ticket's timer is measured against: in loop mode the worker cap applies to one ticket; a lead's cap spans tickets, so there is none. */
+type TicketClock = { mode: "loop" | "lead"; capMinutes?: number };
+const ticketClock = (session: Session): TicketClock => (session.mode === "lead" ? { mode: "lead" } : { mode: "loop", capMinutes: session.caps.workerMinutes });
+
+const BoardView = ({ board, inbox, run, active, clock, openId, onOpen, onRetry, onApprove, onShowLog }: { board: Board; inbox: Inbox; run?: Run; active: boolean; clock: TicketClock; openId: string | null; onOpen: (tid: string) => void; onRetry: (tid: string) => void; onApprove: (tid: string) => void; onShowLog: (tid: string) => void }) => {
   const doneIds = new Set(board.tickets.filter((t) => t.state === "done").map((t) => t.id));
   return (
     <div className="board-wrap">
@@ -1387,7 +1407,7 @@ const BoardView = ({ board, inbox, run, active, openId, onOpen, onRetry, onAppro
               <div className="items">
                 {items.length === 0 && <div className="empty">—</div>}
                 {items.map((t) => (
-                  <TicketCard key={t.id} t={t} doneIds={doneIds} request={t.state === "waiting" ? inbox.requests.find((r) => r.ticketId === t.id && r.state === "open") : undefined} active={Boolean(active && run?.currentTicket === t.id)} open={openId === t.id} onOpen={() => onOpen(t.id)} onRetry={() => onRetry(t.id)} onApprove={() => onApprove(t.id)} onShowLog={() => onShowLog(t.id)} />
+                  <TicketCard key={t.id} t={t} clock={clock} doneIds={doneIds} request={t.state === "waiting" ? inbox.requests.find((r) => r.ticketId === t.id && r.state === "open") : undefined} active={Boolean(active && run?.currentTicket === t.id)} open={openId === t.id} onOpen={() => onOpen(t.id)} onRetry={() => onRetry(t.id)} onApprove={() => onApprove(t.id)} onShowLog={() => onShowLog(t.id)} />
                 ))}
               </div>
             </div>
@@ -1398,10 +1418,12 @@ const BoardView = ({ board, inbox, run, active, openId, onOpen, onRetry, onAppro
   );
 };
 
-const TicketCard = ({ t, doneIds, request, active, open, onOpen, onRetry, onApprove, onShowLog }: { t: Ticket; doneIds: Set<string>; request?: AgentRequest; active: boolean; open: boolean; onOpen: () => void; onRetry: () => void; onApprove: () => void; onShowLog: () => void }) => {
+const TicketCard = ({ t, clock, doneIds, request, active, open, onOpen, onRetry, onApprove, onShowLog }: { t: Ticket; clock: TicketClock; doneIds: Set<string>; request?: AgentRequest; active: boolean; open: boolean; onOpen: () => void; onRetry: () => void; onApprove: () => void; onShowLog: () => void }) => {
   const depsDone = t.deps.filter((d) => doneIds.has(d)).length;
   const depsOk = depsDone === t.deps.length;
   const lastNote = t.notes[t.notes.length - 1];
+  const now = useNow();
+  const timing = t.state === "done" || t.state === "in_progress" ? ticketTiming(t, clock.mode, now) : null;
   return (
     <button className={`tk ${t.state} ${active ? "active" : ""} ${open ? "open" : ""}`} onClick={onOpen} aria-label={`${t.id} ${t.title}`}>
       <div className="id">
@@ -1413,9 +1435,11 @@ const TicketCard = ({ t, doneIds, request, active, open, onOpen, onRetry, onAppr
         {t.agent && <span className="k" title={`Runs on its own agent: ${t.agent.driver}${t.agent.model ? ` (${t.agent.model})` : ""}`}>{t.agent.driver}</span>}
       </div>
       <div className="title">{t.title}</div>
-      {(t.deps.length > 0 || t.attempts > 0 || t.diff || active) && (
+      {(t.deps.length > 0 || t.attempts > 0 || t.diff || active || timing) && (
         <div className="meta">
           {active && <span className="pill sig">working</span>}
+          {timing && t.state === "in_progress" && <span className="pill quiet mono" title="Time on this ticket since it was claimed">{inProgressClock(t, clock, now)}</span>}
+          {timing && t.state === "done" && <span className="pill quiet mono" title={timingLine(timing)}>{fmtSpan(timing.total)}</span>}
           {t.deps.length > 0 && <span className={`pill ${depsOk ? "quiet" : t.state === "ready" ? "sig" : "quiet"}`} title={`Depends on ${t.deps.join(", ")}`}>deps {depsDone}/{t.deps.length}</span>}
           {t.attempts > 1 && <span className="pill quiet">attempt {t.attempts}</span>}
           {t.diff && <span className="pill quiet mono">+{t.diff.added} −{t.diff.removed}</span>}
@@ -1948,9 +1972,12 @@ const SessionSettings = ({ session, onSave, part = "all" }: { session: Session; 
 
 // --- drawer ------------------------------------------------------------------
 
-const TicketDrawer = ({ ticket, board, held, sessionId, onClose, onOpen, onAction, onShowLog }: { ticket: Ticket; board: Board; held: boolean; sessionId: string; onClose: () => void; onOpen: (tid: string) => void; onAction: (label: string, fn: () => Promise<unknown>) => Promise<void>; onShowLog: () => void }) => {
+const TicketDrawer = ({ ticket, board, clock, held, sessionId, onClose, onOpen, onAction, onShowLog }: { ticket: Ticket; board: Board; clock: TicketClock; held: boolean; sessionId: string; onClose: () => void; onOpen: (tid: string) => void; onAction: (label: string, fn: () => Promise<unknown>) => Promise<void>; onShowLog: () => void }) => {
   const [note, setNote] = useState("");
   const neededBy = board.tickets.filter((t) => t.deps.includes(ticket.id));
+  const now = useNow();
+  const timing = ticketTiming(ticket, clock.mode, now);
+  const drawerTiming = !timing ? "" : ticket.state === "done" ? timingLine(timing) : ticket.state === "in_progress" ? `Working for ${inProgressClock(ticket, clock, now)} · ${fmtSpan(timing.total)} since the first claim` : "";
   const [edit, setEdit] = useState(false);
   const toDraft = (t: Ticket) => ({ title: t.title, spec: t.spec, acceptance: t.acceptance.join("\n"), priority: t.priority, size: t.size, repo: t.repo ?? "", deps: t.deps.join(", "), agentDriver: t.agent?.driver ?? "", agentModel: t.agent?.model ?? "" });
   const [draft, setDraft] = useState(toDraft(ticket));
@@ -1995,6 +2022,7 @@ const TicketDrawer = ({ ticket, board, held, sessionId, onClose, onOpen, onActio
           <span className={`pill ${tone}`}>{STATE_LABEL[ticket.state] ?? ticket.state}</span>
           <button className="quiet" onClick={onClose} title="Close (Esc)">✕</button>
         </div>
+        {drawerTiming && <div className="facts mono" title="From the first claim; agent time in lead mode is the lead's time on the ticket plus the reviewer's">{drawerTiming}</div>}
         <div className="facts">
           <span>{ticket.kind}</span>
           <span>size <b>{ticket.size}</b></span>

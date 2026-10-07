@@ -21,8 +21,40 @@ export type Ticket = {
   report?: string;
   diff?: { added: number; removed: number; files: number };
   cost?: { usd?: number };
+  /** Timing (absent on tickets from before it was recorded): see ticketTiming. */
+  stateSince?: string;
+  timeIn?: Partial<Record<string, number>>;
+  agentSeconds?: number;
+  firstClaimAt?: string;
+  readyBeforeClaim?: number;
   createdAt: string;
   updatedAt: string;
+};
+
+/** How a ticket's time was spent, in seconds. Mirrors ticketTiming in src/core/types.ts. */
+export type TicketTiming = { working: number; judging: number; waitingOnYou: number; requeued: number; agent: number; total: number };
+export const ticketTiming = (t: Ticket, mode: "loop" | "lead", now = Date.now()): TicketTiming | null => {
+  if (!t.firstClaimAt || !t.stateSince) return null;
+  const since = new Date(t.stateSince).getTime();
+  const timeIn: Partial<Record<string, number>> = { ...t.timeIn };
+  if (t.state !== "done") timeIn[t.state] = (timeIn[t.state] ?? 0) + Math.max(0, (now - since) / 1000);
+  const working = timeIn.in_progress ?? 0;
+  return {
+    working,
+    judging: timeIn.review ?? 0,
+    waitingOnYou: timeIn.waiting ?? 0,
+    requeued: Math.max(0, (timeIn.ready ?? 0) - (t.readyBeforeClaim ?? 0)),
+    agent: mode === "lead" ? working + (t.agentSeconds ?? 0) : (t.agentSeconds ?? 0),
+    total: Math.max(0, ((t.state === "done" ? since : now) - new Date(t.firstClaimAt).getTime()) / 1000),
+  };
+};
+/** Seconds, compact: "40s", "12m", "2h 05m". */
+export const fmtSpan = (secs: number): string => {
+  const s = Math.max(0, Math.round(secs));
+  if (s < 60) return `${s}s`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m}m`;
+  return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, "0")}m`;
 };
 export type Chore = { id: string; text: string; where?: string; repo?: string; state: "proposed" | "open" | "sweeping" | "done" | "dropped" | "promoted"; by: string; fromTicket?: string; outcome?: string; promotedTo?: string; sweep?: number; createdAt: string; updatedAt: string };
 export type Sweep = { n: number; ids: string[]; state: "working" | "judging" | "accepted" | "refused"; startedAt: string; endedAt?: string; note?: string; diff?: { added: number; removed: number; files: number } };

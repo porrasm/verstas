@@ -71,6 +71,21 @@ those two moves itself through the agent API: `board_claim` (`ready` to
 the ticket and moves it to `done`, back to `ready` or to `blocked`. You move
 between `backlog`, `ready`, `blocked`, and reopen.
 
+### Timing
+
+Every state change records the ticket's clock: `stateSince` (the last
+change), `timeIn` (seconds per state, summed over every visit),
+`firstClaimAt` (the first move to `in_progress`) and `readyBeforeClaim`
+(queueing before that claim). The run adds each worker's reported seconds to
+`agentSeconds` (implementer and reviewer; never the lead, which spans
+tickets). The session page shows a done ticket as "Took 42m · agent 31m ·
+judging 3m · waiting on you 6m · requeued 2m", runs a timer on the ticket in
+progress (against the worker cap in the default mode, elapsed only in lead
+mode, where the cap belongs to the whole lead), and sums "waiting on you"
+over the board in the header: the time the loop stood still for you. Agent
+time in lead mode is the time in `in_progress` plus the reviewer's seconds.
+Tickets from before timing have none of these fields and show nothing.
+
 ## Chores
 
 Beside the tickets the board keeps **chores**: small, self-contained fixes
@@ -144,6 +159,6 @@ Emit events to an injected sink.
 
 ## Export
 
-Export returns the full `board.json`, states, notes, reports, diff stats and
-cost included. Re-importing an export merges by id, so a plan edited outside
+Export returns the full `board.json`, states, notes, reports, diff stats,
+timing and cost included. Re-importing an export merges by id, so a plan edited outside
 and pasted back does not duplicate cards.
