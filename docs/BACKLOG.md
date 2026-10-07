@@ -299,6 +299,65 @@ that a root agent still never holds the real token.
 **Trigger.** The first session that genuinely needs Docker inside, or
 more than a handful of repositories with their own compose stacks.
 
+## V-15 · Open network while an agent terminal runs (opt-in)  (S)
+
+**Why.** In an agent terminal you are at the keyboard, and the allowlist
+gets in the way of exploratory work: the agent wants a docs site, a new
+registry or an API, and each is a pack or a host to add first. While you
+watch, any public host should be reachable; when the terminal closes, the
+session's allowlist applies again.
+
+**Shape.** A "with open network" tick in the Agent terminal menu, off by
+default. Nothing new on the box side: the proxy already re-reads the
+session's allowlist file every 2 s (src/proxy/proxy.ts).
+
+- Host: when a terminal run starts with the tick, `runTerminal` writes the
+  allowlist file as the session's list plus an "all public hosts" entry
+  (say `*`); the run's `finally` (the same one that commits) writes the
+  session's list back. `recover()` writes it back too, so a host crash
+  never leaves a box open. The session's stored `allowlist` never changes;
+  only the file the proxy reads does.
+- Proxy (src/proxy/allowlist.ts): `*` allows CONNECT to any public host on
+  any port. "Public" is decided after resolving: refuse loopback, private
+  (RFC 1918, fc00::/7), link-local (169.254/16 including cloud metadata,
+  fe80::/10), CGNAT 100.64/10, and `host.docker.internal`; then connect to
+  the address that was checked, not the name, so a DNS answer cannot
+  change between the check and the connect. This is the point of the item:
+  the proxy sits on the bridge, and on Docker Desktop
+  `host.docker.internal` reaches services on the host's loopback,
+  including the UI API on 4700, which can start runs and decide requests.
+  A naive wildcard would hand the agent Verstas itself and your LAN.
+- Plain `http://` through the proxy is refused today except to the agent
+  API; under `*`, forward absolute-URL requests to public hosts with the
+  same address check.
+- UI: an "open network" badge on the terminal pane and the status pill;
+  a status line in the run log when the network opens and when it closes.
+
+**Not covered, on purpose.** Traffic that ignores `HTTPS_PROXY` (ssh, git
+over ssh, raw TCP, UDP): the box has no route out but the proxy. Truly all
+traffic would mean `docker network connect` to the bridge for the
+terminal's life; that bypasses the proxy and with it the protection of the
+host and the LAN above. Not this item.
+
+**Risk, stated.** With an open network the agent's credential (the Claude
+token, the Codex login) can be sent to any host, and content the agent
+reads can carry a prompt injection that tries exactly that. You being at
+the keyboard is the mitigation; hence opt-in per terminal, never for
+unattended runs, and closed again automatically. V-04 (the token never in
+the box) removes the credential half of this risk.
+
+**Compatibility.** Sessions and allowlists are unchanged; a terminal
+without the tick behaves as today. docs/SANDBOX.md Boundary 3 gains the
+`*` entry and the address check in the same commit.
+
+**Tests.** allowlist.ts: `*` against public and refused addresses
+(127.0.0.1, 10.x, 192.168.x, 169.254.169.254, 100.64.x, ::1, fe80::,
+host.docker.internal), a name that resolves to a private address refused.
+run.spec/terminal.spec: the file has `*` while the terminal runs and the
+session's list after it ends, stops or fails; `recover()` restores it.
+proxy.spec: a CONNECT under `*` to a public name is tunnelled to the
+checked address.
+
 ## Loop manager, Phase 2 (needs design before it starts)
 
 From the Loop Manager design. Not started; each item wants a short design
