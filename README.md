@@ -124,12 +124,7 @@ Then, in the web app:
    answer the inbox from your phone through the `verstas` app in the apps
    monorepo. Off by default, and per session off until you tick it; see
    [docs/REMOTE.md](docs/REMOTE.md) for what is and is not sent.
-8. **Version bumps** (Session settings): by default a ticket that changes
-   what the app does bumps the app's minor version once, in the same
-   change; VERSTAS.md tells every worker so. Pick patch or no rule per
-   session; a project whose notes/brief.md says it versions differently
-   wins.
-   **How tickets are worked** (Session settings, per session). **One
+8. **How tickets are worked** (Session settings, per session). **One
    worker per ticket**, the default: Verstas picks the next ready ticket,
    starts a fresh implementer for it, then the reviewer. Tick
    **Implementers continue one conversation** to have each implementer of
