@@ -18,6 +18,7 @@ import {
   type DraftEnv,
 } from "./draft.js";
 import type { DraftStore } from "./store.js";
+import { planningSchema } from "../core/types.js";
 
 /**
  * The tools an assistant gets through the draft MCP server. They read the
@@ -181,7 +182,7 @@ export const createDraftTools = (d: DraftToolDeps): DraftTool[] => {
     },
     {
       name: "draft_update",
-      description: "Change a draft's name, goal, session requirements or notes. Fields left out stay as they are. Requirements: one verifiable line per need; a setup worker makes the box meet them before tickets run. Notes are for the person who reviews the draft.",
+      description: "Change a draft's name, goal, session requirements, notes or ticket size. Fields left out stay as they are. Requirements: one verifiable line per need; a setup worker makes the box meet them before tickets run. Notes are for the person who reviews the draft. Planning: the ticket size the session's planner and agent terminals aim for (S, M or L, see verstas_context) and the user's own words on how to cut the work; an empty object clears it.",
       inputSchema: obj(
         {
           id: draftIdProp,
@@ -189,15 +190,22 @@ export const createDraftTools = (d: DraftToolDeps): DraftTool[] => {
           goal: str("Goal"),
           requirements: str("Session requirements, one per line, e.g. \"Chromium for Playwright launches\""),
           notes: str("For the reviewer: assumptions, open questions, what you left out"),
+          planning: obj({ ticketSize: { type: "string", enum: ["S", "M", "L"], description: "The size new tickets aim for" }, guidance: str("How to cut the work, e.g. \"one species per ticket\"", 4000) }, []),
         },
         ["id"],
       ),
       call: async (a) => {
-        const { id, ...patch } = parseArgs(
-          z.object({ id: draftId, name: z.string().trim().min(1).max(200).optional(), goal: z.string().max(20_000).optional(), requirements: z.string().max(20_000).optional(), notes: z.string().max(20_000).optional() }),
+        const { id, planning, ...patch } = parseArgs(
+          z.object({ id: draftId, name: z.string().trim().min(1).max(200).optional(), goal: z.string().max(20_000).optional(), requirements: z.string().max(20_000).optional(), notes: z.string().max(20_000).optional(), planning: planningSchema.optional() }),
           a,
         );
-        const { draft } = await d.store.mutate(id, (x) => ({ draft: { ...x, ...Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined)) } }));
+        const { draft } = await d.store.mutate(id, (x) => ({
+          draft: {
+            ...x,
+            ...Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined)),
+            ...(planning === undefined ? {} : { planning: planning.ticketSize || planning.guidance?.trim() ? { ticketSize: planning.ticketSize, guidance: planning.guidance?.trim() || undefined } : undefined }),
+          },
+        }));
         return edited(draft);
       },
     },

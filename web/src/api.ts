@@ -96,6 +96,8 @@ export type Session = {
   caps: { workerMinutes: number; workerTurns: number; runTickets: number; budgetUsd: number; ticketAttempts: number; reviewer: boolean; resumeWorker?: boolean; leadMinutes?: number; leadTurns?: number; sweepMaxLines?: number; sweepMaxFiles?: number; choreApproval?: boolean; choreSweepAt?: number };
   /** loop: a fresh implementer per ticket. lead: one long-lived agent works the board. */
   mode?: "loop" | "lead";
+  /** The ticket size planning agents aim for; absent, they choose. */
+  planning?: { ticketSize?: "S" | "M" | "L"; guidance?: string };
   limits: { memory: string; cpus: number; pids: number; workspaceMb: number };
   rootScripts: { script: string; cwd?: string; at: string; requestId?: string }[];
   setupScripts: { name: string; description: string; hosts: string[]; note: string; script: string; runAs: "root" | "agent" }[];
@@ -120,7 +122,7 @@ export type Readiness = { verdict: "ready" | "needs"; at: string; summary: strin
 export const isInitialized = (s: { initializedAt: string | null }): boolean => Boolean(s.initializedAt);
 export type NetworkPack = { name: string; title: string; hosts: string[]; /** Set on the packs that follow an agent choice instead of being ticked. */ agent?: DriverName };
 export type SetupScript = { name: string; description: string; hosts: string[]; note: string; script: string; runAs: "root" | "agent"; env: string };
-export type Run = { id: number; state: string; startedAt: string; endedAt?: string; currentTicket?: string; ticketsDone: number; cost: { usd?: number }; pauseReason?: string; resumeAt?: string };
+export type Run = { id: number; state: string; startedAt: string; endedAt?: string; currentTicket?: string; ticketsDone: number; cost: { usd?: number }; pauseReason?: string; resumeAt?: string; /** Set on an agent terminal's run. */ terminal?: { driver: DriverName } };
 export type VEvent = { kind: string; t: string; ticket?: string; [k: string]: unknown };
 export type Totals = { usd: number; runs: number; lastActivityAt: string };
 export type SessionSummary = { session: Session; counts: Record<string, number>; run?: Run; openRequests: number; ideas: number; totals?: Totals; /** The session container, as Docker sees it. */ sandbox?: "running" | "stopped" | "absent"; error?: string };
@@ -196,6 +198,7 @@ export type Draft = {
   extraHosts: string[];
   recipes: string[];
   tickets: DraftTicket[];
+  planning?: { ticketSize?: "S" | "M" | "L"; guidance?: string };
   createdBy: "agent" | "user";
   createdAt: string;
   updatedAt: string;

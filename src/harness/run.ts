@@ -9,8 +9,11 @@ import type { SessionHandle, SessionHub } from "../sessions/hub.js";
 import type { AgentRunHooks, RunToken, RunTokens } from "../agent-api/agent-api.js";
 import { withAgentPacks, workspaceSizeMb } from "../sessions/sessions.js";
 import { allowlistFor } from "../network/packs.js";
-import { implementerPrompt, leadContinuePrompt, leadPrompt, mcpConfig, readLeadRules, notesIndexMd, plannerPrompt, reviewerPrompt, setupPrompt, systemMd, userPrompt, verstasMd, withContext, workspaceClaudeMd } from "./prompts.js";
+import { implementerPrompt, leadContinuePrompt, leadPrompt, mcpConfig, readLeadRules, notesIndexMd, plannerPrompt, reviewerPrompt, setupPrompt, systemMd, terminalMd, userPrompt, verstasMd, withContext, workspaceClaudeMd } from "./prompts.js";
+import { driverInfo, missingCredentialError } from "./drivers.js";
+import { LiveTerminal, type TerminalRunner } from "./terminal.js";
 import type { Job } from "../worker/worker.js";
+import type { TerminalJob } from "../worker/terminal.js";
 
 /**
  * The loop. Deterministic TypeScript: picks tickets, starts workers,
@@ -52,6 +55,10 @@ export type RunDeps = {
   proxyDenials?: (sessionId: string, since: string) => Promise<{ host: string; port: number }[]>;
   /** Secret values that must never be committed (the Claude token); every commit's staged diff is scanned for them. */
   secrets?: () => Promise<string[]>;
+  /** Agent terminals (src/harness/terminal.ts); without it they are refused. */
+  terminal?: (sessionId: string) => TerminalRunner;
+  /** Whether a driver has a credential, so a terminal on one without fails before anything starts. */
+  hasCredential?: (driver: DriverName) => Promise<boolean>;
   /** For tests: a fixed clock. */
   now?: () => string;
   /** For tests: how long to sleep on a rate limit (ms). */
@@ -87,6 +94,8 @@ export type RunOptions = {
   brief?: boolean;
   setup?: boolean;
   prompt?: string;
+  /** An agent terminal on this driver, at this size: you type to the agent until it exits or the run is stopped. */
+  terminal?: { driver: DriverName; cols?: number; rows?: number };
 };
 
 export type RunControl = {
@@ -104,12 +113,31 @@ const tokenRole = (role: Job["role"]): "worker" | "planner" | "lead" => (role ==
 export class RunManager implements AgentRunHooks {
   private active = new Map<string, RunControl>();
   private leads = new Map<string, LeadContext>();
+  /** The agent terminal of a session whose active run is one. */
+  private terminals = new Map<string, LiveTerminal>();
   /** Numbers each worker's job directory. */
   private jobSeq = 0;
   constructor(private readonly deps: RunDeps) {}
 
   status(sessionId: string): Run | undefined {
     return this.active.get(sessionId)?.run;
+  }
+
+  /** The session's agent terminal while its run is active; pages attach to it (src/server.ts). */
+  terminal(sessionId: string): LiveTerminal | undefined {
+    return this.terminals.get(sessionId);
+  }
+
+  /**
+   * Starting anything else ends an agent terminal: stop its run and wait
+   * until its changes are committed. A no-op when the active run is not a
+   * terminal; false when it did not end in time.
+   */
+  async endTerminal(sessionId: string, timeoutMs = 30_000): Promise<boolean> {
+    const c = this.active.get(sessionId);
+    if (!c?.run.terminal) return true;
+    c.stopNow();
+    return Promise.race([c.done.then(() => true, () => true), new Promise<boolean>((r) => setTimeout(() => r(false), timeoutMs).unref())]);
   }
 
   /**
@@ -128,6 +156,19 @@ export class RunManager implements AgentRunHooks {
     if (opts.prompt !== undefined && !opts.prompt.trim()) throw new Error("The prompt is empty");
     if (opts.plan !== undefined && !opts.plan.trim()) throw new Error("Say what to plan");
     if (!opts.init && !isInitialized(h.session)) throw new Error("This session is not initialized: press Initialize on the session page first.");
+    if (opts.terminal) {
+      if (!this.deps.terminal) throw new Error("Agent terminals need the Docker sandbox");
+      if (opts.terminal.driver === "cursor") throw new Error("Agent terminals run Claude Code or Codex");
+      if (this.deps.hasCredential && !(await this.deps.hasCredential(opts.terminal.driver))) throw missingCredentialError(opts.terminal.driver, "the agent terminal runs on it");
+      // The terminal's agent needs its backend on the allowlist, like a session agent does.
+      const pack = driverInfo(opts.terminal.driver).pack;
+      if (!h.session.packs.includes(pack)) {
+        await h.mutate((docs) => {
+          const packs = [...docs.session.packs, pack];
+          return { next: { session: { ...docs.session, packs, allowlist: [...new Set([...docs.session.allowlist, ...allowlistFor(packs)])] } } };
+        });
+      }
+    }
     // Refuse up front rather than discover it ticket by ticket.
     validateRepos(h.board.tickets, h.session.repos.map((r) => r.name), { ignoreDone: true });
     // A ticket's own agent needs its backend on the allowlist, like a session agent does.
@@ -140,7 +181,13 @@ export class RunManager implements AgentRunHooks {
       });
     }
     const id = (await nextRunId(h.paths.runs)) ?? 1;
-    const run: Run = runSchema.parse({ id, sessionId, startedAt: (this.deps.now ?? now)(), state: "running" });
+    const run: Run = runSchema.parse({ id, sessionId, startedAt: (this.deps.now ?? now)(), state: "running", terminal: opts.terminal ? { driver: opts.terminal.driver } : undefined });
+    // Exists before the box is up, so the page can attach and watch it start.
+    if (opts.terminal) {
+      const live = new LiveTerminal(id, opts.terminal.driver, opts.terminal);
+      live.status(`Starting the box for ${driverInfo(opts.terminal.driver).title}…`);
+      this.terminals.set(sessionId, live);
+    }
     let pauseRequested = false;
     let stopRequested = false;
     const abort = new AbortController();
@@ -155,7 +202,15 @@ export class RunManager implements AgentRunHooks {
       },
       done: Promise.resolve(run),
     };
-    control.done = this.loop(h, run, opts, { isPause: () => pauseRequested, isStop: () => stopRequested, signal: abort.signal }).finally(() => this.active.delete(sessionId));
+    control.done = this.loop(h, run, opts, { isPause: () => pauseRequested, isStop: () => stopRequested, signal: abort.signal }).finally(() => {
+      this.active.delete(sessionId);
+      const t = this.terminals.get(sessionId);
+      if (t?.runId === id) {
+        // A terminal that never got going (the box failed to start, say) still tells its page it is over.
+        t.end(null, run.state === "stopped");
+        this.terminals.delete(sessionId);
+      }
+    });
     this.active.set(sessionId, control);
     return control;
   }
@@ -340,6 +395,9 @@ export class RunManager implements AgentRunHooks {
     const did: string[] = [];
     const killed = await d.shell(sessionId).exec(["pkill", "-TERM", "-f", "/opt/verstas/worker.js"], { timeoutMs: 15_000 }).catch(() => null);
     if (killed?.code === 0) did.push("stopped a worker left running in the container");
+    // An agent terminal nobody can type to any more (its page connection lived in the dead process).
+    const hungUp = await d.shell(sessionId).exec(["pkill", "-HUP", "-f", "/opt/verstas/terminal.js"], { timeoutMs: 15_000 }).catch(() => null);
+    if (hungUp?.code === 0) did.push("ended an agent terminal left running in the container");
     if (held.length) {
       await h.mutate((docs) => {
         let board = docs.board;
@@ -379,6 +437,8 @@ export class RunManager implements AgentRunHooks {
     const saveRun = () => writeJsonAtomic(path.join(runDir, "run.json"), run);
     const setSessionState = (state: Session["state"]) => h.mutate((docs) => ({ next: { session: { ...docs.session, state } } }));
     const status = (text: string, ticket?: string) => log({ kind: "status", t: clock(), ticket, text });
+    // An agent terminal moves no ticket: when it ends, the session reads as it did before it.
+    const stateBefore = h.session.state;
 
     try {
       await log({ kind: "run", t: clock(), state: "running" });
@@ -389,10 +449,17 @@ export class RunManager implements AgentRunHooks {
       // environment, so only session-stable values go in it. Each worker's
       // run token is passed on its exec instead (see docker-worker.ts).
       const envFile = path.join(h.paths.dir, "sandbox.env");
-      await d.ensureSandbox(h.session, envFile, true);
+      // A terminal needs only its own agent's credential, checked when it started.
+      await d.ensureSandbox(h.session, envFile, !opts.terminal);
       await this.writeWorkspaceFiles(h);
 
       let proceed = true;
+
+      // An agent terminal: you type to the agent until it exits or the run is stopped; then its changes are committed.
+      if (opts.terminal) {
+        proceed = false;
+        await this.runTerminal(h, run, opts.terminal, log, ctl.signal);
+      }
 
       // Initialization and setup. init: the container and recipes are up
       // (ensureSandbox above); a setup worker makes the box fit for the
@@ -616,6 +683,7 @@ export class RunManager implements AgentRunHooks {
         run.state === "halted" ? "halted" : run.state === "finished" ? "finished" : run.pauseReason === "requests" ? "waiting" : "paused";
       // Not initialized: the session is still a plan, or its initialization needs you.
       if (!isInitialized(h.session) && sessionState !== "waiting") sessionState = "setup";
+      if (opts.terminal && run.state !== "failed" && !["running", "checking", "planning"].includes(stateBefore)) sessionState = stateBefore;
       await setSessionState(sessionState).catch(() => undefined);
     }
     return run;
@@ -1058,7 +1126,7 @@ export class RunManager implements AgentRunHooks {
     const dir = path.join(h.paths.workspace, rel);
     await fs.mkdir(dir, { recursive: true });
     await fs.writeFile(path.join(dir, "prompt.md"), job.promptText);
-    await fs.writeFile(path.join(dir, "system.md"), systemMd(job.role, job.role === "lead" ? await readLeadRules() : undefined));
+    await fs.writeFile(path.join(dir, "system.md"), systemMd(job.role, job.role === "lead" ? await readLeadRules() : undefined, h.session.planning));
     // The reviewer may be a different agent than the worker (session.agents), and a ticket may name its own; everything else about the job is the same.
     const agent = job.agent ?? agentFor(h.session, job.role);
     const spec: Job = {
@@ -1099,6 +1167,61 @@ export class RunManager implements AgentRunHooks {
       return done;
     } finally {
       this.deps.tokens.revoke(token);
+    }
+  }
+
+  /**
+   * An agent terminal, start to end: the rules and job file in a job
+   * directory, a run token with the terminal's permissions (it plans like
+   * the planner, holds no ticket, asks you directly), the agent's own
+   * interface on a TTY the page attaches to, and when it exits or the run
+   * is stopped, one commit of whatever changed in the repositories.
+   */
+  private async runTerminal(h: SessionHandle, run: Run, spec: NonNullable<RunOptions["terminal"]>, log: (e: VerstasEvent) => Promise<void>, signal: AbortSignal): Promise<void> {
+    const clock = this.deps.now ?? now;
+    const live = this.terminals.get(h.id);
+    if (!live || live.runId !== run.id || !this.deps.terminal) throw new Error("the agent terminal was not set up for this run");
+    const title = driverInfo(spec.driver).title;
+    const name = `${run.id}-${++this.jobSeq}-terminal`;
+    const rel = `${WORKSPACE_FILES}/jobs/${name}`;
+    const dir = path.join(h.paths.workspace, rel);
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(path.join(dir, "rules.md"), terminalMd(h.session, spec.driver));
+    // The session's worker model when the worker runs on the same driver; else the CLI's default.
+    const worker = agentFor(h.session, "implementer");
+    const job: TerminalJob = {
+      driver: spec.driver === "codex" ? "codex" : "claude",
+      model: worker.driver === spec.driver ? worker.model || undefined : undefined,
+      mcpConfigFile: `/workspace/${WORKSPACE_FILES}/mcp.json`,
+      rulesFile: `/workspace/${rel}/rules.md`,
+      credentialOut: `/workspace/${rel}/credential.out`,
+    };
+    await fs.writeFile(path.join(dir, "job.json"), JSON.stringify(job, null, 2));
+    const token = this.deps.tokens.issue({ sessionId: h.id, runId: run.id, role: "terminal" });
+    let stopped = false;
+    try {
+      if (signal.aborted) {
+        stopped = true;
+        return;
+      }
+      const proc = await this.deps.terminal(h.id).open({ driver: spec.driver, jobFile: `/workspace/${rel}/job.json`, credentialFile: path.join(dir, "credential.out"), runToken: token, ...live.size });
+      live.bind(proc);
+      await log({ kind: "status", t: clock(), text: `agent terminal: ${title} is running; type to it on the session page` });
+      const onAbort = () => {
+        stopped = true;
+        void proc.kill();
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+      const code = await proc.exited;
+      signal.removeEventListener("abort", onAbort);
+      live.end(code, stopped);
+      await log({ kind: "status", t: clock(), text: stopped ? `agent terminal: ${title} was ended` : `agent terminal: ${title} exited${code === null ? "" : ` (exit ${code})`}` });
+    } finally {
+      this.deps.tokens.revoke(token);
+      // Whatever the agent changed in the repositories becomes one commit, as after your prompt.
+      const leaked = await this.commitInContainer(h, `Terminal: ${title} (run ${run.id})`);
+      if (leaked.length) await log({ kind: "error", t: clock(), text: `An agent credential appears in the changes to ${leaked.join(", ")}; nothing was committed there. Remove it from the files.` });
+      run.state = stopped || signal.aborted ? "stopped" : "finished";
     }
   }
 

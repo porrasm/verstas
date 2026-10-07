@@ -1,6 +1,6 @@
 {
   "name": "verstas",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "description": "Verstas: a local, dockerized workshop where agents work through a kanban board on fresh clones of your repositories",
   "license": "MIT",
@@ -36,6 +36,8 @@
     "@types/react-dom": "^18.3.1",
     "@types/ws": "^8.5.13",
     "@vitejs/plugin-react": "^4.3.4",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
     "electron": "^44.5.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",

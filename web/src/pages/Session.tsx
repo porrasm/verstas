@@ -37,6 +37,7 @@ import {
   type VEvent,
 } from "../api";
 import { AgentOptionsButton, useDrivers } from "./AgentOptions";
+import { AgentTerminal } from "./Terminal";
 
 const COLUMNS: { key: string; title: string; states: string[] }[] = [
   { key: "backlog", title: "Backlog", states: ["backlog"] },
@@ -76,6 +77,7 @@ type Tone = "sig" | "good" | "warn" | "quiet" | "info";
 /** One label and colour for the header pill from session state, run state and the live flag. */
 const sessionStatus = (session: Session, run: Run | undefined, active: boolean): { label: string; tone: Tone } => {
   if (active) {
+    if (run?.terminal) return { label: `agent terminal · ${run.terminal.driver === "codex" ? "Codex" : "Claude Code"}`, tone: "sig" };
     if (session.state === "checking") return { label: isInitialized(session) ? "checking the environment" : "initializing the environment", tone: "sig" };
     if (session.state === "planning") return { label: "planning", tone: "sig" };
     if (run?.state === "paused") return { label: `pausing · ${PAUSE_REASON[run.pauseReason ?? ""] ?? run.pauseReason ?? ""}`, tone: "sig" };
@@ -133,6 +135,9 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
   const [logTicket, setLogTicket] = useState("");
   const [lastEventAt, setLastEventAt] = useState<string | null>(null);
   const [dir, setDir] = useState("");
+  /** The agent terminal's run while its pane is open; it stays open after the terminal ends until you close it. */
+  const [terminalPane, setTerminalPane] = useState<{ run: number; driver: "claude" | "codex" | "cursor" } | null>(null);
+  const drivers = useDrivers();
   const now = useNow();
 
   const base = `/sessions/${encodeURIComponent(id)}`;
@@ -254,6 +259,17 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
     location.hash = tid ? `#/s/${encodeURIComponent(id)}/t/${encodeURIComponent(tid)}` : `#/s/${encodeURIComponent(id)}`;
   };
 
+  /** Claude Code or Codex in their own interface, in the box, with the board tools; a run of its own. */
+  const launchTerminal = (driver: "claude" | "codex") =>
+    tryAct("starting the agent terminal", async () => {
+      const r = await api<{ run: Run }>("POST", `${base}/terminal`, { driver });
+      setTerminalPane({ run: r.run.id, driver });
+    });
+  // A terminal already running when the page opens (a reload, another window) shows its pane.
+  useEffect(() => {
+    if (active && run?.terminal) setTerminalPane({ run: run.id, driver: run.terminal.driver });
+  }, [active, run?.id, run?.terminal]);
+
   const ticket = useMemo(() => board?.tickets.find((t) => t.id === ticketId) ?? null, [board, ticketId]);
   if (err && !session) return <div className="banner warn">{err}</div>;
   if (!session || !board || !inbox) return <div className="loading">Loading session…</div>;
@@ -269,11 +285,12 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
   const lastActivity = lastEventAt && lastEventAt > (totals?.lastActivityAt ?? "") ? lastEventAt : totals?.lastActivityAt;
   const pausedBanner = !active && run && (run.state === "paused" || run.state === "halted" || run.state === "failed") && session.state !== "finished";
   const initialized = isInitialized(session);
+  const terminalActive = Boolean(active && run?.terminal);
   /** The setup worker left the box short of ready and nobody accepted it: the one state that needs a decision before anything else. */
   const initNeeds = !initialized && !active && session.readiness?.verdict === "needs" && !session.readiness.confirmedAt;
   const saveSettings = async (patch: SettingsPatch) => {
     if (patch.allowlist || patch.packs) await api("PUT", `${base}/allowlist`, { allowlist: patch.allowlist, packs: patch.packs });
-    if (patch.caps || patch.limits || patch.mode) await api("PUT", `${base}/caps`, { caps: patch.caps, limits: patch.limits, mode: patch.mode });
+    if (patch.caps || patch.limits || patch.mode || patch.planning !== undefined) await api("PUT", `${base}/caps`, { caps: patch.caps, limits: patch.limits, mode: patch.mode, planning: patch.planning });
     await refreshRun();
   };
   const bodyProps: BodyProps = {
@@ -312,9 +329,20 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
           <span className={`pill ${status.tone}`}>{active ? <span className="dot run" /> : null}{status.label}</span>
           <div className="actions">
             {initialized && !active && <button className="pri" onClick={() => runAction("start")} disabled={Boolean(busy)} title="Work through the ready tickets">Start run</button>}
-            {initialized && !active && <button onClick={() => setPlanning(true)} disabled={Boolean(busy)} title="Describe what to build; a planner worker turns it into backlog tickets">Plan tickets…</button>}
-            {active && <button onClick={() => runAction("pause")} disabled={Boolean(busy)} title="Finish the current ticket, then stop">Pause after ticket</button>}
-            {active && <button className="warn" onClick={() => runAction("stop")} disabled={Boolean(busy)} title="Stop the worker now; its ticket goes back to ready">Stop now</button>}
+            {terminalActive && <ConfirmButton className="pri" label="Start run" confirm="End the terminal and start" onConfirm={() => runAction("start")} disabled={Boolean(busy)} />}
+            {initialized && (!active || terminalActive) && <button onClick={() => setPlanning(true)} disabled={Boolean(busy)} title={terminalActive ? "Planning ends the agent terminal first; its changes are committed" : "Describe what to build; a planner worker turns it into backlog tickets"}>Plan tickets…</button>}
+            {initialized && !active && (
+              <MoreMenu
+                label="Agent terminal ▾"
+                items={(["claude", "codex"] as const).map((d) => {
+                  const info = drivers.find((x) => x.name === d);
+                  const configured = info ? info.configured : d === "claude";
+                  return { label: `${info?.title ?? (d === "claude" ? "Claude Code" : "Codex")}${configured ? "" : " (no credential; see Settings)"}`, onClick: () => void launchTerminal(d), disabled: !configured };
+                })}
+              />
+            )}
+            {active && !terminalActive && <button onClick={() => runAction("pause")} disabled={Boolean(busy)} title="Finish the current ticket, then stop">Pause after ticket</button>}
+            {active && !terminalActive && <button className="warn" onClick={() => runAction("stop")} disabled={Boolean(busy)} title="Stop the worker now; its ticket goes back to ready">Stop now</button>}
             {initialized && <button onClick={() => setNewTicket(true)} disabled={Boolean(busy)} title="Write a ticket by hand">New ticket</button>}
             <MoreMenu
               items={[
@@ -409,6 +437,17 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
             await act("creating ticket", () => api("POST", `${base}/tickets`, body));
             setNewTicket(false);
           }}
+        />
+      )}
+
+      {terminalPane !== null && (
+        <AgentTerminal
+          key={terminalPane.run}
+          sessionId={id}
+          base={base}
+          title={terminalPane.driver === "codex" ? "Codex" : "Claude Code"}
+          onEnd={() => runAction("stop")}
+          onClose={() => setTerminalPane(null)}
         />
       )}
 
@@ -1382,7 +1421,7 @@ const ProgressStrip = ({ counts, total }: { counts: Record<string, number>; tota
   </div>
 );
 
-const MoreMenu = ({ items }: { items: { label: string; onClick?: () => void; href?: string; disabled?: boolean }[] }) => {
+const MoreMenu = ({ items, label = "More ▾" }: { items: { label: string; onClick?: () => void; href?: string; disabled?: boolean }[]; label?: string }) => {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -1400,7 +1439,7 @@ const MoreMenu = ({ items }: { items: { label: string; onClick?: () => void; hre
   }, [open]);
   return (
     <div className="menu" ref={ref}>
-      <button onClick={() => setOpen(!open)} aria-haspopup="menu" aria-expanded={open}>More ▾</button>
+      <button onClick={() => setOpen(!open)} aria-haspopup="menu" aria-expanded={open}>{label}</button>
       {open && (
         <div className="items" role="menu">
           {items.map((it) =>
@@ -1985,7 +2024,14 @@ const requestSummary = (r: AgentRequest): string => r.summary.split("\n")[0]!.sl
 
 // --- settings --------------------------------------------------------------
 
-type SettingsPatch = { allowlist?: string[]; packs?: string[]; caps?: Partial<Session["caps"]>; limits?: Partial<Session["limits"]>; mode?: Session["mode"] };
+type SettingsPatch = { allowlist?: string[]; packs?: string[]; caps?: Partial<Session["caps"]>; limits?: Partial<Session["limits"]>; mode?: Session["mode"]; planning?: Session["planning"] | null };
+
+/** What each ticket size means; mirrors TICKET_SIZE_GUIDE in src/core/types.ts. */
+const TICKET_SIZE_HELP: Record<"S" | "M" | "L", string> = {
+  S: "one change in one place; under ~150 lines, under 15 min of agent time",
+  M: "one feature slice with its follow-ups folded in; ~150–800 lines, 15–45 min",
+  L: "a whole feature one reviewer can still judge in one pass; ~800–2,000 lines, 45–120 min",
+};
 const CAP_HELP: Record<string, string> = {
   workerMinutes: "Wall-clock cap for one worker",
   workerTurns: "Model turns per worker",
@@ -2024,6 +2070,8 @@ const SessionSettings = ({ session, onSave, part = "all" }: { session: Session; 
     choreApproval: session.caps.choreApproval ?? false,
     memory: session.limits.memory,
     cpus: String(session.limits.cpus),
+    ticketSize: (session.planning?.ticketSize ?? "") as "" | "S" | "M" | "L",
+    sizeGuidance: session.planning?.guidance ?? "",
   });
   const [f, setF] = useState(fromSession);
   const [state, setState] = useState<"clean" | "dirty" | "saving" | "saved" | "error">("clean");
@@ -2036,7 +2084,7 @@ const SessionSettings = ({ session, onSave, part = "all" }: { session: Session; 
     setF(fromSession());
     setState("clean");
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [session.allowlist, session.packs, session.caps, session.limits, session.mode]);
+  }, [session.allowlist, session.packs, session.caps, session.limits, session.mode, session.planning]);
   const set = <K extends keyof ReturnType<typeof fromSession>>(k: K, v: ReturnType<typeof fromSession>[K]) => {
     setF({ ...f, [k]: v });
     setState("dirty");
@@ -2051,6 +2099,8 @@ const SessionSettings = ({ session, onSave, part = "all" }: { session: Session; 
               caps: { workerMinutes: Number(f.workerMinutes), workerTurns: Number(f.workerTurns), budgetUsd: Number(f.budgetUsd), runTickets: Number(f.runTickets), ticketAttempts: Number(f.ticketAttempts), reviewer: f.reviewer, resumeWorker: f.resumeWorker, leadMinutes: Number(f.leadMinutes), leadTurns: Number(f.leadTurns), sweepMaxLines: Number(f.sweepMaxLines), sweepMaxFiles: Number(f.sweepMaxFiles), choreApproval: f.choreApproval, choreSweepAt: Number(f.choreSweepAt) },
               limits: { memory: f.memory, cpus: Number(f.cpus) },
               mode: f.mode,
+              // Nothing chosen clears the block: planning agents then size tickets themselves, as before.
+              planning: f.ticketSize || f.sizeGuidance.trim() ? { ticketSize: f.ticketSize || undefined, guidance: f.sizeGuidance.trim() || undefined } : null,
             }
           : {}),
       });
@@ -2094,6 +2144,20 @@ const SessionSettings = ({ session, onSave, part = "all" }: { session: Session; 
       )}
       {part !== "network" && (
         <div className="two">
+          <label>
+            Ticket size
+            <span className="help" title="Every ticket pays a fixed cost (a worker reads in, the check runs, a reviewer reads in, a commit), so fewer, larger tickets run faster.">What the planner and agent terminals aim for. {f.ticketSize ? `${TICKET_SIZE_HELP[f.ticketSize]}.` : "Not set: they choose."}{f.ticketSize === "L" && f.mode !== "lead" && Number(f.workerMinutes) < 60 ? " Raise worker minutes to 60+ for L." : ""}</span>
+            <select value={f.ticketSize} onChange={(e) => set("ticketSize", e.target.value as "" | "S" | "M" | "L")}>
+              <option value="">Not set</option>
+              <option value="S">S · small</option>
+              <option value="M">M · medium</option>
+              <option value="L">L · large</option>
+            </select>
+          </label>
+          <label>
+            How to cut the work <span className="help">Optional, in your words.</span>
+            <input value={f.sizeGuidance} placeholder="e.g. one species per ticket" onChange={(e) => set("sizeGuidance", e.target.value)} />
+          </label>
           {f.mode === "lead" &&
             (["leadMinutes", "leadTurns", "sweepMaxLines", "sweepMaxFiles", "choreSweepAt"] as const).map((k) => (
               <label key={k}>

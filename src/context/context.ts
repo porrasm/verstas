@@ -1,4 +1,4 @@
-import { attachmentLines, capsSchema, type Session } from "../core/types.js";
+import { attachmentLines, capsSchema, TICKET_SIZE_GUIDE, type Session } from "../core/types.js";
 import type { Config } from "../config.js";
 import type { SetupScript } from "../scripts/library.js";
 import type { DockerRunner } from "../sandbox/docker.js";
@@ -156,6 +156,7 @@ const boardFormat = (repos: readonly string[]): string[] => {
     '- `agent` (optional): `{ "driver": "claude" | "codex" | "cursor", "model": "…" }` runs this ticket\'s implementer on that agent instead of the session\'s worker: a fresh worker, judged by the session\'s reviewer. Use it only for tickets that need that agent\'s particular strength (for example judging rendered images); the driver needs a credential in the user\'s Settings. In lead mode the lead hands such a ticket to its agent with `board_run` rather than doing it itself.',
     "- Chores (small fixes not worth a ticket) can be listed under `chores` (`{ \"text\": …, \"where\": … }`); a lead sweeps them in batches without a reviewer.",
     `- One worker gets ${caps.workerMinutes} minutes and ${caps.workerTurns} model turns by default, then the ticket goes back to the board. Size tickets so one worker finishes one.`,
+    `- Ticket size: every ticket pays a fixed cost however small it is (a worker reads its way in, the check runs, a reviewer reads the change, a commit), so many tiny tickets run slower than fewer coherent ones. A session can set the size its planner and agent terminals aim for (\`planning.ticketSize\`, with optional \`guidance\` in your words; draft_update sets it): ${(["S", "M", "L"] as const).map((k) => `${k}, ${TICKET_SIZE_GUIDE[k]}`).join("; ")}. Raise the worker caps to match when you choose L.`,
   ];
 };
 

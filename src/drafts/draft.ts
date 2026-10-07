@@ -2,6 +2,7 @@ import { z } from "zod";
 import {
   BOARD_FORMAT_VERSION,
   HOSTNAME_PATTERN,
+  planningSchema,
   TICKET_ID_PATTERN,
   ticketIdSchema,
   ticketImportSchema,
@@ -83,6 +84,8 @@ export const draftSchema = z.object({
   /** Recipe names from the library, in the order they run. */
   recipes: z.array(z.string().regex(SCRIPT_NAME_PATTERN)).max(30).default([]),
   tickets: z.array(draftTicketSchema).max(MAX_DRAFT_TICKETS).default([]),
+  /** The ticket size the session's planning agents aim for; absent, they choose. */
+  planning: planningSchema.optional(),
   createdBy: z.enum(["agent", "user"]).default("agent"),
   createdAt: z.string(),
   updatedAt: z.string(),

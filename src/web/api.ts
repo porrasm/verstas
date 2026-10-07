@@ -13,6 +13,8 @@ import {
   capsSchema,
   choreIdSchema,
   sessionModeSchema,
+  planningSchema,
+  type Planning,
   DEFAULT_ALLOWLIST,
   DRIVER_NAMES,
   driverNameSchema,
@@ -65,6 +67,13 @@ import type { McpSetup } from "../drafts/setup.js";
  */
 
 const execFileP = promisify(execFile);
+
+/** A planning block with nothing in it is no block: the session then reads exactly as one that never had it. */
+export const cleanPlanning = (p: Planning | null | undefined): Planning | undefined => {
+  const guidance = p?.guidance?.trim();
+  if (!p?.ticketSize && !guidance) return undefined;
+  return { ...(p?.ticketSize ? { ticketSize: p.ticketSize } : {}), ...(guidance ? { guidance } : {}) };
+};
 
 export type UiApiDeps = {
   hub: SessionHub;
@@ -550,6 +559,8 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
     setupScripts: z.array(z.string()).default([]),
     caps: capsSchema.partial().optional(),
     limits: limitsSchema.partial().optional(),
+    /** How planning agents size tickets (a draft's choice); absent, they choose. */
+    planning: planningSchema.optional(),
     board: z.string().optional(),
     requirements: z.string().max(20_000).optional(),
     setupMode: setupModeSchema.optional(),
@@ -677,7 +688,7 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
       for (const name of input.setupScripts) setupScripts.push(await getScript(name));
       await fs.mkdir(cfg.sessionsRoot, { recursive: true });
       // Nothing is cloned and no container exists: the session is a plan until you initialize it.
-      const created = await createSession(cfg.sessionsRoot, { ...input, repos, zips, setupScripts, image: cfg.devboxImage });
+      const created = await createSession(cfg.sessionsRoot, { ...input, planning: cleanPlanning(input.planning), repos, zips, setupScripts, image: cfg.devboxImage });
       for (const z of zips) await fs.rm(z.file, { force: true });
       let imported: { created: string[]; skipped: { title: string; reason: string }[] } | undefined;
       if (pasted) {
@@ -934,6 +945,8 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
       if (action === "start" || action === "plan" || action === "brief" || action === "setup" || action === "prompt") {
         let ctl;
         try {
+          // Starting anything ends an agent terminal first (its changes are committed); the page asked you before calling this.
+          if (!(await d.runs.endTerminal(id))) throw new Error("The agent terminal did not end in time; try again");
           ctl = await d.runs.start(id, { plan: action === "plan" ? (prompt ?? "") : undefined, brief: action === "brief", setup: action === "setup", prompt: action === "prompt" ? (prompt ?? "") : undefined });
         } catch (e) {
           res.status(409).json({ error: (e as Error).message });
@@ -944,6 +957,38 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
       }
       const ok = action === "pause" ? d.runs.pauseAfterTicket(id) : d.runs.stopNow(id);
       res.json({ ok, note: ok ? undefined : "No active run" });
+    }),
+  );
+
+  /**
+   * An agent terminal: Claude Code or Codex in their own interface, in the
+   * box, with the board tools. It is a run of its own, so it starts only
+   * when nothing else runs. The key lets this page's terminal socket attach
+   * (src/server.ts); only a same-origin page can read it from here.
+   */
+  api.post(
+    "/sessions/:id/terminal",
+    wrap(async (req, res) => {
+      const body = z.object({ driver: driverNameSchema.default("claude"), cols: z.number().int().optional(), rows: z.number().int().optional() }).parse(req.body ?? {});
+      const id = param(req, "id");
+      let ctl;
+      try {
+        ctl = await d.runs.start(id, { terminal: body });
+      } catch (e) {
+        res.status(409).json({ error: (e as Error).message });
+        return;
+      }
+      const live = d.runs.terminal(id);
+      res.json({ ok: true, run: ctl.run, key: live?.key, driver: body.driver });
+    }),
+  );
+
+  api.get(
+    "/sessions/:id/terminal",
+    wrap(async (req, res) => {
+      const id = param(req, "id");
+      const live = d.runs.terminal(id);
+      res.json(live ? { active: true, runId: live.runId, driver: live.driver, key: live.key, running: live.running } : { active: false });
     }),
   );
 
@@ -1559,11 +1604,14 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
           agents: sessionAgentsSchema.optional(),
           /** How tickets are worked; applies to the next run. */
           mode: sessionModeSchema.optional(),
+          /** How planning agents size tickets; replaces the block, null (or nothing set) clears it. Applies to the next planner or terminal. */
+          planning: planningSchema.nullable().optional(),
         })
         .parse(req.body);
       const h = await d.hub.get(param(req, "id"));
       await h.mutate((docs) => {
         const s = docs.session;
+        const planning = body.planning === undefined ? s.planning : cleanPlanning(body.planning);
         let agents = body.agents ?? s.agents;
         if (body.model !== undefined && !body.agents) {
           const worker = agentFor(s, "implementer");
@@ -1576,6 +1624,7 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
           model: body.model === undefined ? s.model : body.model?.trim() || undefined,
           agents,
           mode: body.mode ?? s.mode,
+          planning,
         };
         // A newly chosen agent's backend joins the allowlist; the proxy picks it up before the next worker.
         const packs = withAgentPacks(next.packs, next);

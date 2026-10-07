@@ -48,6 +48,19 @@ export const ticketKindSchema = z.enum(["feature", "bug", "followup", "chore"]);
 export type TicketKind = z.infer<typeof ticketKindSchema>;
 
 export const ticketSizeSchema = z.enum(["S", "M", "L"]);
+export type TicketSize = z.infer<typeof ticketSizeSchema>;
+
+/**
+ * What each size means when a session asks its planning agents for one (see
+ * `planningSchema`). Every ticket pays a fixed cost (a worker reads in, the
+ * check runs, a reviewer reads in, a commit), so the size is the main lever
+ * on how fast a board goes.
+ */
+export const TICKET_SIZE_GUIDE: Record<TicketSize, string> = {
+  S: "one change in one place (a fix, a guard, one test, a doc section); under about 150 changed lines, under 15 minutes of agent time",
+  M: "one feature slice through the layers it needs (code, tests, docs) with its obvious follow-ups folded in; about 150 to 800 changed lines, 15 to 45 minutes of agent time",
+  L: "a whole feature or a family of related changes that one reviewer can still judge in one pass; about 800 to 2,000 changed lines, 45 to 120 minutes of agent time",
+};
 
 export const TICKET_ID_PATTERN = /^T-\d+$/;
 export const ticketIdSchema = z.string().regex(TICKET_ID_PATTERN, "Ticket ids look like T-12");
@@ -481,6 +494,19 @@ export const capsSchema = z.object({
 export type Caps = z.infer<typeof capsSchema>;
 
 /**
+ * How the session's planning agents (the planner, an agent terminal) cut
+ * work into tickets. Optional, and so is every field: absent, they choose
+ * the size themselves as before.
+ */
+export const planningSchema = z.object({
+  /** The size new tickets aim for (TICKET_SIZE_GUIDE). */
+  ticketSize: ticketSizeSchema.optional(),
+  /** Your own words on how to cut the work ("one species per ticket"). */
+  guidance: z.string().max(4000).optional(),
+});
+export type Planning = z.infer<typeof planningSchema>;
+
+/**
  * Paths a sweep may not change, as globs against the path inside the
  * repository: the documents a project treats as its contract and golden
  * files. Changing one of them is a ticket's job, with a reviewer.
@@ -650,6 +676,8 @@ export const sessionSchema = z.object({
   /** Network packs the allowlist was built from (src/network/packs.ts); the allowlist is what the proxy enforces. */
   packs: z.array(z.string()).default([]),
   caps: capsSchema.prefault({}),
+  /** How planning agents size tickets; absent, they choose (see planningSchema). */
+  planning: planningSchema.optional(),
   limits: limitsSchema.prefault({}),
   rootScripts: z.array(rootScriptRecordSchema).default([]),
   setupScripts: z.array(sessionSetupScriptSchema).default([]),
@@ -715,6 +743,12 @@ export const runSchema = z.object({
   pauseReason: z.string().optional(),
   /** Rate-limit resets at this time; the loop sleeps until then. */
   resumeAt: z.string().optional(),
+  /**
+   * An agent terminal: you type to Claude Code or Codex in their own
+   * interface, in the box, with the board tools. Absent on every other run
+   * (and on runs from before terminals existed).
+   */
+  terminal: z.object({ driver: driverNameSchema }).optional(),
 });
 export type Run = z.infer<typeof runSchema>;
 

@@ -179,6 +179,21 @@ Then, in the web app:
 Runs continue while Verstas is open (on macOS, also with the window
 closed). Quitting stops them and requeues the ticket a worker held.
 
+## Agent terminal
+
+**Agent terminal ▾** on the session page opens Claude Code or Codex in
+their own interactive interface, running in the session's box, on the
+page. Slash commands, `/resume` and the rest work as in your own terminal.
+The agent has the board tools: it can read the board and write tickets
+(features too; to the backlog, or straight to ready when you ask), take
+notes and file chores, so you can plan with it in a conversation instead
+of the one-shot planner. It is a run of its own: it starts only when
+nothing else runs, and starting a run (or planning) ends it. When it ends,
+whatever it changed in the repositories is committed as one commit,
+"Terminal: …". The first time in a box, Claude Code asks you to trust the
+folder and to accept its bypass-permissions mode (the box is the sandbox,
+as for every worker); its answers are kept in the box's home.
+
 ## Watching a run closely
 
 Three views, from least to most detail:

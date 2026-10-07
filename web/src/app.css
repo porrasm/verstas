@@ -523,3 +523,8 @@ textarea.invalid { border-color: var(--warn); }
 .launch-list li { display: flex; gap: 8px; align-items: baseline; }
 .launch-list li .dot { position: relative; top: -1px; }
 .launch-list b { color: var(--text); }
+
+/* --- agent terminal ---------------------------------------------------- */
+.term-card .row h3 { margin: 0; }
+.term-host { height: 62vh; min-height: 320px; background: #0f1211; border: 1px solid var(--line); border-radius: var(--radius-s); padding: 6px 4px 6px 8px; overflow: hidden; cursor: text; }
+.term-host .xterm { height: 100%; }

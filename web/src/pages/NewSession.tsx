@@ -124,6 +124,7 @@ export const NewSessionPage = ({ draftId = null, fromSession = null }: { draftId
               allowlist: x.extraHosts,
               setupScripts: x.recipes,
               requirements: x.requirements || undefined,
+              planning: x.planning,
               draftId: x.id,
             }
           : {}),

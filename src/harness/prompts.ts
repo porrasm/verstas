@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { verstasHome } from "../config.js";
-import { attachmentLines, describeAgent, type Board, type GateResult, type Session, type Ticket } from "../core/types.js";
+import { attachmentLines, describeAgent, TICKET_SIZE_GUIDE, type Board, type DriverName, type GateResult, type Planning, type Session, type Ticket } from "../core/types.js";
 import { NETWORK_PACKS } from "../network/packs.js";
 
 /**
@@ -87,7 +87,7 @@ export const readLeadRules = async (file = leadRulesFile()): Promise<string | un
   return text.trim() ? `\nRole: lead.\n${text.trim()}` : undefined;
 };
 
-export const systemMd = (role: "implementer" | "reviewer" | "planner" | "setup" | "prompt" | "lead", leadRules?: string): string => {
+export const systemMd = (role: "implementer" | "reviewer" | "planner" | "setup" | "prompt" | "lead", leadRules?: string, planning?: Planning): string => {
   const common = `You are one worker in a long-running Verstas session. Read /workspace/VERSTAS.md first.
 
 Rules that apply to every role:
@@ -153,9 +153,28 @@ Role: lead. You work this session's board until nothing you can start is left. N
 6. Chores: the board also keeps a list of small fixes filed by reviewers, workers and the user (\`chores_list\`). The list has a sweep line (shown with it): at or above it you sweep before the next ticket, and \`board_claim\` and \`board_run\` are refused until the list is below it again. Sweep earlier when you are in those files anyway or when no ticket you can start is left: \`chores_sweep\` takes a batch (hold no ticket at that moment), you do each one, run the repository's own checks, then \`chores_submit\` with one line per chore: done, dropped with the reason, or promoted when it is bigger than a chore (a backlog ticket is made from your note). A chore that is moot or not worth its change is dropped (\`chore_drop\`, or dropped in the sweep), not carried along. The harness runs the checks and a size check and commits the batch as one commit; there is no reviewer, so a sweep may not touch the project's contract documents or fixtures, and over the size limits it is refused with the reason while the changes stay in the working tree (claim a ticket for them, or revert).
 7. When no ticket you can start is left and no chore is open (everything is done, waiting on the user, or blocked), reply with one line saying so and stop.`,
     planner: `
-Role: planner. Turn the user's planning request into tickets with \`board_create_ticket\`: small (S) or medium (M) where possible, each with a clear spec, acceptance criteria that a reviewer can check, the repository it touches, and dependencies by id when order matters. You may create feature tickets; keep them within the request. Set a ticket's \`agent\` only when the request asks for a particular agent or model for some of the work. Prefer ten good tickets over thirty vague ones. When the board already has tickets, add only what is missing and do not duplicate. Reply with a short summary of the plan and stop.`,
+Role: planner. Turn the user's planning request into tickets with \`board_create_ticket\`: ${planning?.ticketSize ? `sized for this session's target (below)` : "small (S) or medium (M) where possible"}, each with a clear spec, acceptance criteria that a reviewer can check, the repository it touches, and dependencies by id when order matters. You may create feature tickets; keep them within the request. Set a ticket's \`agent\` only when the request asks for a particular agent or model for some of the work. Prefer ten good tickets over thirty vague ones. When the board already has tickets, add only what is missing and do not duplicate. Reply with a short summary of the plan and stop.${ticketSizeRule(planning)}`,
   };
   return common + "\n" + (role === "lead" && leadRules ? leadRules : byRole[role]);
+};
+
+/**
+ * The session's ticket size and your guidance, for whoever writes tickets
+ * (the planner, an agent terminal). Empty when the session sets neither, so
+ * a session without them reads exactly as before.
+ */
+export const ticketSizeRule = (planning?: Planning): string => {
+  const size = planning?.ticketSize;
+  const guidance = planning?.guidance?.trim();
+  if (!size && !guidance) return "";
+  const lines = ["", "", "Ticket size for this session:"];
+  if (size)
+    lines.push(
+      `- Aim for ${size}: ${TICKET_SIZE_GUIDE[size]}.`,
+      "- Every ticket costs the same fixed overhead however small it is: a worker reads its way in, the harness runs the check, a reviewer reads the change, a commit is made. So fold small related changes (the same files, a chain of small steps, a feature and its follow-ups) into one ticket of this size rather than several smaller ones, and split only what a reviewer would judge separately.",
+    );
+  if (guidance) lines.push(`- How the user wants the work cut: ${guidance}`);
+  return lines.join("\n");
 };
 
 const ticketBlock = (t: Ticket): string => `# ${t.id}: ${t.title}
@@ -259,6 +278,23 @@ export const userPrompt = (text: string): string => `# Request from the user
 ${text.trim()}
 
 Read /workspace/VERSTAS.md first if you have not. Reply with what you did and found.`;
+
+/**
+ * The rules for the agent in an agent terminal: Claude Code gets them as an
+ * appended system prompt, Codex as its global AGENTS.md. Unlike every other
+ * worker, it has the user at the keyboard.
+ */
+export const terminalMd = (session: Pick<Session, "planning">, driver: DriverName): string => `# Agent terminal
+
+You are running in an interactive terminal inside a Verstas session's sandbox (${driver === "codex" ? "Codex" : "Claude Code"}). Unlike the other workers here, the user is at the keyboard: they type to you and read your answers now. Read /workspace/VERSTAS.md for the box (network, sudo, svc, notes). A few of its rules are written for unattended workers and are different here:
+
+- Ask the user in this conversation when something is theirs to decide. There is no \`request\` or \`halt\` for you.
+- No run is active while this terminal is open: no worker or lead is changing the repositories or the board. Starting a run from the session page ends this terminal.
+- The board is reachable through the MCP server "board": \`board_list_tickets\`, \`board_get_ticket\`, \`board_create_ticket\` (any kind, features included; it goes to the backlog for the user's approval, or straight to ready with \`state: "ready"\` when the user asks for that), \`board_add_note\`, \`board_set_priority\`, \`board_add_dep\`, \`chore\`, \`chores_list\`, \`chore_drop\`, \`idea\` and \`message\`. You cannot claim or submit tickets: implementing a ticket belongs to a run, which has the check and the reviewer.
+- When you write tickets: look at the board first and do not duplicate. Each ticket gets a spec that names the files and the commands, acceptance criteria a reviewer can run, the repository it touches, and dependencies by id only where order matters. Say what you created or changed, one line per ticket.${ticketSizeRule(session.planning)}
+- Change repository files when the user asks you to. Do not commit, rewrite history or create branches: when this terminal ends, Verstas commits whatever changed in the repositories as one commit.
+- Keep /workspace/notes/ true for the workers that come after you, as every worker does.
+`;
 
 export const plannerPrompt = (session: Session, board: Board, goal: string): string => `# What to plan
 ${goal.trim() || "(nothing given; ask with a decision request)"}

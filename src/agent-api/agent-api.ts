@@ -187,17 +187,20 @@ export const createAgentApi = (hub: SessionHub, tokens: RunTokens, hooks?: Agent
     "/tickets",
     wrap(async (req, res) => {
       const input = ticketImportSchema.omit({ id: true, state: true, pinned: true, review: true }).parse(req.body);
+      // Agents file into the backlog for your approval; the agent in your terminal works with you there, so it may make a ticket ready when you ask.
+      const asked = z.object({ state: z.enum(["backlog", "ready"]).optional() }).parse(req.body).state;
+      const state = req.run.role === "terminal" ? (asked ?? "backlog") : "backlog";
       const h = await hub.get(req.run.sessionId);
       const result = await h.mutate((d) => {
-        const r = importBoard(d.board, { tickets: [input] }, { by: "agent", role: req.run.role, defaultState: "backlog" });
+        const r = importBoard(d.board, { tickets: [input] }, { by: "agent", role: req.run.role, defaultState: state });
         if (r.skipped.length) throw new BoardError(r.skipped[0]!.reason, "forbidden_kind");
         validateRepos(r.board.tickets, d.session.repos.map((x) => x.name), { ignoreDone: true });
         let board = r.board;
         const id = r.created[0]!;
-        board = addNote(board, id, "harness", `Created by the ${req.run.role}${req.run.currentTicket ? ` while on ${req.run.currentTicket}` : ""}`);
+        board = addNote(board, id, "harness", `Created by the ${req.run.role === "terminal" ? "agent in your terminal" : req.run.role}${req.run.currentTicket ? ` while on ${req.run.currentTicket}` : ""}`);
         return { next: { board }, result: id };
       });
-      res.status(201).json({ ok: true, id: result, state: "backlog" });
+      res.status(201).json({ ok: true, id: result, state });
     }),
   );
 
@@ -248,9 +251,17 @@ export const createAgentApi = (hub: SessionHub, tokens: RunTokens, hooks?: Agent
     }),
   );
 
+  /** The agent in your terminal has you at the keyboard: it asks you there instead of parking anything. */
+  const notFromTerminal = (req: AgentRequestWithRun, res: Response): boolean => {
+    if (req.run.role !== "terminal") return true;
+    res.status(403).json({ error: "You are in a terminal with the user at the keyboard: ask them directly instead" });
+    return false;
+  };
+
   r.post(
     "/requests",
     wrap(async (req, res) => {
+      if (!notFromTerminal(req, res)) return;
       const raw = req.body as { actions?: { kind?: unknown }[] } | undefined;
       if (Array.isArray(raw?.actions) && raw.actions.some((a) => a?.kind === "root_script")) {
         res.status(400).json({ error: "root_script is retired: you have passwordless sudo. Run the install yourself, append it to /workspace/notes/setup.sh, and note it in /workspace/notes/env.md." });
@@ -290,6 +301,7 @@ export const createAgentApi = (hub: SessionHub, tokens: RunTokens, hooks?: Agent
   r.post(
     "/halt",
     wrap(async (req, res) => {
+      if (!notFromTerminal(req, res)) return;
       const { reason, severity } = z.object({ reason: z.string().min(1).max(5000), severity: z.enum(["major", "critical"]) }).parse(req.body);
       const h = await hub.get(req.run.sessionId);
       const created = await h.mutate((d) => {

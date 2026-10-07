@@ -114,6 +114,8 @@ export type CreateSessionInput = {
   setupScripts?: SessionSetupScript[];
   caps?: Partial<Session["caps"]>;
   limits?: Partial<Session["limits"]>;
+  /** How planning agents size tickets; absent, they choose. */
+  planning?: Session["planning"];
 };
 
 /** The packs plus the one each chosen agent's backend lives in (the Claude pack is always on through packHosts). */
@@ -189,6 +191,7 @@ export const createSession = async (root: string, input: CreateSessionInput): Pr
     ],
     caps: input.caps ?? {},
     limits: input.limits ?? {},
+    planning: input.planning,
   });
 
   try {

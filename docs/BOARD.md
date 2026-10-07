@@ -84,6 +84,25 @@ changed instead of the whole suite (and stop sleeping on it). Logs:
 `/workspace/.verstas/logs/<ticket>-<repo>-check.log`. Mode `none` runs no
 check.
 
+### Ticket size
+
+Every ticket pays a fixed cost however small it is: a worker reads its way
+in, the check runs, a reviewer reads the change, the harness commits. A
+session may set the size its planning agents (the planner and agent
+terminals) aim for, under Session settings (`planning.ticketSize`, `S`, `M`
+or `L`, with optional guidance in your words). Unset, they choose as
+before; nothing else reads it.
+
+| Size | What it is | Changed lines | Agent time |
+| --- | --- | --- | --- |
+| S | one change in one place: a fix, a guard, one test, a doc section | under ~150 | under 15 min |
+| M | one feature slice through the layers it needs, follow-ups folded in | ~150–800 | 15–45 min |
+| L | a whole feature one reviewer can still judge in one pass | ~800–2,000 | 45–120 min |
+
+In the default (loop) mode one worker must finish one ticket, so raise the
+worker minutes to match L. A draft carries the same setting
+(`draft_update` with `planning`).
+
 ### States
 
 `backlog` → `ready` → `in_progress` → `review` → `done`, with `waiting`

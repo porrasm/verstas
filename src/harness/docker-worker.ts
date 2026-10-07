@@ -11,6 +11,7 @@ import { writeAllowlist } from "../sessions/sessions.js";
 import { readWorkerStream, RunManager, type Shell, type WorkerDone, type WorkerRunner } from "./run.js";
 import { CODEX_SERIALIZE_AFTER_DAYS, codexAuthAgeDays, credentialFor, driverInfo, missingCredentialError, missingCredentials, whyDriverNeeded } from "./drivers.js";
 import type { Job } from "../worker/worker.js";
+import { dockerTerminal } from "./docker-terminal.js";
 
 /**
  * The real implementations of the loop's two interfaces, over the session
@@ -254,6 +255,8 @@ export const createDockerRunManager = (c: RunManagerConfig): RunManager =>
     agentApiUrl: c.agentApiUrl,
     shell: (sessionId) => dockerShell(c.sandbox, sessionId),
     worker: (sessionId) => dockerWorker(c.sandbox, sessionId, c.credentials),
+    terminal: (sessionId) => dockerTerminal(c.sandbox, sessionId, c.credentials),
+    hasCredential: async (driver) => Boolean(credentialFor(await c.credentials.secrets(), driver)),
     secrets: async () => secretValues(await c.credentials.secrets()),
     proxyDenials: (sessionId, since) => proxyDenials(c.sandbox, sessionId)(since),
     ensureSandbox: (session, envFile, needsCredentials) => ensureSessionSandbox(c, session, envFile, needsCredentials),

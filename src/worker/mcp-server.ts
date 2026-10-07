@@ -340,8 +340,38 @@ const send = (msg: Rpc): void => {
 const reply = (id: Rpc["id"], result: unknown): void => send({ jsonrpc: "2.0", id, result });
 const fail = (id: Rpc["id"], code: number, message: string): void => send({ jsonrpc: "2.0", id, error: { code, message } });
 
-/** The tools for this worker's role: a lead also drives the board. */
-export const visibleTools = (role = process.env.VERSTAS_ROLE ?? ""): Tool[] => TOOLS.filter((t) => !t.leadOnly || role === "lead");
+/** What the agent in your terminal does not get: it holds no ticket to report on and asks you directly instead of filing requests. */
+const NOT_FOR_TERMINAL = new Set(["budget", "board_report", "request", "halt"]);
+
+/**
+ * board_create_ticket for the agents that plan with you rather than work
+ * unattended: the planner (your request) creates features into the
+ * backlog; the agent in your terminal, with you at the keyboard, may also
+ * put a ticket straight into ready. Unattended workers and leads keep the
+ * narrow tool, so they cannot add features on their own.
+ */
+const forPlanning = (t: Tool, role: string): Tool => {
+  const props = (t.inputSchema as { properties: Record<string, unknown> }).properties;
+  const terminal = role === "terminal";
+  return {
+    ...t,
+    description: terminal
+      ? "Create a ticket: a feature, a bug, a follow-up or a chore. It goes to the backlog unless the user asked for it to be ready to run (state ready)."
+      : "Create a ticket in the backlog: a feature, a bug, a follow-up (missing test, doc gap) or a chore. The user approves backlog tickets before they run.",
+    inputSchema: {
+      ...t.inputSchema,
+      properties: {
+        ...props,
+        kind: { type: "string", enum: ["feature", "bug", "followup", "chore"] },
+        ...(terminal ? { state: { type: "string", enum: ["backlog", "ready"], description: "backlog (the default) waits for the user's approval; ready runs in the next run. Use ready only when the user asked for it." } } : {}),
+      },
+    },
+  };
+};
+
+/** The tools for this worker's role: a lead also drives the board; the agent in your terminal plans and asks you. */
+export const visibleTools = (role = process.env.VERSTAS_ROLE ?? ""): Tool[] =>
+  TOOLS.filter((t) => (!t.leadOnly || role === "lead") && !(role === "terminal" && NOT_FOR_TERMINAL.has(t.name))).map((t) => (t.name === "board_create_ticket" && (role === "planner" || role === "terminal") ? forPlanning(t, role) : t));
 
 export const handle = async (msg: Rpc): Promise<void> => {
   const { id, method, params = {} } = msg;

@@ -188,6 +188,15 @@ host.docker.internal:host-gateway`).
   for a repository's check command: only you set it. The script it runs
   lives in the repository, so an agent can change that script in a
   ticket; the change is in the diff the reviewer reads.
+- An agent terminal's token (role `terminal`) plans like the planner: it
+  may create tickets of any kind, and, because you are at the keyboard, put
+  one straight into `ready` (every other agent files into `backlog`). It
+  holds no ticket, so it cannot claim, submit or report, and it is refused
+  `request` and `halt`: it asks you in the terminal. Its page connection,
+  `/ws/terminal` on the UI port, is accepted only from a loopback host
+  name, from the same origin as the page, and with the per-terminal key
+  that only the UI's own API hands out (a page on another site, or one
+  that rebinds its name to 127.0.0.1, fails one of those).
 - The proxy allows plain HTTP only to `host.docker.internal:4701` and only
   under the path prefix `/agent/`. The UI and the session management API
   live on **4700**, bound to `127.0.0.1`, which no container can reach.
@@ -243,6 +252,23 @@ and harness git do not see them.
   under the session directory or the home volume holds a credential
   (docs/DRIVERS.md).
 - The run's board token, scoped as described above.
+
+**Agent terminals.** An agent terminal (Claude Code or Codex in their own
+interface, typed to from the session page) is the one exec the host app
+makes through the Docker Engine API instead of the CLI, because
+`docker exec -it` needs a terminal on the host side that Node cannot make
+without a native module (src/sandbox/docker-api.ts). The equivalent argv is
+`docker exec -it -w /workspace -e NAME … verstas-<session> node
+/opt/verstas/terminal.js --job <job.json>`. The credential and the run
+token go in the exec request's body to the local daemon socket, so they
+appear in no argv and in no process environment on the host; in the box
+they reach that one process, as for a worker. The difference for Codex: so
+that `codex resume` works between terminals, its home is
+`~/.verstas/codex-terminal` in the home volume, and the login file lives
+there while the terminal runs. When the agent exits, a login it rotated is
+handed back in a job file the host reads and deletes, and the login file
+in the home volume is removed. A terminal killed with SIGKILL can leave it
+behind until the next Codex terminal overwrites and removes it.
 
 **Commits are scanned.** Before the harness commits, it reads each repo's
 staged diff on the host and looks for every agent credential (the Claude

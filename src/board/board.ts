@@ -194,14 +194,18 @@ export const validateRepos = (tickets: readonly Pick<Ticket, "id" | "repo" | "st
 
 // --- The agent's limited powers --------------------------------------------
 
-/** Who is calling the agent API: a worker on a ticket, the planner, or a lead that works the board. */
-export type AgentRole = "worker" | "planner" | "lead";
+/**
+ * Who is calling the agent API: a worker on a ticket, the planner, a lead
+ * that works the board, or the agent in your terminal (you are typing to
+ * it, so it plans like the planner and holds no ticket).
+ */
+export type AgentRole = "worker" | "planner" | "lead" | "terminal";
 
 export const AGENT_TICKET_KINDS: readonly TicketKind[] = ["bug", "followup", "chore"];
 
-/** Workers create tickets of these kinds only; the planner and a lead may also create features (into the backlog, for your approval). */
+/** Workers create tickets of these kinds only; the planner, a lead and a terminal agent may also create features (into the backlog, for your approval). */
 export const assertAgentMayCreate = (kind: TicketKind, role: AgentRole): void => {
-  if (role === "planner" || role === "lead") return;
+  if (role === "planner" || role === "lead" || role === "terminal") return;
   if (!AGENT_TICKET_KINDS.includes(kind)) {
     throw new BoardError(`A worker may not create ${kind} tickets; file an idea instead`, "forbidden_kind");
   }

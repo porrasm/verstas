@@ -1,4 +1,5 @@
 import { createServer, type Server } from "node:http";
+import { terminalUpgrade, type LiveTerminal } from "./harness/terminal.js";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -188,9 +189,26 @@ export const startVerstas = async (): Promise<Verstas> => {
   });
 
   const server = createServer(uiApp);
-  const wss = new WebSocketServer({ server, path: "/ws" });
-  // It re-emits the HTTP server's errors; a taken port is reported by the listen below.
-  wss.on("error", () => undefined);
+  // Two sockets share the UI server, routed by path: /ws streams board changes and run events; /ws/terminal is one agent terminal.
+  const wss = new WebSocketServer({ noServer: true });
+  const terminalWss = new WebSocketServer({ noServer: true });
+  server.on("upgrade", (req, socket, head) => {
+    const url = new URL(req.url ?? "/", "http://localhost");
+    if (url.pathname === "/ws") {
+      wss.handleUpgrade(req, socket, head, (ws) => wss.emit("connection", ws, req));
+      return;
+    }
+    if (url.pathname === "/ws/terminal") {
+      const live = terminalUpgrade(req, url, (id) => runs.terminal(id));
+      if (!live) {
+        socket.end("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
+        return;
+      }
+      terminalWss.handleUpgrade(req, socket, head, (ws) => attachTerminal(ws, live));
+      return;
+    }
+    socket.destroy();
+  });
   const broadcast = (msg: unknown) => {
     const data = JSON.stringify(msg);
     for (const c of wss.clients) if (c.readyState === WebSocket.OPEN) c.send(data);
@@ -247,10 +265,38 @@ export const startVerstas = async (): Promise<Verstas> => {
       // Idle boxes do not outlive the app: their services stop with it, and the next run brings them back.
       const stoppedBoxes = await stopAllSandboxes(sandbox).catch(() => [] as string[]);
       if (stoppedBoxes.length) console.log(`stopped ${stoppedBoxes.length} session container${stoppedBoxes.length > 1 ? "s" : ""}`);
-      for (const c of wss.clients) c.terminate();
+      for (const c of [...wss.clients, ...terminalWss.clients]) c.terminate();
       await Promise.all([closeServer(server), closeServer(agentServer)]);
     })());
   return { url, version, stop };
+};
+
+/** One page on one terminal: keystrokes and screen bytes in binary frames; a resize or a notice as a JSON text frame. */
+const attachTerminal = (ws: WebSocket, live: LiveTerminal): void => {
+  const detach = live.attach({
+    data: (chunk) => {
+      if (ws.readyState === WebSocket.OPEN) ws.send(chunk, { binary: true });
+    },
+    notice: (n) => {
+      if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(n));
+    },
+  });
+  ws.on("message", (data, isBinary) => {
+    const buf = Buffer.isBuffer(data) ? data : Array.isArray(data) ? Buffer.concat(data) : Buffer.from(data);
+    if (isBinary) {
+      live.input(buf);
+      return;
+    }
+    try {
+      const m = JSON.parse(buf.toString("utf8")) as { type?: string; cols?: number; rows?: number; data?: string };
+      if (m.type === "resize" && typeof m.cols === "number" && typeof m.rows === "number") live.resize(m.cols, m.rows);
+      else if (m.type === "input" && typeof m.data === "string") live.input(m.data);
+    } catch {
+      // not a control message; ignore
+    }
+  });
+  ws.on("close", detach);
+  ws.on("error", detach);
 };
 
 const closeServer = (s: Server) =>
