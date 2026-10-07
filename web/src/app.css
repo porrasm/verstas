@@ -512,6 +512,10 @@ textarea.invalid { border-color: var(--warn); }
 .dialog { background: var(--panel); border: 1px solid var(--line-2); border-radius: var(--radius); box-shadow: var(--shadow); width: min(600px, 100%); max-height: calc(100vh - 32px); overflow: auto; padding: 16px 18px; display: grid; gap: 12px; }
 .dialog h3 { margin: 0; }
 .dialog .actions { display: flex; gap: 8px; justify-content: flex-end; }
+.dialog.working { width: min(440px, 100%); }
+.spinner { width: 18px; height: 18px; border-radius: 50%; border: 2px solid var(--line-2); border-top-color: var(--signal, currentColor); animation: spin 0.8s linear infinite; flex: none; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 2.4s; } }
 
 /* Plan view: the launch panel beside the setup sheet stays in reach while the sheet scrolls. */
 .side.sticky { position: sticky; top: 12px; }

@@ -359,6 +359,7 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
         </div>
       )}
       {err && <div className="banner warn"><span>{err}</span><button className="quiet sm end" onClick={() => setErr("")}>Dismiss</button></div>}
+      {busy in EXPORT_MODAL && <WorkingModal title={EXPORT_MODAL[busy]!.title} detail={EXPORT_MODAL[busy]!.detail} />}
       {notice && <div className="banner good"><span>{notice}</span><button className="quiet sm end" onClick={() => setNotice("")}>Dismiss</button></div>}
       {busy && <div className="muted small">{busy}…</div>}
 
@@ -1555,6 +1556,32 @@ const TicketCard = ({ t, clock, doneIds, request, active, open, onOpen, onRetry,
         </div>
       )}
     </button>
+  );
+};
+
+// --- long actions ---------------------------------------------------------------
+
+/** The busy labels that block the page with a modal while they run: exports take a while and must not be clicked twice. */
+const EXPORT_MODAL: Record<string, { title: string; detail: string }> = {
+  "exporting the session": { title: "Exporting session…", detail: "Bundling each clone inside the container and packing the settings, board, notes and run history into a .ver archive. Your browser saves it when it is ready." },
+  exporting: { title: "Exporting bundles…", detail: "Bundling each repository's clone inside the container." },
+};
+
+/** A modal with a spinner and the time elapsed, for an action with no progress to report. */
+const WorkingModal = ({ title, detail }: { title: string; detail: string }) => {
+  const [start] = useState(Date.now());
+  const now = useNow(1000);
+  return (
+    <div className="overlay" role="dialog" aria-modal="true" aria-labelledby="working-title" aria-busy="true">
+      <div className="dialog working">
+        <div className="row" style={{ gap: 12 }}>
+          <span className="spinner" aria-hidden="true" />
+          <h3 id="working-title">{title}</h3>
+          <span className="muted small mono end">{fmtSpan((now - start) / 1000)}</span>
+        </div>
+        <p className="muted small" style={{ margin: 0 }}>{detail}</p>
+      </div>
+    </div>
   );
 };
 
