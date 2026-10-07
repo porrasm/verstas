@@ -80,9 +80,12 @@ Then, in the web app:
    tickets…** takes a request ("build the mapping engine, done means …")
    and runs a planner that drafts backlog tickets from it and the
    repositories. The environment and the session settings fold away in
-   the sidebar; **Reset environment** there removes the container and the
-   clones and makes the session a plan again; the board and the notes
-   stay.
+   the sidebar; **Reset environment** there removes the container, the
+   home volume, the snapshot and the clones and makes the session a plan
+   again; the board, notes and settings stay. Its dialog counts each
+   repository's commits since the session started and offers Apply or
+   Export first, since unapplied work on a run branch goes with the
+   clones.
 4. **Recipes** (own tab): bash that runs once when a session's container
    is created, so the box starts set up. After a session's setup worker
    built an environment, "Save as recipe" on the session page puts its

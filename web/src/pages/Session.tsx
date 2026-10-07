@@ -985,11 +985,103 @@ const EnvironmentPanel = ({ env }: { env: Env }) => {
         <NotesSection env={env} />
         <Divider />
         <div className="small">
-          <ConfirmButton className="quiet sm" label="Reset environment" confirm="Remove the container, its home volume, the snapshot and the clones? The board, notes and settings stay; initialize again afterwards." onConfirm={() => void act(() => api("POST", `${base}/reset`), "Reset. The session is a plan again.")} disabled={busy || active} />
+          <ResetEnvironment env={env} />
         </div>
         {msg && <div className="muted small">{msg}</div>}
       </div>
     </details>
+  );
+};
+
+/**
+ * Reset environment: what goes, said plainly, with each repository's
+ * commits since the session started. The clones are deleted, so work on a
+ * run branch that was not applied or exported is lost; when there is any,
+ * the dialog offers Apply and Export before the reset.
+ */
+const ResetEnvironment = ({ env }: { env: Env }) => {
+  const { session, base, active, busy, act } = env;
+  const [open, setOpen] = useState(false);
+  const [repos, setRepos] = useState<{ name: string; runBranch: string; commits: number | null }[] | null>(null);
+  const [saved, setSaved] = useState<Record<string, string>>({});
+  const [working, setWorking] = useState("");
+  const [err, setErr] = useState("");
+  useEffect(() => {
+    if (!open) return;
+    setRepos(null);
+    setErr("");
+    api<{ repos: { name: string; runBranch: string; commits: number | null }[] }>("GET", `${base}/commits`)
+      .then((r) => setRepos(r.repos))
+      .catch((e: Error) => {
+        setErr(e.message);
+        setRepos(session.repos.map((r) => ({ name: r.name, runBranch: r.runBranch, commits: null })));
+      });
+  }, [open, base, session.repos]);
+  useEffect(() => {
+    if (!open) return;
+    const key = (e: KeyboardEvent) => e.key === "Escape" && !working && setOpen(false);
+    addEventListener("keydown", key);
+    return () => removeEventListener("keydown", key);
+  }, [open, working]);
+  const step = async (label: string, fn: () => Promise<string>) => {
+    setWorking(label);
+    setErr("");
+    try {
+      const done = await fn();
+      setSaved((x) => ({ ...x, [label]: done }));
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setWorking("");
+    }
+  };
+  const apply = (repo: string) => step(repo, async () => {
+    const r = await api<ApplyResult>("POST", `${base}/apply`, { repo });
+    return `applied to ${r.branch} in ${r.targetPath}`;
+  });
+  const exportAll = () => step("export", async () => {
+    const r = await api<{ howTo: string[] }>("POST", `${base}/export`);
+    return r.howTo.join(" ");
+  });
+  const atRisk = (repos ?? []).filter((r) => r.commits !== 0 && !saved[r.name] && !saved.export);
+  const reset = () => {
+    setOpen(false);
+    void act(() => api("POST", `${base}/reset`), "Environment reset. The session is a plan again; initialize it to get a box.");
+  };
+  if (!open) return <button className="quiet sm" onClick={() => setOpen(true)} disabled={busy || active} title={active ? "Pause or stop the run first" : undefined}>Reset environment</button>;
+  return (
+    <div className="overlay" onMouseDown={(e) => e.target === e.currentTarget && !working && setOpen(false)} role="dialog" aria-modal="true" aria-labelledby="reset-title">
+      <div className="dialog">
+        <h3 id="reset-title">Reset environment</h3>
+        <p className="small" style={{ margin: 0 }}>
+          This deletes the container, the proxy and network, the home volume (installed toolchains and caches), the snapshot, and <strong>the clones of your repositories</strong>. Commits on a run branch that you have not applied or exported are lost with them. The board, notes, settings and run history stay; the session becomes a plan again and needs Initialize.
+        </p>
+        <div className="stack tight">
+          {repos === null && <div className="muted small">Counting commits since the session started…</div>}
+          {repos?.map((r) => (
+            <div className="row small" key={r.name} style={{ justifyContent: "space-between" }}>
+              <span>
+                <strong>{r.name}</strong> <span className="mono muted">{r.runBranch}</span>:{" "}
+                {r.commits === null ? <span className="warn">could not count the commits</span> : r.commits === 0 ? <span className="muted">no commits since the session started</span> : <b>{r.commits} commit{r.commits === 1 ? "" : "s"} since the session started</b>}
+                {saved[r.name] && <span className="ok"> · {saved[r.name]}</span>}
+              </span>
+              {r.commits !== 0 && <button className="sm" onClick={() => void apply(r.name)} disabled={Boolean(working)}>{working === r.name ? "Applying…" : "Apply to repo"}</button>}
+            </div>
+          ))}
+          {repos && repos.some((r) => r.commits !== 0) && (
+            <div className="row small">
+              <button className="quiet sm" onClick={() => void exportAll()} disabled={Boolean(working)}>{working === "export" ? "Exporting…" : "Export bundles"}</button>
+              {saved.export && <span className="ok">{saved.export}</span>}
+            </div>
+          )}
+          {err && <div className="banner warn"><span>{err}</span></div>}
+        </div>
+        <div className="row">
+          <button className="warn solid" onClick={reset} disabled={repos === null || Boolean(working)}>{atRisk.length ? `Reset and lose ${atRisk.map((r) => r.name).join(", ")}'s unsaved work` : "Reset environment"}</button>
+          <button className="quiet" onClick={() => setOpen(false)} disabled={Boolean(working)}>Cancel</button>
+        </div>
+      </div>
+    </div>
   );
 };
 

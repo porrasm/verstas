@@ -1036,6 +1036,35 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
     return files;
   };
 
+  /**
+   * Commits on each repository's run branch since the session started, for
+   * the reset dialog: what a reset would delete unless applied or exported.
+   * Counted inside the container (Boundary 5); null when it cannot be.
+   */
+  api.get(
+    "/sessions/:id/commits",
+    wrap(async (req, res) => {
+      const h = await d.hub.get(param(req, "id"));
+      if (!isInitialized(h.session) || !h.session.repos.length) {
+        res.json({ repos: [] });
+        return;
+      }
+      const sh = await ensureSessionSandbox(d.runConfig, h.session, path.join(h.paths.dir, "sandbox.env"), false)
+        .then(() => dockerShell(d.sandbox, h.id))
+        .catch(() => null);
+      const repos: { name: string; runBranch: string; commits: number | null }[] = [];
+      for (const r of h.session.repos) {
+        let commits: number | null = null;
+        if (sh && r.baseCommit) {
+          const out = await sh.exec(["git", "rev-list", "--count", `${r.baseCommit}..${r.runBranch}`], { workdir: `/workspace/${r.name}`, timeoutMs: 60_000 }).catch(() => null);
+          if (out?.code === 0 && /^\d+$/.test(out.stdout.trim())) commits = Number(out.stdout.trim());
+        }
+        repos.push({ name: r.name, runBranch: r.runBranch, commits });
+      }
+      res.json({ repos });
+    }),
+  );
+
   api.post(
     "/sessions/:id/export",
     wrap(async (req, res) => {
