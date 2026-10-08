@@ -133,7 +133,7 @@ Emit events to an injected sink.
   expect(r.goal).toBe("Build the mapping engine");
   expect(r.tickets).toHaveLength(2);
   const a = r.tickets[0]!;
-  expect(a).toMatchObject({ id: "T-3", title: "Mapping engine: CC and notes", size: "M", repo: "nuppi", deps: ["T-1", "T-2"], priority: 20 });
+  expect(a).toMatchObject({ id: "T-3", title: "Mapping engine: CC and notes", size: "M", repos: ["nuppi"], deps: ["T-1", "T-2"], priority: 20 });
   expect(a.acceptance).toEqual(["7-bit and 14-bit CC covered by tests", "no Electron imports"]);
   expect(a.spec).toBe("Pure module in src/engine.\nInput is a 0..1 value.");
   expect(r.tickets[1]).toMatchObject({ title: "Mock MIDI port", kind: "chore", state: "ready", spec: "Emit events to an injected sink." });
@@ -147,7 +147,7 @@ test("paste detection accepts JSON objects, JSON arrays and markdown", () => {
 
 test("validateRepos names the offending tickets and the repos the session has", () => {
   const b = seeded();
-  const withRepos = { ...b, tickets: b.tickets.map((t, i) => ({ ...t, repo: i === 0 ? "app" : "capability" })) };
+  const withRepos = { ...b, tickets: b.tickets.map((t, i) => ({ ...t, repos: i === 0 ? ["app"] : ["app", "capability"] })) };
   expect(() => validateRepos(withRepos.tickets, ["app"])).toThrow(/T-2, T-3 name repo "capability", but the session's repositories are: app/);
   expect(() => validateRepos(withRepos.tickets, ["app", "capability"])).not.toThrow();
   expect(() => validateRepos(b.tickets, [])).not.toThrow(); // no repo field: fine

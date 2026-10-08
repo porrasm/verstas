@@ -10,6 +10,7 @@ import {
   agentFor,
   agentSpecSchema,
   reviewModeSchema,
+  effectivePolicy,
   capsSchema,
   choreIdSchema,
   sessionModeSchema,
@@ -433,7 +434,7 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
         res.json({
           ok: true,
           goal: r.board.goal,
-          tickets: r.board.tickets.map((t) => ({ id: t.id, title: t.title, kind: t.kind, repo: t.repo, size: t.size, state: t.state, deps: t.deps, acceptance: t.acceptance.length })),
+          tickets: r.board.tickets.map((t) => ({ id: t.id, title: t.title, kind: t.kind, repos: t.repos, size: t.size, state: t.state, deps: t.deps, acceptance: t.acceptance.length })),
           chores: r.chores.length,
         });
       } catch (e) {
@@ -739,17 +740,39 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
     }),
   );
 
-  /** A repository's own check (repo.check): set or cleared at any time; the next submission uses it. */
+  /**
+   * Your overrides of a repository's policy (docs/BOARD.md, "Judging").
+   * Each field: a value locks it against the agents, null hands it back to
+   * them. `check` is a command; `noCheck: true` is "no check at all".
+   */
   api.put(
-    "/sessions/:id/repos/:name/check",
+    "/sessions/:id/repos/:name/policy",
     wrap(async (req, res) => {
-      const { check } = z.object({ check: z.string().max(2000).nullable() }).parse(req.body);
+      const body = z
+        .object({
+          check: z.string().max(2000).nullable().optional(),
+          noCheck: z.boolean().nullable().optional(),
+          review: reviewModeSchema.nullable().optional(),
+          alsoCheck: z.array(z.string().min(1).max(64)).max(20).nullable().optional(),
+        })
+        .parse(req.body);
       const h = await d.hub.get(param(req, "id"));
       const name = param(req, "name");
       if (!h.session.repos.some((r) => r.name === name)) throw Object.assign(new Error(`No repository ${name} in this session`), { status: 404 });
-      const value = check?.trim() || undefined;
-      await h.mutate((docs) => ({ next: { session: { ...docs.session, repos: docs.session.repos.map((r) => (r.name === name ? { ...r, check: value } : r)) } } }));
-      res.json({ ok: true, check: value ?? null });
+      const names = h.session.repos.map((r) => r.name);
+      const bad = (body.alsoCheck ?? []).filter((a) => a === name || !names.includes(a));
+      if (bad.length) throw Object.assign(new Error(`Also check must name other repositories of this session, not ${bad.join(", ")}`), { status: 400 });
+      const pick = <T,>(v: T | null | undefined, cur: T | undefined): T | undefined => (v === undefined ? cur : v === null ? undefined : v);
+      const repo = await h.mutate((docs) => {
+        const repos = docs.session.repos.map((r) => {
+          if (r.name !== name) return r;
+          const noCheck = body.noCheck === undefined ? r.noCheck : body.noCheck || undefined;
+          const check = noCheck && body.noCheck ? undefined : body.check === undefined ? r.check : body.check?.trim() || undefined;
+          return { ...r, check, noCheck: check ? undefined : noCheck, review: pick(body.review, r.review), alsoCheck: pick(body.alsoCheck, r.alsoCheck) };
+        });
+        return { next: { session: { ...docs.session, repos } }, result: repos.find((r) => r.name === name)! };
+      });
+      res.json({ ok: true, repo, effective: effectivePolicy(repo) });
     }),
   );
 
@@ -1441,7 +1464,8 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
   const ticketEdit = z.object({
     title: z.string().min(1).max(200).optional(),
     kind: ticketKindSchema.optional(),
-    repo: z.string().max(100).nullable().optional(),
+    /** Expected repositories, a hint; [] clears. */
+    repos: z.array(z.string().min(1).max(100)).max(20).optional(),
     size: ticketSizeSchema.optional(),
     priority: z.number().int().min(0).max(1000).optional(),
     deps: z.array(ticketIdSchema).optional(),
@@ -1476,7 +1500,7 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
       const h = await d.hub.get(param(req, "id"));
       const ticket = await h.mutate((docs) => {
         const t = getTicket(docs.board, tid);
-        const next: Ticket = { ...t, ...Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined)), repo: patch.repo === null ? undefined : (patch.repo ?? t.repo), agent: patch.agent === null ? undefined : (patch.agent ?? t.agent), review: patch.review === null ? undefined : (patch.review ?? t.review), updatedAt: now() } as Ticket;
+        const next: Ticket = { ...t, ...Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined)), agent: patch.agent === null ? undefined : (patch.agent ?? t.agent), review: patch.review === null ? undefined : (patch.review ?? t.review), updatedAt: now() } as Ticket;
         const board = replaceTicket(docs.board, next);
         validateDeps(board.tickets);
         validateRepos([next], docs.session.repos.map((x) => x.name));

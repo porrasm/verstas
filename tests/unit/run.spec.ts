@@ -350,15 +350,21 @@ test("parseVerdict reads the first verdict line and a short reason", () => {
   expect(parseVerdict("no verdict here")).toBeNull();
 });
 
-test("a run refuses to start while a live ticket names a repo the session lacks", async () => {
+test("a ticket's expected repositories are a hint: a name the session lacks is noted and the ticket still runs", async () => {
   const s = await makeSession({ reviewer: false });
   try {
     const h = await s.hub.get(s.id);
-    await h.mutate((d) => ({ next: { board: { ...d.board, tickets: d.board.tickets.map((t) => (t.id === "T-1" ? { ...t, repo: "capability" } : t)) } } }));
+    await h.mutate((d) => ({ next: { board: { ...d.board, tickets: d.board.tickets.map((t) => (t.id === "T-1" ? { ...t, repos: ["capability"] } : t)) } } }));
     const shell = fakeShell();
-    const worker = fakeWorker(s.hub, s.id, async () => ({}));
-    await expect(manager(s, shell, worker).start(s.id)).rejects.toThrow(/T-1 names repo "capability", but the session's repositories are: app/);
-    expect(worker.jobs).toHaveLength(0);
+    const worker = fakeWorker(s.hub, s.id, async (job, hub, id) => {
+      if (job.role === "implementer") await fileReport(hub, id, job.ticket!, "done");
+      return {};
+    });
+    await (await manager(s, shell, worker).start(s.id)).done;
+    const t1 = getTicket((await s.hub.get(s.id)).board, "T-1");
+    expect(t1.state).toBe("done");
+    expect(t1.notes.map((n) => n.text).join("\n")).toContain("Expected repositories capability are not in this session (it has app)");
+    expect(t1.notes.map((n) => n.text).join("\n")).toContain("planned capability; touched app");
   } finally {
     await fs.rm(s.root, { recursive: true, force: true });
   }
@@ -619,7 +625,7 @@ test("a failing harness gate is evidence for the reviewer, not a verdict", async
     expect(run.state).toBe("finished");
     expect((await s.hub.get(s.id)).board.tickets.map((t) => t.state)).toEqual(["done", "done"]);
     expect(reviewerPrompts[0]).toContain("evidence, not a verdict");
-    expect(reviewerPrompts[0]).toContain("FAILED npm run test");
+    expect(reviewerPrompts[0]).toContain("FAILED app: npm run test");
   } finally {
     await fs.rm(s.root, { recursive: true, force: true });
   }
@@ -1513,10 +1519,10 @@ test("with the repository's check configured, the harness runs it once instead o
     expect(shell.calls.some((c) => c.join(" ").startsWith("npm run"))).toBe(false);
     expect(events.filter((e) => e.kind === "gate").map((e) => (e as { name: string }).name)).toEqual(["check app"]);
     const prompt = await fs.readFile(onHost(s, worker.jobs.find((j) => j.role === "reviewer")!.promptFile), "utf8");
-    expect(prompt).toContain("The repository's check (run by the harness, passed)");
-    expect(prompt).toContain("Do not run it again");
+    expect(prompt).toContain("The repositories' checks (run by the harness, passed)");
+    expect(prompt).toContain("Do not run them again");
     expect(await fs.readFile(path.join(s.paths.workspace, ".verstas", "logs", "T-1-app-check.log"), "utf8")).toContain("Passed!");
-    expect(await fs.readFile(path.join(s.paths.workspace, "VERSTAS.md"), "utf8")).toContain("runs each repository's full check once: `bash scripts/check.sh` in /workspace/app");
+    expect(await fs.readFile(path.join(s.paths.workspace, "VERSTAS.md"), "utf8")).toContain("/workspace/app: check `bash scripts/check.sh` (set by the user)");
   } finally {
     await fs.rm(s.root, { recursive: true, force: true });
   }

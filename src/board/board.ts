@@ -12,6 +12,7 @@ import {
   type Sweep,
   type SweepResult,
   type Ticket,
+  importRepos,
   type TicketImport,
   type TicketKind,
   type TicketState,
@@ -177,15 +178,18 @@ export const validateDeps = (tickets: readonly Ticket[]): void => {
   for (const t of tickets) visit(t.id, []);
 };
 
+/** A ticket's expected repositories that are not among the session's. */
+export const unknownRepos = (t: Pick<Ticket, "repos">, repoNames: readonly string[]): string[] => t.repos.filter((r) => !repoNames.includes(r));
+
 /**
- * Every ticket that names a repo must name one of the session's. Checked at
- * session creation, on import, on create and edit, and before a run starts,
- * so a board can never reference a clone that is not in the workspace.
+ * Every repository a ticket expects must be one of the session's. The list
+ * is a hint, so this only catches typos: checked at session creation, on
+ * import, create and edit. A run notes an unknown name and goes on.
  */
-export const validateRepos = (tickets: readonly Pick<Ticket, "id" | "repo" | "state">[], repoNames: readonly string[], opts: { ignoreDone?: boolean } = {}): void => {
-  const bad = tickets.filter((t) => t.repo && !repoNames.includes(t.repo) && !(opts.ignoreDone && t.state === "done"));
+export const validateRepos = (tickets: readonly Pick<Ticket, "id" | "repos" | "state">[], repoNames: readonly string[], opts: { ignoreDone?: boolean } = {}): void => {
+  const bad = tickets.filter((t) => unknownRepos(t, repoNames).length && !(opts.ignoreDone && t.state === "done"));
   if (!bad.length) return;
-  const names = [...new Set(bad.map((t) => t.repo))].map((r) => `"${r}"`).join(", ");
+  const names = [...new Set(bad.flatMap((t) => unknownRepos(t, repoNames)))].map((r) => `"${r}"`).join(", ");
   throw new BoardError(
     `${bad.map((t) => t.id).join(", ")} name${bad.length === 1 ? "s" : ""} repo ${names}, but the session's repositories are: ${repoNames.join(", ") || "none"}`,
     "unknown_repo",
@@ -245,7 +249,7 @@ export const agentAddDep = (board: Board, id: string, dep: string, reason: strin
 };
 
 /** What the agent in your terminal may change on a ticket. */
-export type TicketEdit = Partial<Pick<Ticket, "title" | "kind" | "spec" | "acceptance" | "size" | "repo" | "deps" | "priority">> & { state?: "backlog" | "ready" };
+export type TicketEdit = Partial<Pick<Ticket, "title" | "kind" | "spec" | "acceptance" | "size" | "repos" | "deps" | "priority">> & { state?: "backlog" | "ready" };
 
 const HELD_BY_WORKER: readonly TicketState[] = ["in_progress", "review"];
 
@@ -346,7 +350,7 @@ export const importBoard = (
         ...existing,
         title: inc.title,
         kind,
-        repo: inc.repo ?? existing.repo,
+        repos: importRepos(inc) ?? existing.repos,
         size: inc.size ?? existing.size,
         priority: inc.priority ?? existing.priority,
         deps: inc.deps ?? existing.deps,
@@ -374,7 +378,7 @@ export const importBoard = (
         id,
         title: inc.title,
         kind,
-        repo: inc.repo,
+        repos: importRepos(inc) ?? [],
         size: inc.size ?? "M",
         priority: inc.priority ?? 100,
         deps: inc.deps ?? [],
@@ -571,7 +575,7 @@ export const exportBoard = (board: Board): string => JSON.stringify(board, null,
  * Accepts the loose markdown an assistant writes when asked for a backlog:
  *
  *   ## T-3 · Mapping engine: CC and notes (M)
- *   Repo: nuppi · Deps: T-1, T-2 · Priority: 20
+ *   Repos: nuppi, docs · Deps: T-1, T-2 · Priority: 20
  *   Free text spec…
  *   - [ ] acceptance item
  *   - [ ] another
@@ -642,13 +646,13 @@ export const parseMarkdownBoard = (md: string): BoardImport => {
       cur.acceptance = [...(cur.acceptance ?? []), check[1]!.trim()];
       continue;
     }
-    const kv = /^\s*((?:Repo|Deps|Priority|Size|Kind|State|Pinned|Agent|Review)\s*:\s*[^·|]+(?:\s*[·|]\s*(?:Repo|Deps|Priority|Size|Kind|State|Pinned|Agent|Review)\s*:\s*[^·|]+)*)\s*$/i.exec(raw);
+    const kv = /^\s*((?:Repos?|Deps|Priority|Size|Kind|State|Pinned|Agent|Review)\s*:\s*[^·|]+(?:\s*[·|]\s*(?:Repos?|Deps|Priority|Size|Kind|State|Pinned|Agent|Review)\s*:\s*[^·|]+)*)\s*$/i.exec(raw);
     if (kv) {
       for (const part of kv[1]!.split(/\s*[·|]\s*/)) {
         const [k, ...v] = part.split(":");
         const key = k!.trim().toLowerCase();
         const val = v.join(":").trim();
-        if (key === "repo") cur.repo = val;
+        if (key === "repo" || key === "repos") cur.repos = val.split(/[,\s]+/).filter(Boolean);
         else if (key === "deps") cur.deps = val.split(/[,\s]+/).filter((d) => TICKET_ID_PATTERN.test(d));
         else if (key === "priority" && /^\d+$/.test(val)) cur.priority = Number(val);
         else if (key === "size" && /^[SML]$/i.test(val)) cur.size = val.toUpperCase() as "S" | "M" | "L";

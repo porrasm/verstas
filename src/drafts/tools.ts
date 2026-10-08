@@ -62,7 +62,7 @@ const stringList = (description: string, maxItems: number, maxLength = 2000) => 
 const TICKET_FIELDS = {
   title: str("Short imperative title", 200),
   kind: { type: "string", enum: ["feature", "bug", "followup", "chore"] },
-  repo: str("Directory name of one of the draft's repositories", 100),
+  repos: { type: "array", items: str("Directory name of one of the draft's repositories", 100), maxItems: 20, description: "The repositories you expect the ticket to touch: a hint for the user and the worker, who may touch others" },
   size: { type: "string", enum: ["S", "M", "L"], description: "S under half a day, M about a day, L several days (split L tickets when you can)" },
   priority: { type: "integer", minimum: 0, maximum: 1000, description: "Lower runs first" },
   deps: { type: "array", items: ticketIdProp, maxItems: 30, description: "Tickets that must be done first" },

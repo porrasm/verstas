@@ -16,6 +16,9 @@ import {
   ticketImportSchema,
   ticketKindSchema,
   ticketSizeSchema,
+  effectivePolicy,
+  importRepos,
+  repoPolicyPatchSchema,
   type AgentRequest,
   type Board,
   type Inbox,
@@ -24,6 +27,7 @@ import {
 } from "../core/types.js";
 import { addChore, addNote, agentAddDep, agentSetPriority, beginSweep, BoardError, canStart, deleteTicket, editTicket, getTicket, importBoard, openChores, replaceTicket, setChoreState, sweepInFlight, sweepToJudging, transition, validateRepos, type AgentRole } from "../board/board.js";
 import type { SessionHub } from "../sessions/hub.js";
+import { lockedFields, mergePolicy } from "../harness/judging.js";
 
 /**
  * The agent API: what a worker inside the box may do to its session,
@@ -32,7 +36,14 @@ import type { SessionHub } from "../sessions/hub.js";
  * other runs, or the inbox's decisions.
  */
 
-export type RunToken = { sessionId: string; runId: number; role: AgentRole; currentTicket?: string };
+export type RunToken = {
+  sessionId: string;
+  runId: number;
+  role: AgentRole;
+  currentTicket?: string;
+  /** The worker's job (setup, implementer, reviewer…); `role` is coarser. */
+  job?: string;
+};
 
 /**
  * What the run behind a lead's token does when the lead drives the board
@@ -54,6 +65,10 @@ export type AgentRunHooks = {
   sweepStarted?(run: RunToken, ids: string[]): void;
   /** The lead submitted its sweep with one result per chore; the run judges it (checks, size, commit) and settles the chores. */
   sweepSubmitted?(run: RunToken, results: SweepResult[]): void;
+  /** Runs a proposed check command in a repository's clone as it is now; a check that fails today is refused. */
+  verifyCheck?(sessionId: string, repo: string, command: string): Promise<{ ok: boolean; summary: string; tail: string }>;
+  /** What the judge would see if the change were submitted now: touched repositories, the checks that would run, the review level. */
+  previewJudging?(sessionId: string, ticketId?: string): Promise<unknown>;
 };
 
 /** The chore list at the session's sweep line: the lead sweeps (or drops) before it starts another ticket. */
@@ -101,7 +116,7 @@ const summary = (t: Ticket) => ({
   size: t.size,
   priority: t.priority,
   deps: t.deps,
-  repo: t.repo,
+  repos: t.repos,
   pinned: t.pinned,
   agent: t.agent,
 });
@@ -278,6 +293,8 @@ export const createAgentApi = (hub: SessionHub, tokens: RunTokens, hooks?: Agent
           spec: z.string().max(50_000).optional(),
           acceptance: z.array(z.string().min(1).max(2000)).optional(),
           size: ticketSizeSchema.optional(),
+          repos: z.array(z.string().min(1).max(100)).max(20).optional(),
+          /** The older single-repository form. */
           repo: z.string().min(1).max(100).optional(),
           deps: z.array(ticketIdSchema).optional(),
           priority: z.number().int().min(0).max(1000).optional(),
@@ -285,7 +302,8 @@ export const createAgentApi = (hub: SessionHub, tokens: RunTokens, hooks?: Agent
           reason: z.string().min(1).max(2000),
         })
         .parse(req.body);
-      const { reason, ...patch } = body;
+      const { reason, repo, ...rest } = body;
+      const patch = { ...rest, repos: importRepos({ repos: rest.repos, repo }) };
       const id = ticketIdSchema.parse(req.params.id);
       const h = await hub.get(req.run.sessionId);
       const t = await h.mutate((d) => {
@@ -371,6 +389,111 @@ export const createAgentApi = (hub: SessionHub, tokens: RunTokens, hooks?: Agent
       });
       res.status(201).json({ ok: true, id: created.id, next: "The run pauses after you finish. Stop now and reply with what you found." });
       if (req.run.role === "lead" && req.run.currentTicket) hooks?.requested?.(req.run, req.run.currentTicket);
+    }),
+  );
+
+  // --- Repository policies: each repository's check and review -------------
+  // Kept by the agents (docs/BOARD.md, "Judging"): setup writes them, the
+  // lead and the agent in your terminal repair them, a ticket proposes a
+  // change that applies when it is accepted. Fields you set are refused.
+
+  const policyView = (r: import("../core/types.js").RepoSpec) => ({ name: r.name, effective: effectivePolicy(r), agentPolicy: r.agentPolicy ?? null, setByUser: lockedFields(r) });
+
+  r.get(
+    "/repos/policy",
+    wrap(async (req, res) => {
+      const h = await hub.get(req.run.sessionId);
+      res.json({ repos: h.session.repos.map(policyView) });
+    }),
+  );
+
+  const policyBody = z.object({ reason: z.string().min(1).max(500) }).extend(repoPolicyPatchSchema.shape);
+
+  /** The other session repositories a patch's alsoCheck names; anything else is refused. */
+  const checkAlso = (names: readonly string[], self: string, also?: readonly string[]) => {
+    const bad = (also ?? []).filter((a) => a === self || !names.includes(a));
+    if (bad.length) throw new BoardError(`alsoCheck must name other repositories of this session (${names.filter((n) => n !== self).join(", ") || "none"}), not ${bad.join(", ")}`, "unknown_repo");
+  };
+
+  r.put(
+    "/repos/:name/policy",
+    wrap(async (req, res) => {
+      const who = req.run.job === "setup" ? "setup" : req.run.role === "lead" ? "lead" : req.run.role === "terminal" ? "terminal" : undefined;
+      if (!who) {
+        res.status(403).json({ error: "Only setup, the lead and the agent in the user's terminal set a repository's policy; a ticket that changes what a check should be proposes it with repo_policy_propose" });
+        return;
+      }
+      const { reason, ...patch } = policyBody.parse(req.body);
+      const name = String(req.params.name);
+      const h = await hub.get(req.run.sessionId);
+      const repo = h.session.repos.find((x) => x.name === name);
+      if (!repo) throw new BoardError(`No repository ${name} in this session (${h.session.repos.map((x) => x.name).join(", ") || "none"})`, "unknown_repo");
+      checkAlso(h.session.repos.map((x) => x.name), name, patch.alsoCheck);
+      const locked = lockedFields(repo).filter((f) => (patch as Record<string, unknown>)[f] !== undefined);
+      if (locked.length) {
+        res.status(403).json({ error: `The user set ${locked.join(", ")} for ${name}; that is theirs. Leave ${locked.length === 1 ? "it" : "them"} out.` });
+        return;
+      }
+      if (typeof patch.check === "string") {
+        if (!hooks?.verifyCheck) {
+          res.status(409).json({ error: "No run is attached to try the check; nothing was changed" });
+          return;
+        }
+        const v = await hooks.verifyCheck(req.run.sessionId, name, patch.check);
+        if (!v.ok) {
+          res.status(422).json({ error: `\`${patch.check}\` fails in ${name} as the repository is now (${v.summary.slice(0, 200)}); a check that fails before any ticket would fail them all. Fix the environment or choose another command. Last lines:\n${v.tail.slice(-1500)}` });
+          return;
+        }
+      }
+      const out = await h.mutate((d) => {
+        const r0 = d.session.repos.find((x) => x.name === name)!;
+        const m = mergePolicy(r0, patch, { by: who, reason, at: now() });
+        const repos = d.session.repos.map((x) => (x.name === name ? { ...x, agentPolicy: m.policy } : x));
+        let inbox = d.inbox;
+        // You are told when the lead changes a check between tickets; setup's and your terminal's are yours to see already.
+        if (who === "lead" && m.changed.length) inbox = { ...inbox, messages: [...inbox.messages, messageSchema.parse({ id: nextId("M", inbox.messages), text: `The lead changed the check policy of ${name}: ${m.changed.join(", ")}. Why: ${reason}`, createdAt: now(), read: false })] };
+        return { next: { session: { ...d.session, repos }, inbox }, result: { changed: m.changed, view: policyView({ ...r0, agentPolicy: m.policy }) } };
+      });
+      res.json({ ok: true, ...out });
+    }),
+  );
+
+  r.post(
+    "/repos/:name/policy/propose",
+    wrap(async (req, res) => {
+      const ticketId = req.run.currentTicket;
+      if (!ticketId || (req.run.role !== "lead" && req.run.job !== "implementer")) {
+        res.status(403).json({ error: "Only the worker that holds a ticket proposes a policy change; it is judged with the ticket" });
+        return;
+      }
+      const { reason, ...patch } = policyBody.parse(req.body);
+      const name = String(req.params.name);
+      const h = await hub.get(req.run.sessionId);
+      const result = await h.mutate((d) => {
+        const repo = d.session.repos.find((x) => x.name === name);
+        if (!repo) throw new BoardError(`No repository ${name} in this session (${d.session.repos.map((x) => x.name).join(", ") || "none"})`, "unknown_repo");
+        checkAlso(d.session.repos.map((x) => x.name), name, patch.alsoCheck);
+        const locked = lockedFields(repo).filter((f) => (patch as Record<string, unknown>)[f] !== undefined);
+        if (locked.length) throw new BoardError(`The user set ${locked.join(", ")} for ${name}; that is theirs. Leave ${locked.length === 1 ? "it" : "them"} out.`, "forbidden_move");
+        const t = getTicket(d.board, ticketId);
+        if (!HELD.has(t.state)) throw new BoardError(`${ticketId} is ${t.state}; propose while you hold it`, "forbidden_move");
+        // One proposal per repository: a newer one replaces it.
+        const policyProposals = [...(t.policyProposals ?? []).filter((p) => p.repo !== name), { repo: name, patch, reason, at: now() }];
+        const board = addNote(replaceTicket(d.board, { ...t, policyProposals }), ticketId, "agent", `Proposed check policy for ${name}: ${JSON.stringify(patch)} (${reason})`);
+        return { next: { board }, result: policyProposals.length };
+      });
+      res.json({ ok: true, proposals: result, next: "It is tried when the ticket is judged (a proposed check runs in place of the current one), the reviewer sees it, and it applies if the ticket is accepted." });
+    }),
+  );
+
+  r.get(
+    "/changes",
+    wrap(async (req, res) => {
+      if (!hooks?.previewJudging) {
+        res.status(409).json({ error: "No run is attached to look at the working tree" });
+        return;
+      }
+      res.json(await hooks.previewJudging(req.run.sessionId, req.run.currentTicket));
     }),
   );
 

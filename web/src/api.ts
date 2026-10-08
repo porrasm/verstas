@@ -6,7 +6,8 @@ export type Ticket = {
   id: string;
   title: string;
   kind: string;
-  repo?: string;
+  /** The repositories the planner expects it to touch: a hint, not a limit. */
+  repos: string[];
   size: string;
   priority: number;
   deps: string[];
@@ -22,6 +23,10 @@ export type Ticket = {
   review?: ReviewMode;
   report?: string;
   diff?: { added: number; removed: number; files: number };
+  /** Each repository the last verdict found changed, with its check. */
+  touched?: TouchedRepo[];
+  /** Check policy changes the worker proposed; applied when the ticket is accepted. */
+  policyProposals?: { repo: string; patch: Record<string, unknown>; reason: string; at: string }[];
   cost?: { usd?: number };
   /** Timing (absent on tickets from before it was recorded): see ticketTiming. */
   stateSince?: string;
@@ -89,7 +94,7 @@ export type Session = {
   /** Legacy: the worker's Claude model from before `agents`; read through agentFor. */
   model?: string;
   agents?: SessionAgents;
-  repos: { name: string; sourcePath: string; branch: string; runBranch: string; baseCommit?: string; /** The repository's own check command. */ check?: string }[];
+  repos: RepoSpec[];
   attachments: { name: string; dir: string; bytes: number; skipped: string[]; description?: string }[];
   allowlist: string[];
   packs: string[];
@@ -186,7 +191,7 @@ type WsMessage =
   | { type: "draft"; draftId: string; deleted: boolean };
 
 /** A draft session (src/drafts/draft.ts): prepared by an assistant, created by you. */
-export type DraftTicket = { id: string; title: string; kind?: string; repo?: string; size?: string; priority?: number; deps?: string[]; state?: string; spec?: string; acceptance?: string[]; notes?: string[]; pinned?: boolean };
+export type DraftTicket = { id: string; title: string; kind?: string; repos?: string[]; /** Drafts from before `repos`. */ repo?: string; size?: string; priority?: number; deps?: string[]; state?: string; spec?: string; acceptance?: string[]; notes?: string[]; pinned?: boolean };
 export type Draft = {
   id: string;
   name: string;
@@ -314,3 +319,23 @@ export const copyText = async (text: string): Promise<void> => {
   }
 };
 export type ApplyResult = { targetPath: string; branch: string; base: string | null; commits: { sha: string; subject: string }[]; howTo: string[] };
+
+export type TouchedRepo = { repo: string; added: number; removed: number; files: number; check: "passed" | "failed" | "skipped" | "none" };
+
+export type PolicySource = { by: "setup" | "lead" | "ticket" | "terminal"; ticket?: string; reason: string; at: string };
+
+/** A session repository and how changes to it are judged: your fields lock, the agents keep the rest (agentPolicy). */
+export type RepoSpec = {
+  name: string;
+  sourcePath: string;
+  branch: string;
+  runBranch: string;
+  baseCommit?: string;
+  /** Your check command. */
+  check?: string;
+  /** Yours: no check at all. */
+  noCheck?: boolean;
+  review?: ReviewMode;
+  alsoCheck?: string[];
+  agentPolicy?: { check?: string | null; review?: ReviewMode; alsoCheck?: string[]; guardPaths?: string[]; setBy: Partial<Record<"check" | "review" | "alsoCheck" | "guardPaths", PolicySource>> };
+};

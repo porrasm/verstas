@@ -2,8 +2,9 @@ import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
-import { agentFor, boardDrivers, describeAgent, DRIVER_NAMES, type GateResult, eventSchema, isInitialized, matchesAnyGlob, now, requestOutcome, reviewModeFor, runSchema, SWEEP_PROTECTED_GLOBS, type AgentSpec, type Board, type DriverName, type Readiness, type Run, type Session, type SweepResult, type Ticket, type TicketState, type VerstasEvent } from "../core/types.js";
-import { addNote, canStart, getTicket, hasOpenWork, nextReady, openChores, releaseSweep, replaceTicket, settleSweep, sweepInFlight, transition, validateRepos } from "../board/board.js";
+import { agentFor, boardDrivers, describeAgent, DRIVER_NAMES, type GateResult, eventSchema, isInitialized, matchesAnyGlob, now, requestOutcome, runSchema, SWEEP_PROTECTED_GLOBS, type AgentSpec, type RepoPolicyPatch, type TouchedRepo, type Board, type DriverName, type Readiness, type Run, type Session, type SweepResult, type Ticket, type TicketState, type VerstasEvent } from "../core/types.js";
+import { addNote, canStart, getTicket, hasOpenWork, nextReady, openChores, releaseSweep, replaceTicket, settleSweep, sweepInFlight, transition, unknownRepos } from "../board/board.js";
+import { earlierAttempts, guardHits, mergePolicy, planChecks, plannedVsTouched, reviewLevel, type PlannedCheck, type RepoChange } from "./judging.js";
 import { writeJsonAtomic } from "../board/store.js";
 import type { SessionHandle, SessionHub } from "../sessions/hub.js";
 import type { AgentRunHooks, RunToken, RunTokens } from "../agent-api/agent-api.js";
@@ -169,8 +170,6 @@ export class RunManager implements AgentRunHooks {
         });
       }
     }
-    // Refuse up front rather than discover it ticket by ticket.
-    validateRepos(h.board.tickets, h.session.repos.map((r) => r.name), { ignoreDone: true });
     // A ticket's own agent needs its backend on the allowlist, like a session agent does.
     if (boardDrivers(h.board).length) {
       await h.mutate((docs) => {
@@ -606,27 +605,6 @@ export class RunManager implements AgentRunHooks {
           break;
         }
 
-        // A ticket that names a repository this session does not have cannot be
-        // worked, committed or exported; say so instead of spending a worker.
-        if (ticket.repo && !h.session.repos.some((r) => r.name === ticket.repo)) {
-          const have = h.session.repos.map((r) => r.name).join(", ") || "none";
-          await h.mutate((docs) => ({
-            next: {
-              board: transition(docs.board, ticket.id, "in_progress", { by: "harness", text: "Checking the ticket's repository" }),
-            },
-          }));
-          await h.mutate((docs) => ({
-            next: {
-              board: transition(docs.board, ticket.id, "blocked", {
-                by: "harness",
-                text: `Ticket names repo "${ticket.repo}" but this session has: ${have}. Fix the repo field (edit the ticket, or re-import the board with the right name) and move it back to ready.`,
-              }),
-            },
-          }));
-          await log({ kind: "ticket", t: clock(), ticket: ticket.id, from: "ready", to: "blocked", note: `unknown repo "${ticket.repo}" (session has ${have})` });
-          continue;
-        }
-
         const outcome = await this.workTicket(h, run, ticket, log, ctl.signal, convo);
         await saveRun();
         if (outcome === "rate_limited") {
@@ -856,27 +834,22 @@ export class RunManager implements AgentRunHooks {
     if (!sw) return "refused";
     const caps = h.session.caps;
     const sh = this.deps.shell(h.id);
-    let added = 0;
-    let removed = 0;
-    let files = 0;
-    const touched: string[] = [];
-    const protectedHits: string[] = [];
-    for (const repo of h.session.repos) {
-      const dir = `/workspace/${repo.name}`;
-      const d = await this.stageAndDiff(h.id, dir);
-      added += d.numstat.added;
-      removed += d.numstat.removed;
-      files += d.numstat.files;
-      if (d.numstat.files) touched.push(repo.name);
-      for (const p of d.paths) if (matchesAnyGlob(p, SWEEP_PROTECTED_GLOBS)) protectedHits.push(`${repo.name}/${p}`);
-    }
+    // The same judging as a ticket's, without a reviewer: every changed repository's check (and its also-checks), one after another.
+    const changes = await this.collectChanges(h);
+    const added = sum(changes, "added");
+    const removed = sum(changes, "removed");
+    const files = sum(changes, "files");
+    const touched = changes.map((c) => c.repo);
+    const protectedHits = changes.flatMap((c) => c.paths.filter((p) => matchesAnyGlob(p, SWEEP_PROTECTED_GLOBS)).map((p) => `${c.repo}/${p}`));
+    const guarded = guardHits(h.session, changes);
     const gates: GateResult[] = [];
-    for (const name of touched.length ? touched : h.session.repos.slice(0, 1).map((r) => r.name)) gates.push(...(await this.runGates(h.id, `/workspace/${name}`, log)));
+    for (const c of planChecks(h.session, touched)) gates.push(...(await this.runGates(h, c, log)));
     const failed = gates.filter((g) => !g.ok);
     const lines = added + removed;
     let refusal: string | undefined;
     if (signal.aborted) refusal = "the run stopped before the sweep was judged";
-    else if (failed.length) refusal = `checks failed: ${failed.map((g) => `${g.name} (${g.summary.slice(0, 160)})`).join("; ")}. Fix and sweep again, or revert the changes.`;
+    else if (failed.length) refusal = `checks failed: ${failed.map((g) => `${g.repo && h.session.repos.length > 1 ? `${g.repo}: ` : ""}${g.name} (${g.summary.slice(0, 160)})`).join("; ")}. Fix and sweep again, or revert the changes.`;
+    else if (guarded.length) refusal = `a sweep may not change a check's own files (${guarded.slice(0, 6).join(", ")}): that change needs a reviewer. Revert them, or claim a ticket that covers the change.`;
     else if (protectedHits.length) refusal = `a sweep may not change ${protectedHits.slice(0, 6).join(", ")}${protectedHits.length > 6 ? ` and ${protectedHits.length - 6} more` : ""}: contract documents and fixtures change through a ticket, with a reviewer. Revert those files, or claim a ticket that covers the change.`;
     else if (files > caps.sweepMaxFiles || lines > caps.sweepMaxLines) refusal = `too large for a sweep: ${files} files, ${lines} lines changed (limits ${caps.sweepMaxFiles} files, ${caps.sweepMaxLines} lines). The changes stay in the working tree: claim a ticket that covers them (file one with board_create_ticket if none fits), or revert.`;
     const counts = { done: results.filter((r) => r.outcome === "done").length, dropped: results.filter((r) => r.outcome === "dropped").length, promoted: results.filter((r) => r.outcome === "promoted").length };
@@ -934,6 +907,8 @@ export class RunManager implements AgentRunHooks {
       await log({ kind: "ticket", t: clock(), ticket: ticket.id, from: "ready", to: "in_progress" });
     }
     run.currentTicket = ticket.id;
+    const unknown = unknownRepos(ticket, h.session.repos.map((r) => r.name));
+    if (unknown.length) await h.mutate((docs) => ({ next: { board: addNote(docs.board, ticket.id, "harness", `Expected repositories ${unknown.join(", ")} are not in this session (it has ${h.session.repos.map((r) => r.name).join(", ") || "none"}); the list is a hint, so the work goes on`) } }));
 
     // A ticket with its own agent gets a fresh conversation on that agent; the session's shared conversation (caps.resumeWorker) is for the session's worker only.
     const own = ticket.agent;
@@ -972,7 +947,7 @@ export class RunManager implements AgentRunHooks {
     if (!openForTicket.length) return undefined;
     const halt = openForTicket.find((r) => r.halt);
     const t = getTicket(h.board, ticketId);
-    await this.commitInContainer(h, `${t.id} (waiting): ${t.title}`);
+    await this.commitInContainer(h, `${t.id} (waiting): ${t.title}`, t.id);
     await this.move(h, ticketId, "waiting", halt ? `Halt requested: ${halt.halt?.reason ?? ""}` : `Waiting on ${openForTicket.map((r) => `${r.id} (${r.actions.map((a) => a.detail.kind).join(", ") || "question"})`).join(", ")}`, log);
     return halt ? "halted" : "waiting";
   }
@@ -1006,14 +981,28 @@ export class RunManager implements AgentRunHooks {
     const move = (to: TicketState, note: string) => this.move(h, ticketId, to, note, log);
 
     if (signal.aborted) return "requeued";
-    // The ticket's own review mode, or the session's (docs/BOARD.md).
-    const mode = reviewModeFor(ticket, caps);
-    // Gates, diff, review. "none" runs no gates.
-    const repoDir = ticket.repo && h.session.repos.some((r) => r.name === ticket.repo) ? `/workspace/${ticket.repo}` : h.session.repos[0] ? `/workspace/${h.session.repos[0].name}` : "/workspace";
-    const gates = mode === "none" ? [] : await this.runGates(h.id, repoDir, log, ticketId);
-    const { stat, numstat, diff } = await this.stageAndDiff(h.id, repoDir);
+    // What changed, in every repository: the ticket's expected list is a
+    // hint, the change decides what is checked and how it is judged
+    // (docs/BOARD.md, "Judging").
+    const changes = await this.collectChanges(h, ticketId);
+    const names = changes.map((c) => c.repo);
+    const numstat = { added: sum(changes, "added"), removed: sum(changes, "removed"), files: sum(changes, "files") };
     const changed = numstat.files > 0;
-    const summary = `Implementer ${impl.ok ? "finished" : `stopped (${impl.stopReason})`}; ${numstat.files} files, +${numstat.added} −${numstat.removed}`;
+    const proposals = getTicket(h.board, ticketId).policyProposals ?? [];
+    const guarded = guardHits(h.session, changes);
+    const level = reviewLevel(ticket, caps, h.session, changes, { guarded, proposals });
+    const mode = level.mode;
+    // A proposed check is tried on this change in place of the repository's own; "none" runs no checks.
+    const override = new Map(proposals.filter((p) => p.patch.check !== undefined).map((p) => [p.repo, p.patch.check ?? null] as const));
+    const gates: GateResult[] = [];
+    if (mode !== "none") for (const c of planChecks(h.session, names, override)) gates.push(...(await this.runGates(h, c, log, ticketId)));
+    const touched: TouchedRepo[] = changes.map((c) => {
+      const own = gates.filter((g) => g.repo === c.repo);
+      return { repo: c.repo, added: c.added, removed: c.removed, files: c.files, check: mode === "none" ? "skipped" : !own.length ? "none" : own.every((g) => g.ok) ? "passed" : "failed" };
+    });
+    const planned = plannedVsTouched(ticket.repos, names);
+    const perRepo = changes.length ? changes.map((c) => `${c.repo} ${c.files} files, +${c.added} −${c.removed}`).join("; ") : "0 files, +0 −0";
+    const summary = `Implementer ${impl.ok ? "finished" : `stopped (${impl.stopReason})`}; ${perRepo}${planned ? ` (${planned})` : ""}; judged: ${mode} (${level.why})`;
     if (getTicket(h.board, ticketId).state !== "review") await move("review", summary);
     else await h.mutate((docs) => ({ next: { board: addNote(docs.board, ticketId, "harness", summary) } }));
 
@@ -1027,23 +1016,25 @@ export class RunManager implements AgentRunHooks {
     // With "none" the implementer's word is the verdict: it finished, or it gets another attempt.
     let verdict: "ok" | "fixable" | "blocked";
     let verdictNote = "";
-    // The repository's own check is authoritative (you configured it): a failure goes back without a reviewer.
-    const failedCheck = gates.find((g) => g.check && !g.ok);
+    // A repository's own check is authoritative: a failure goes back without a reviewer.
+    const failedChecks = gates.filter((g) => g.check && !g.ok);
     if (mode === "none") {
       verdict = impl.ok ? "ok" : "fixable";
       if (!impl.ok) verdictNote = `implementer stopped (${impl.stopReason})`;
-    } else if (failedCheck) {
+    } else if (failedChecks.length) {
       verdict = "fixable";
-      verdictNote = `the repository's check failed twice (${failedCheck.command}); its log is ${failedCheck.log}`;
-      await h.mutate((docs) => ({ next: { board: addNote(docs.board, ticketId, "harness", `The check \`${failedCheck.command}\` failed twice; no reviewer ran. Last lines of ${failedCheck.log}:\n\n${failedCheck.tail}`) } }));
+      const proposed = (g: GateResult) => (g.repo && override.has(g.repo) ? " (the check this ticket proposes)" : "");
+      verdictNote = `the check failed twice in ${failedChecks.map((g) => `${g.repo}${proposed(g)}: ${g.command}; log ${g.log}`).join(", and in ")}`;
+      for (const g of failedChecks) await h.mutate((docs) => ({ next: { board: addNote(docs.board, ticketId, "harness", `The check \`${g.command}\` in ${g.repo}${proposed(g)} failed twice; no reviewer ran. Last lines of ${g.log}:\n\n${g.tail}`) } }));
     } else if (mode === "full") {
       if (signal.aborted) return "requeued";
-      const rev = await this.runJob(h, run, { role: "reviewer", ticket: ticketId, promptText: await this.withNotes(h, reviewerPrompt(getTicket(h.board, ticketId), stat, diff, gates, { ok: impl.ok, stopReason: impl.stopReason })) }, log, signal);
+      const context = changes.filter((c) => h.session.repos.find((r) => r.name === c.repo && (r.review ?? r.agentPolicy?.review) === "none")).map((c) => c.repo);
+      const rev = await this.runJob(h, run, { role: "reviewer", ticket: ticketId, promptText: await this.withNotes(h, reviewerPrompt(getTicket(h.board, ticketId), changes, gates, { ok: impl.ok, stopReason: impl.stopReason }, { why: level.why, planned, proposals, guarded, context })) }, log, signal);
       addCost(run, rev.costUsd);
       await this.writeTicketReport(h, run, ticketId, "reviewer", rev);
       if (rev.rateLimited) {
         // Keep the work; the loop sleeps and the ticket goes back to ready for a fresh review next time.
-        await this.commitInContainer(h, `${ticketId} (wip): ${ticket.title}`);
+        await this.commitInContainer(h, `${ticketId} (wip): ${ticket.title}`, ticketId);
         await move("ready", "Reviewer was rate limited; requeued with the work kept");
         return "rate_limited";
       }
@@ -1052,7 +1043,7 @@ export class RunManager implements AgentRunHooks {
       verdict = parsed?.verdict ?? "fixable";
       verdictNote = parsed?.reason ?? `reviewer gave no verdict (${rev.stopReason})`;
     } else {
-      const failed = gates.filter((g) => !g.ok).map((g) => g.name);
+      const failed = gates.filter((g) => !g.ok).map((g) => (g.repo && h.session.repos.length > 1 ? `${g.repo}: ${g.name}` : g.name));
       const report = getTicket(h.board, ticketId).report;
       if (!impl.ok) verdictNote = `implementer stopped (${impl.stopReason})`;
       else if (failed.length) verdictNote = `failed: ${failed.join(", ")}`;
@@ -1062,32 +1053,89 @@ export class RunManager implements AgentRunHooks {
 
     // One judged attempt, whatever the verdict.
     const attempts = getTicket(h.board, ticketId).attempts + 1;
-    await h.mutate((docs) => ({ next: { board: replaceTicket(docs.board, { ...getTicket(docs.board, ticketId), attempts }) } }));
+    await h.mutate((docs) => ({ next: { board: replaceTicket(docs.board, { ...getTicket(docs.board, ticketId), attempts, touched }) } }));
 
     if (verdict === "ok") {
-      const leaked = await this.commitInContainer(h, `${ticketId}: ${ticket.title}`);
+      const leaked = await this.commitInContainer(h, `${ticketId}: ${ticket.title}`, ticketId);
       if (leaked.length) {
-        const note = `The Claude token appears in the changes to ${leaked.join(", ")}; nothing was committed there. Remove it from the files (the changes are still in the working tree) and move the ticket back to ready.`;
+        const note = `The Claude token appears in the changes to ${leaked.join(", ")}; nothing was committed in any repository. Remove it from the files (the changes are still in the working tree) and move the ticket back to ready.`;
         await log({ kind: "error", t: clock(), ticket: ticketId, text: note });
         await move("blocked", note);
         return "blocked";
       }
+      const applied = proposals.length ? await this.applyProposals(h, ticketId, proposals) : [];
       await h.mutate((docs) => {
         const t = getTicket(docs.board, ticketId);
-        return { next: { board: replaceTicket(docs.board, { ...t, diff: numstat, cost: { ...(t.cost ?? { inputTokens: 0, outputTokens: 0 }), usd: (t.cost?.usd ?? 0) + impl.costUsd } }) } };
+        let board = replaceTicket(docs.board, { ...t, diff: numstat, touched, policyProposals: undefined, cost: { ...(t.cost ?? { inputTokens: 0, outputTokens: 0 }), usd: (t.cost?.usd ?? 0) + impl.costUsd } });
+        if (applied.length) board = addNote(board, ticketId, "harness", `Check policy updated: ${applied.join("; ")}`);
+        return { next: { board } };
       });
       await move("done", `${mode === "full" ? "Reviewed ok" : mode === "checks" ? "Accepted" : "Accepted without review"}${changed ? "" : " (no files changed)"}${verdictNote ? `: ${verdictNote}` : ""}`);
       run.ticketsDone++;
       return "done";
     }
     if (verdict === "fixable" && attempts < caps.ticketAttempts) {
-      await this.commitInContainer(h, `${ticketId} (wip attempt ${attempts}): ${ticket.title}`);
+      await this.commitInContainer(h, `${ticketId} (wip attempt ${attempts}): ${ticket.title}`, ticketId);
       await move("ready", `Not done yet (${verdictNote || "see reviewer notes"}); attempt ${attempts} of ${caps.ticketAttempts}`);
       return "requeued";
     }
-    await this.commitInContainer(h, `${ticketId} (blocked): ${ticket.title}`);
+    await this.commitInContainer(h, `${ticketId} (blocked): ${ticket.title}`, ticketId);
     await move("blocked", verdict === "blocked" ? `Reviewer: blocked. ${verdictNote}` : `Gave up after ${attempts} attempts: ${verdictNote || "not accepted"}`);
     return "blocked";
+  }
+
+  /**
+   * Applies an accepted ticket's proposals to the repositories' agent
+   * policies (fields you set are left alone); returns one line per change.
+   * The proposed check already ran on the ticket's change.
+   */
+  private async applyProposals(h: SessionHandle, ticketId: string, proposals: readonly PolicyProposalLike[]): Promise<string[]> {
+    return h.mutate((docs) => {
+      const lines: string[] = [];
+      let repos = docs.session.repos;
+      for (const p of proposals) {
+        const r = repos.find((x) => x.name === p.repo);
+        if (!r) continue;
+        const { policy, changed, refused } = mergePolicy(r, p.patch, { by: "ticket", ticket: ticketId, reason: p.reason, at: now() });
+        if (changed.length) lines.push(`${p.repo}: ${changed.join(", ")} (${p.reason})`);
+        if (refused.length) lines.push(`${p.repo}: ${refused.join(", ")} left as the user set ${refused.length === 1 ? "it" : "them"}`);
+        repos = repos.map((x) => (x.name === p.repo ? { ...x, agentPolicy: policy } : x));
+      }
+      return { next: { session: { ...docs.session, repos } }, result: lines };
+    });
+  }
+
+  /** board_changes: what the judge would see now, without the diffs. */
+  async previewJudging(sessionId: string, ticketId?: string): Promise<unknown> {
+    const h = await this.deps.hub.get(sessionId);
+    const ticket = ticketId ? h.board.tickets.find((t) => t.id === ticketId) : undefined;
+    const changes = await this.collectChanges(h, ticket?.id);
+    const proposals = ticket?.policyProposals ?? [];
+    const guarded = guardHits(h.session, changes);
+    const override = new Map(proposals.filter((p) => p.patch.check !== undefined).map((p) => [p.repo, p.patch.check ?? null] as const));
+    const level = ticket ? reviewLevel(ticket, h.session.caps, h.session, changes, { guarded, proposals }) : { mode: "checks" as const, why: "a sweep has no reviewer" };
+    return {
+      ticket: ticket?.id,
+      touched: changes.map((c) => ({ repo: c.repo, files: c.files, added: c.added, removed: c.removed, paths: c.paths.slice(0, 50), ...(c.scattered.length ? { earlierAttemptsNotInDiff: c.scattered } : {}) })),
+      planned: ticket?.repos ?? [],
+      plannedVsTouched: ticket ? plannedVsTouched(ticket.repos, changes.map((c) => c.repo)) : undefined,
+      checks: level.mode === "none" ? [] : planChecks(h.session, changes.map((c) => c.repo), override).map((c) => ({ repo: c.repo.name, check: c.policy.check.kind === "command" ? c.policy.check.command : "guessed (npm typecheck/lint/test, pytest)", why: c.why })),
+      review: level,
+      guardedPathsTouched: guarded,
+      proposals,
+    };
+  }
+
+  /**
+   * Runs a check command an agent proposes for a repository, on the tree as
+   * it is: a check that fails before any ticket runs would fail them all.
+   */
+  async verifyCheck(sessionId: string, repo: string, command: string): Promise<{ ok: boolean; summary: string; tail: string }> {
+    const h = await this.deps.hub.get(sessionId);
+    const r = h.session.repos.find((x) => x.name === repo);
+    if (!r) return { ok: false, summary: `no repository ${repo}`, tail: "" };
+    const [g] = await this.runGates(h, { repo: r, policy: { check: { kind: "command", command }, checkFrom: "agents", alsoCheck: [], guardPaths: [] }, why: "verify" }, async () => undefined, undefined, "verify");
+    return { ok: g?.ok ?? false, summary: g?.summary ?? "did not run", tail: g?.tail ?? "" };
   }
 
   /**
@@ -1148,7 +1196,7 @@ export class RunManager implements AgentRunHooks {
     const jobFile = `/workspace/${rel}/job.json`;
     await fs.writeFile(path.join(dir, "job.json"), JSON.stringify(spec, null, 2));
     const rawLog = DEBUG ? path.join(h.paths.runs, String(run.id), `worker-${name}-${job.ticket ?? "none"}.raw.jsonl`) : undefined;
-    const token = this.deps.tokens.issue({ sessionId: h.id, runId: run.id, role: tokenRole(job.role), currentTicket: job.holds ?? job.ticket });
+    const token = this.deps.tokens.issue({ sessionId: h.id, runId: run.id, role: tokenRole(job.role), job: job.role, currentTicket: job.holds ?? job.ticket });
     try {
       let done = await this.deps.worker(h.id).run(spec, (e) => void log(e), signal, { rawLog, runToken: token, jobFile });
       // A conversation that cannot be resumed (pruned, written by another CLI
@@ -1281,13 +1329,17 @@ export class RunManager implements AgentRunHooks {
    * fails so a flaky test does not cost an attempt; its log goes under
    * .verstas/logs. Without one, the guessed npm scripts and pytest.
    */
-  private async runGates(sessionId: string, repoDir: string, log: (e: VerstasEvent) => Promise<void>, ticketId?: string): Promise<GateResult[]> {
+  /** One repository's check: its command (retried once), or the npm/pytest guesses when it has none set. */
+  private async runGates(h: SessionHandle, planned: PlannedCheck, log: (e: VerstasEvent) => Promise<void>, ticketId?: string, logName = ticketId ?? "sweep"): Promise<GateResult[]> {
     const clock = this.deps.now ?? now;
-    const sh = this.deps.shell(sessionId);
-    const h = await this.deps.hub.get(sessionId);
-    const repo = h.session.repos.find((r) => `/workspace/${r.name}` === repoDir);
-    if (repo?.check) {
-      const runCheck = () => sh.exec(["bash", "-lc", repo.check!], { workdir: repoDir, timeoutMs: 30 * 60_000 });
+    const sh = this.deps.shell(h.id);
+    const repo = planned.repo;
+    const repoDir = `/workspace/${repo.name}`;
+    const policy = planned.policy.check;
+    if (policy.kind === "none") return [];
+    if (policy.kind === "command") {
+      const command = policy.command;
+      const runCheck = () => sh.exec(["bash", "-lc", command], { workdir: repoDir, timeoutMs: 30 * 60_000 });
       const t0 = Date.now();
       let r = await runCheck();
       let retried = false;
@@ -1298,12 +1350,12 @@ export class RunManager implements AgentRunHooks {
       }
       const out = (r.stdout + "\n" + r.stderr).trim();
       const ok = r.code === 0;
-      const rel = `${WORKSPACE_FILES}/logs/${ticketId ?? "sweep"}-${repo.name}-check.log`;
+      const rel = `${WORKSPACE_FILES}/logs/${logName}-${repo.name}-check.log`;
       await fs.mkdir(path.join(h.paths.workspace, WORKSPACE_FILES, "logs"), { recursive: true });
       await fs.writeFile(path.join(h.paths.workspace, rel), out);
       const secs = Math.round((Date.now() - t0) / 1000);
       const summary = `${ok ? (retried ? "passed on the second run (the first failed: a flaky test?)" : "passed") : `failed twice (exit ${r.code})`} in ${secs} s: ${out.slice(-300).replace(/\s+/g, " ")}`;
-      const result: GateResult = { name: `check ${repo.name}`, ok, summary, check: true, command: repo.check, tail: out.slice(-3000), log: `/workspace/${rel}` };
+      const result: GateResult = { name: `check ${repo.name}`, ok, summary, check: true, command, tail: out.slice(-3000), log: `/workspace/${rel}`, repo: repo.name };
       await log({ kind: "gate", t: clock(), ticket: ticketId, name: result.name, ok, summary });
       return [result];
     }
@@ -1315,7 +1367,7 @@ export class RunManager implements AgentRunHooks {
       const installed = await sh.exec(["test", "-d", "node_modules"], { workdir: repoDir, timeoutMs: 10_000 });
       if (installed.code !== 0) {
         const summary = "skipped: node_modules is missing, the implementer did not install dependencies";
-        results.push({ name: "npm scripts", ok: true, summary });
+        results.push({ name: "npm scripts", ok: true, summary, repo: repo.name });
         await log({ kind: "gate", t: clock(), ticket: ticketId, name: "npm scripts", ok: true, summary });
       } else {
         for (const name of ["typecheck", "lint", "test"]) if (scripts[name]) candidates.push([`npm run ${name}`, ["npm", "run", "--silent", name]]);
@@ -1330,66 +1382,102 @@ export class RunManager implements AgentRunHooks {
       const missing = r.code === 127 || /: not found$/m.test(out);
       const ok = r.code === 0 || missing;
       const summary = (missing ? "skipped: tool not installed in the sandbox: " : "") + out.slice(-300).replace(/\s+/g, " ");
-      results.push({ name, ok, summary });
-      await log({ kind: "gate", t: clock(), ticket: ticketId, name, ok, summary });
+      results.push({ name, ok, summary, repo: repo.name });
+      await log({ kind: "gate", t: clock(), ticket: ticketId, name: h.session.repos.length > 1 ? `${repo.name}: ${name}` : name, ok, summary });
     }
     return results;
   }
 
-  private async stageAndDiff(sessionId: string, repoDir: string): Promise<{ stat: string; numstat: { added: number; removed: number; files: number }; diff: string; paths: string[] }> {
-    const sh = this.deps.shell(sessionId);
-    await sh.exec(["git", "add", "-A"], { workdir: repoDir, timeoutMs: 60_000 });
-    const stat = await sh.exec(["git", "diff", "--cached", "--stat"], { workdir: repoDir, timeoutMs: 60_000 });
-    const num = await sh.exec(["git", "diff", "--cached", "--numstat"], { workdir: repoDir, timeoutMs: 60_000 });
-    const diff = await sh.exec(["git", "diff", "--cached"], { workdir: repoDir, timeoutMs: 60_000 });
-    let added = 0;
-    let removed = 0;
-    let files = 0;
-    const paths: string[] = [];
-    for (const line of num.stdout.split("\n")) {
-      const [a, r, ...rest] = line.split("\t");
-      if (a === undefined || r === undefined) continue;
-      files++;
-      added += Number(a) || 0;
-      removed += Number(r) || 0;
-      // A rename shows as "old => new" or "{a => b}/file"; the new name is what the rules apply to.
-      const p = rest.join("\t").trim().replace(/\{[^}]* => ([^}]*)\}/g, "$1").replace(/^.* => /, "");
-      if (p) paths.push(p);
+  /**
+   * Stages everything and reads what changed in every repository: since the
+   * ticket's earliest attempt still at the top of the history (its earlier
+   * attempts were committed as wip), or since HEAD without a ticket. Only
+   * repositories with a change are returned.
+   */
+  private async collectChanges(h: SessionHandle, ticketId?: string): Promise<RepoChange[]> {
+    const sh = this.deps.shell(h.id);
+    const out: RepoChange[] = [];
+    for (const repo of h.session.repos) {
+      const workdir = `/workspace/${repo.name}`;
+      await sh.exec(["git", "add", "-A"], { workdir, timeoutMs: 60_000 });
+      let ref: string[] = [];
+      let scattered: string[] = [];
+      if (ticketId) {
+        const lg = await sh.exec(["git", "log", "--format=%H%x09%s", "-n", "200"], { workdir, timeoutMs: 60_000 });
+        const e = earlierAttempts(lg.code === 0 ? lg.stdout : "", ticketId);
+        scattered = e.scattered;
+        if (e.base) ref = [`${e.base}^`];
+      }
+      let num = await sh.exec(["git", "diff", "--cached", "--numstat", ...ref], { workdir, timeoutMs: 60_000 });
+      if (num.code !== 0 && ref.length) {
+        // The first attempt was the repository's first commit: there is no parent to diff from.
+        ref = [];
+        num = await sh.exec(["git", "diff", "--cached", "--numstat"], { workdir, timeoutMs: 60_000 });
+      }
+      let added = 0;
+      let removed = 0;
+      let files = 0;
+      const paths: string[] = [];
+      for (const line of num.stdout.split("\n")) {
+        const [a, r, ...rest] = line.split("\t");
+        if (a === undefined || r === undefined) continue;
+        files++;
+        added += Number(a) || 0;
+        removed += Number(r) || 0;
+        // A rename shows as "old => new" or "{a => b}/file"; the new name is what the rules apply to.
+        const p = rest.join("\t").trim().replace(/\{[^}]* => ([^}]*)\}/g, "$1").replace(/^.* => /, "");
+        if (p) paths.push(p);
+      }
+      if (!files && !scattered.length) continue;
+      const stat = await sh.exec(["git", "diff", "--cached", "--stat", ...ref], { workdir, timeoutMs: 60_000 });
+      const diff = await sh.exec(["git", "diff", "--cached", ...ref], { workdir, timeoutMs: 60_000 });
+      out.push({ repo: repo.name, added, removed, files, stat: stat.stdout.trim(), diff: diff.stdout, paths, scattered });
     }
-    return { stat: stat.stdout.trim(), numstat: { added, removed, files }, diff: diff.stdout, paths };
+    return out;
   }
 
   /**
    * Commits every change in every repo of the session, inside the container
-   * (docs/SANDBOX.md Boundary 5). A repo whose staged diff contains a secret
-   * is not committed: its changes are unstaged and stay in the working tree,
-   * and the repo name is returned so the caller can refuse the ticket.
+   * (docs/SANDBOX.md Boundary 5), all or nothing: every repository's staged
+   * diff is searched for secrets first, and if one has a secret nothing is
+   * committed anywhere (the changes are unstaged and stay in the working
+   * tree) and the names are returned so the caller can refuse. A ticket's
+   * commits carry `Verstas-Ticket` and `Verstas-Repos` trailers, so the
+   * commits of one change across repositories can be found together.
    */
-  private async commitInContainer(h: SessionHandle, message: string): Promise<string[]> {
+  private async commitInContainer(h: SessionHandle, message: string, ticketId?: string): Promise<string[]> {
     const sh = this.deps.shell(h.id);
     const secrets = ((await this.deps.secrets?.().catch(() => [])) ?? []).filter((x) => x.length >= 16);
     const leaked: string[] = [];
+    const staged: string[] = [];
     for (const repo of h.session.repos) {
       const dir = `/workspace/${repo.name}`;
       await sh.exec(["git", "add", "-A"], { workdir: dir, timeoutMs: 60_000 });
-      const staged = await sh.exec(["git", "diff", "--cached", "--quiet"], { workdir: dir, timeoutMs: 60_000 });
-      if (staged.code === 0) continue; // nothing to commit here
+      const quiet = await sh.exec(["git", "diff", "--cached", "--quiet"], { workdir: dir, timeoutMs: 60_000 });
+      if (quiet.code === 0) continue; // nothing to commit here
+      staged.push(repo.name);
       if (secrets.length) {
         // Searched on the host: the secret never goes into a command line in the box.
         const diff = await sh.exec(["git", "diff", "--cached", "--no-color", "--text"], { workdir: dir, timeoutMs: 120_000 });
-        if (secrets.some((sec) => diff.stdout.includes(sec) || diff.stdout.includes(sec.slice(0, 40)))) {
-          await sh.exec(["git", "reset", "-q"], { workdir: dir, timeoutMs: 60_000 });
-          leaked.push(repo.name);
-          continue;
-        }
+        if (secrets.some((sec) => diff.stdout.includes(sec) || diff.stdout.includes(sec.slice(0, 40)))) leaked.push(repo.name);
       }
-      await sh.exec(["git", "-c", "core.hooksPath=/dev/null", "commit", "-q", "--no-verify", "-m", message], { workdir: dir, timeoutMs: 60_000 });
     }
+    if (leaked.length) {
+      for (const name of staged) await sh.exec(["git", "reset", "-q"], { workdir: `/workspace/${name}`, timeoutMs: 60_000 });
+      return leaked;
+    }
+    const trailers = ticketId ? ["--trailer", `Verstas-Ticket: ${ticketId}`, ...(staged.length > 1 ? ["--trailer", `Verstas-Repos: ${staged.join(", ")}`] : [])] : [];
+    for (const name of staged) await sh.exec(["git", "-c", "core.hooksPath=/dev/null", "commit", "-q", "--no-verify", ...trailers, "-m", message], { workdir: `/workspace/${name}`, timeoutMs: 60_000 });
     return leaked;
   }
 }
 
 // --- helpers -----------------------------------------------------------------
+
+const sum = <K extends "added" | "removed" | "files">(xs: readonly Record<K, number>[], k: K): number => xs.reduce((n, x) => n + x[k], 0);
+
+type PolicyProposalLike = { repo: string; patch: RepoPolicyPatch; reason: string };
+
 
 const addCost = (run: Run, usd: number) => {
   run.cost = { ...run.cost, usd: (run.cost.usd ?? 0) + usd };

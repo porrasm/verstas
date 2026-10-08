@@ -163,7 +163,7 @@ const TicketRow = ({ t, open, onToggle }: { t: DraftTicket; open: boolean; onTog
     </div>
     <div className="title">{t.title}</div>
     <div className="meta">
-      {t.repo && <span className="pill quiet mono">{t.repo}</span>}
+      {(t.repos ?? (t.repo ? [t.repo] : [])).map((r) => <span key={r} className="pill quiet mono">{r}</span>)}
       <span className={`pill ${t.state === "backlog" ? "quiet" : "sig"}`}>{t.state ?? "ready"}</span>
       {(t.deps ?? []).length > 0 && <span className="pill quiet">after {(t.deps ?? []).join(", ")}</span>}
       <span className="pill quiet">{(t.acceptance ?? []).length} criteria</span>

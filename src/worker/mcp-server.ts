@@ -25,6 +25,8 @@ type Tool = {
   leadOnly?: boolean;
   /** Shown only to the agent in the user's terminal (VERSTAS_ROLE=terminal): it edits the board with the user at the keyboard. */
   terminalOnly?: boolean;
+  /** Only for these jobs (VERSTAS_ROLE: setup, implementer, lead, terminal…). */
+  roles?: readonly string[];
   description: string;
   inputSchema: Record<string, unknown>;
   call: (args: Record<string, unknown>) => Promise<unknown>;
@@ -175,7 +177,7 @@ export const TOOLS: Tool[] = [
   },
   {
     name: "board_list_tickets",
-    description: "List the board's tickets (id, title, state, kind, size, priority, deps, repo, and `agent` when the ticket runs on its own agent instead of the session's worker). Optionally filter by state.",
+    description: "List the board's tickets (id, title, state, kind, size, priority, deps, expected repos, and `agent` when the ticket runs on its own agent instead of the session's worker). Optionally filter by state.",
     inputSchema: obj({ state: { type: "string", enum: ["backlog", "ready", "in_progress", "review", "waiting", "blocked", "done"] } }, []),
     call: (a) => api("GET", `/board${a.state ? `?state=${encodeURIComponent(String(a.state))}` : ""}`),
   },
@@ -209,7 +211,7 @@ export const TOOLS: Tool[] = [
         spec: str("What to do and where"),
         acceptance: { type: "array", items: str("One acceptance criterion", 2000), maxItems: 20 },
         size: { type: "string", enum: ["S", "M", "L"] },
-        repo: str("Which clone under /workspace", 100),
+        repos: { type: "array", items: str("Directory name under /workspace", 100), maxItems: 20, description: "The repositories you expect it to touch: a hint for the user and the worker, not a limit" },
         deps: { type: "array", items: str("Ticket id", 20), maxItems: 20 },
         priority: { type: "integer", minimum: 0, maximum: 1000 },
         agent: {
@@ -223,6 +225,44 @@ export const TOOLS: Tool[] = [
       ["title", "kind", "spec"],
     ),
     call: (a) => api("POST", `/tickets`, a),
+  },
+  {
+    name: "repo_policy_set",
+    roles: ["setup", "lead", "terminal"],
+    description:
+      "Set how changes to one repository are judged: its check command, its review level, the repositories whose checks also run when it changes, and the check's own files. Fields left out stay as they are. A check command is run once in the clone as it is now and refused if it fails. A field the user set is theirs and is refused. The current policies are in /workspace/VERSTAS.md.",
+    inputSchema: obj({
+        repo: str("Directory name under /workspace", 64),
+        check: { type: ["string", "null"], maxLength: 2000, description: "One bash command run in the clone that says whether a change broke the repository (tests, typecheck, lint); null for a repository with nothing to run" },
+        review: { type: "string", enum: ["full", "checks", "none"], description: "full: a reviewer reads every change; checks: the check decides alone; none: accepted when the worker finishes" },
+        alsoCheck: { type: "array", items: str("Repository name", 64), maxItems: 20, description: "Repositories that build on this one, whose checks also run when it changes" },
+        guardPaths: { type: "array", items: str("Glob, relative to the repository", 300), maxItems: 50, description: "The check's own files beyond its script (test and lint config); a change to them always gets a reviewer" },
+        reason: str("Why, in one line", 500),
+      }, ["repo", "reason"]),
+    call: ({ repo, ...rest }) => api("PUT", `/repos/${encodeURIComponent(String(repo))}/policy`, rest),
+  },
+  {
+    name: "repo_policy_propose",
+    roles: ["implementer", "lead"],
+    description:
+      "Propose a change to a repository's check policy as part of the ticket you hold, when the ticket changes what the check should be (it adds a test runner, a package, a lint). When the ticket is judged, a proposed check runs in place of the current one, the reviewer sees the proposal, and it applies if the ticket is accepted. A newer proposal for the same repository replaces the older.",
+    inputSchema: obj({
+        repo: str("Directory name under /workspace", 64),
+        check: { type: ["string", "null"], maxLength: 2000, description: "One bash command run in the clone that says whether a change broke the repository (tests, typecheck, lint); null for a repository with nothing to run" },
+        review: { type: "string", enum: ["full", "checks", "none"], description: "full: a reviewer reads every change; checks: the check decides alone; none: accepted when the worker finishes" },
+        alsoCheck: { type: "array", items: str("Repository name", 64), maxItems: 20, description: "Repositories that build on this one, whose checks also run when it changes" },
+        guardPaths: { type: "array", items: str("Glob, relative to the repository", 300), maxItems: 50, description: "The check's own files beyond its script (test and lint config); a change to them always gets a reviewer" },
+        reason: str("Why, in one line", 500),
+      }, ["repo", "reason"]),
+    call: ({ repo, ...rest }) => api("POST", `/repos/${encodeURIComponent(String(repo))}/policy/propose`, rest),
+  },
+  {
+    name: "board_changes",
+    roles: ["implementer", "lead"],
+    description:
+      "What the judge would see if you submitted now: the repositories your change touches (whatever the ticket expected), the checks that would run and why, the review level, and any change to a check's own files. Use it before submitting to catch a stray edit or a repository you forgot.",
+    inputSchema: obj({}, []),
+    call: () => api("GET", "/changes"),
   },
   {
     name: "chore",
@@ -279,7 +319,7 @@ export const TOOLS: Tool[] = [
     name: "board_update_ticket",
     terminalOnly: true,
     description:
-      "Change an existing ticket: title, kind, spec, acceptance criteria (replaces the list), size, repo, deps (replaces the list), priority, or state (backlog or ready). Fields left out stay as they are. Not for a ticket a worker holds. For a merge: update the ticket that stays with the combined spec and criteria, then board_delete_ticket the others with replacedBy.",
+      "Change an existing ticket: title, kind, spec, acceptance criteria (replaces the list), size, expected repos, deps (replaces the list), priority, or state (backlog or ready). Fields left out stay as they are. Not for a ticket a worker holds. For a merge: update the ticket that stays with the combined spec and criteria, then board_delete_ticket the others with replacedBy.",
     inputSchema: obj(
       {
         id: str("Ticket id", 20),
@@ -288,7 +328,7 @@ export const TOOLS: Tool[] = [
         spec: str("What to do and where"),
         acceptance: { type: "array", items: str("One acceptance criterion", 2000), maxItems: 20 },
         size: { type: "string", enum: ["S", "M", "L"] },
-        repo: str("Which clone under /workspace", 100),
+        repos: { type: "array", items: str("Directory name under /workspace", 100), maxItems: 20, description: "Expected repositories (replaces the list); a hint" },
         deps: { type: "array", items: str("Ticket id", 20), maxItems: 20 },
         priority: { type: "integer", minimum: 0, maximum: 1000 },
         state: { type: "string", enum: ["backlog", "ready"] },
@@ -404,7 +444,7 @@ const forPlanning = (t: Tool, role: string): Tool => {
 
 /** The tools for this worker's role: a lead also drives the board; the agent in your terminal plans and asks you. */
 export const visibleTools = (role = process.env.VERSTAS_ROLE ?? ""): Tool[] =>
-  TOOLS.filter((t) => (!t.leadOnly || role === "lead") && (!t.terminalOnly || role === "terminal") && !(role === "terminal" && NOT_FOR_TERMINAL.has(t.name))).map((t) => (t.name === "board_create_ticket" && (role === "planner" || role === "terminal") ? forPlanning(t, role) : t));
+  TOOLS.filter((t) => (!t.leadOnly || role === "lead") && (!t.terminalOnly || role === "terminal") && (!t.roles || t.roles.includes(role)) && !(role === "terminal" && NOT_FOR_TERMINAL.has(t.name))).map((t) => (t.name === "board_create_ticket" && (role === "planner" || role === "terminal") ? forPlanning(t, role) : t));
 
 export const handle = async (msg: Rpc): Promise<void> => {
   const { id, method, params = {} } = msg;

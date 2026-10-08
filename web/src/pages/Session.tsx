@@ -35,6 +35,9 @@ import {
   type Ticket,
   type Totals,
   type VEvent,
+  type PolicySource,
+  type RepoSpec,
+  type TouchedRepo,
 } from "../api";
 import { AgentOptionsButton, useDrivers } from "./AgentOptions";
 import { AgentTerminal } from "./Terminal";
@@ -459,6 +462,7 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
         <TicketDrawer
           ticket={ticket}
           board={board}
+          repoNames={session.repos.map((r) => r.name)}
           clock={ticketClock(session)}
           held={active && run?.currentTicket === ticket.id}
           sessionId={id}
@@ -790,12 +794,14 @@ const RepoSection = ({ env, bare }: { env: Env; bare?: boolean }) => {
           {!initialized && <button className="quiet sm" onClick={() => removeRepo(x.name)} disabled={busy || active}>remove</button>}
         </div>
       ))}
-      {session.repos.map((x) => (
-        <label key={`check-${x.name}`} style={{ marginTop: 6 }}>
-          Check for {x.name} <span className="help">The repository's full check, run by Verstas once per submitted ticket and chore sweep (a failure goes back without a reviewer; the reviewer does not repeat a pass). Empty: Verstas guesses npm scripts.</span>
-          <CheckCommand value={x.check ?? ""} disabled={busy} onSave={(v) => act(() => api("PUT", `${base}/repos/${encodeURIComponent(x.name)}/check`, { check: v || null }), v ? `Check for ${x.name} saved.` : `Check for ${x.name} cleared.`)} />
-        </label>
-      ))}
+      {session.repos.length > 0 && (
+        <div style={{ marginTop: 8 }}>
+          <strong>Checks and review</strong> <span className="muted">The agents set these during setup and keep them current; a change is judged by the repositories it touches. Override a field only if you want to.</span>
+          {session.repos.map((x) => (
+            <RepoPolicy key={`policy-${x.name}`} repo={x} others={session.repos.map((r) => r.name).filter((n) => n !== x.name)} sessionReviewer={session.caps.reviewer} disabled={busy} onSave={(body, done) => act(() => api("PUT", `${base}/repos/${encodeURIComponent(x.name)}/policy`, body), done)} />
+          ))}
+        </div>
+      )}
       {!initialized && adding === null && free.length > 0 && <button className="sm" style={{ marginTop: 6 }} onClick={startAdd} disabled={busy || active}>Add repository</button>}
       {!initialized && adding === null && free.length === 0 && choices.length === 0 && <div className="muted" style={{ marginTop: 4 }}>No work targets: add repositories in <a href="#/settings">Settings</a>.</div>}
       {adding && (
@@ -816,6 +822,107 @@ const RepoSection = ({ env, bare }: { env: Env; bare?: boolean }) => {
           </div>
         </div>
       )}
+    </div>
+  );
+};
+
+/** Toggle chips for a ticket's expected repositories. */
+const RepoPicker = ({ names, value, onChange }: { names: string[]; value: string[]; onChange: (v: string[]) => void }) => (
+  <div className="chips" style={{ display: "flex", gap: 4, flexWrap: "wrap", marginTop: 4 }}>
+    {names.length === 0 && <span className="muted">none in this session</span>}
+    {[...names, ...value.filter((v) => !names.includes(v))].map((n) => (
+      <button type="button" key={n} className={`chip mono${value.includes(n) ? " on" : ""}`} aria-pressed={value.includes(n)} title={names.includes(n) ? undefined : "Not a repository of this session"} onClick={() => onChange(value.includes(n) ? value.filter((x) => x !== n) : [...value, n])}>
+        {n}
+      </button>
+    ))}
+  </div>
+);
+
+const CHECK_PILL: Record<TouchedRepo["check"], { tone: string; label: string }> = { passed: { tone: "good", label: "check passed" }, failed: { tone: "warn", label: "check failed" }, skipped: { tone: "quiet", label: "not checked" }, none: { tone: "quiet", label: "no check" } };
+
+/** What the ticket expected to touch and, once judged, what it touched: per repository, its change and its check. */
+const TicketRepos = ({ ticket }: { ticket: Ticket }) => {
+  const touched = ticket.touched ?? [];
+  if (!touched.length) return ticket.repos.length ? <span>expects <span className="mono">{ticket.repos.join(", ")}</span></span> : null;
+  const untouched = ticket.repos.filter((r) => !touched.some((t) => t.repo === r));
+  return (
+    <span>
+      {touched.map((t) => (
+        <span key={t.repo} style={{ marginRight: 8 }} title={ticket.repos.length && !ticket.repos.includes(t.repo) ? "Not expected; the worker decided it needed a change" : undefined}>
+          <span className="mono">{t.repo}</span>
+          {ticket.repos.length > 0 && !ticket.repos.includes(t.repo) && <span className="muted"> (added by the worker)</span>} <span className="mono">+{t.added} −{t.removed}</span> <span className={`pill ${CHECK_PILL[t.check].tone}`}>{CHECK_PILL[t.check].label}</span>
+        </span>
+      ))}
+      {untouched.length > 0 && <span className="muted" title="Expected, but the change did not touch it">untouched: <span className="mono">{untouched.join(", ")}</span></span>}
+    </span>
+  );
+};
+
+const SOURCE_LABEL: Record<PolicySource["by"], string> = { setup: "setup", lead: "the lead", ticket: "a ticket", terminal: "your terminal's agent" };
+const sourceText = (s?: PolicySource) => (s ? `set by ${SOURCE_LABEL[s.by]}${s.ticket ? ` (${s.ticket})` : ""}: ${s.reason}` : "");
+
+/**
+ * How changes to one repository are judged. The agents keep it (setup
+ * writes it, tickets update it); each field can be overridden here, and a
+ * field you set stays until you hand it back.
+ */
+const RepoPolicy = ({ repo, others, sessionReviewer, disabled, onSave }: { repo: RepoSpec; others: string[]; sessionReviewer: boolean; disabled: boolean; onSave: (body: Record<string, unknown>, done: string) => Promise<unknown> }) => {
+  const a = repo.agentPolicy;
+  const agentCheck = a?.check === null ? "no check" : a?.check ? a.check : "not set yet: Verstas guesses npm scripts or pytest";
+  // "My command" with nothing typed yet is local until the command is saved.
+  const [typing, setTyping] = useState(false);
+  useEffect(() => setTyping(false), [repo.check, repo.noCheck]);
+  const checkMode = repo.noCheck ? "none" : repo.check || typing ? "command" : "agents";
+  const agentReview = a?.review ? REVIEW_LABEL[a.review].toLowerCase() : `the session's (${sessionReviewer ? "full review" : "checks only"})`;
+  const alsoMine = repo.alsoCheck !== undefined;
+  const also = repo.alsoCheck ?? a?.alsoCheck ?? [];
+  return (
+    <div className="stack" style={{ gap: 4, marginTop: 8, paddingLeft: 10, borderLeft: "2px solid var(--line-2)" }}>
+      <strong className="mono">{repo.name}</strong>
+      <label>
+        Check <span className="help">Run once when a change to this repository is submitted; a failure goes back without a reviewer</span>
+        <div className="row">
+          <select value={checkMode} disabled={disabled} onChange={(e) => {
+            const v = e.target.value;
+            if (v === "command") {
+              setTyping(true);
+              if (repo.noCheck) void onSave({ noCheck: null }, `Type ${repo.name}'s check command.`);
+              return;
+            }
+            setTyping(false);
+            void onSave(v === "agents" ? { check: null, noCheck: null } : { noCheck: true }, v === "agents" ? `${repo.name}'s check is the agents' again.` : `${repo.name} has no check.`);
+          }}>
+            <option value="agents">Agents decide</option>
+            <option value="command">My command</option>
+            <option value="none">No check</option>
+          </select>
+        </div>
+        {checkMode === "agents" && <span className="muted">Now: <span className="mono">{agentCheck}</span>{a?.setBy.check ? <> · {sourceText(a.setBy.check)}</> : null}</span>}
+      </label>
+      {checkMode === "command" ? <CheckCommand value={repo.check ?? ""} disabled={disabled} onSave={(v) => onSave({ check: v || null }, v ? `Check for ${repo.name} saved.` : `Check for ${repo.name} handed back to the agents.`)} /> : null}
+      <label>
+        Review
+        <select value={repo.review ?? ""} disabled={disabled} onChange={(e) => void onSave({ review: e.target.value || null }, `Review for ${repo.name} saved.`)}>
+          <option value="">Agents decide (now: {agentReview})</option>
+          <option value="full">{REVIEW_LABEL.full}</option>
+          <option value="checks">{REVIEW_LABEL.checks}</option>
+          <option value="none">{REVIEW_LABEL.none}</option>
+        </select>
+        {!repo.review && a?.setBy.review && <span className="muted">{sourceText(a.setBy.review)}</span>}
+      </label>
+      {others.length > 0 && (
+        <label>
+          Also check <span className="help">Repositories whose checks also run when this one changes (they build on it)</span>
+          <div className="row">
+            <select value={alsoMine ? "mine" : ""} disabled={disabled} onChange={(e) => void onSave({ alsoCheck: e.target.value ? also : null }, `Also check for ${repo.name} saved.`)}>
+              <option value="">Agents decide</option>
+              <option value="mine">Mine</option>
+            </select>
+            {alsoMine ? <RepoPicker names={others} value={also} onChange={(v) => void onSave({ alsoCheck: v }, `Also check for ${repo.name} saved.`)} /> : <span className="muted mono">{also.join(", ") || "none"}</span>}
+          </div>
+        </label>
+      )}
+      {a?.guardPaths?.length ? <span className="muted">Guarded check files (a change to one always gets a reviewer): <span className="mono">{a.guardPaths.join(", ")}</span></span> : null}
     </div>
   );
 };
@@ -1668,7 +1775,7 @@ const ReviewOptions = ({ sessionReviewer }: { sessionReviewer: boolean }) => (
 );
 
 const NewTicketForm = ({ session, board, onCancel, onCreate }: { session: Session; board: Board; onCancel: () => void; onCreate: (body: Record<string, unknown>) => Promise<void> }) => {
-  const [f, setF] = useState({ title: "", kind: "feature", repo: session.repos[0]?.name ?? "", size: "S", priority: "100", deps: "", state: "ready", spec: "", acceptance: "", agentDriver: "", agentModel: "", review: "" });
+  const [f, setF] = useState({ title: "", kind: "feature", repos: session.repos.length === 1 ? [session.repos[0]!.name] : ([] as string[]), size: "S", priority: "100", deps: "", state: "ready", spec: "", acceptance: "", agentDriver: "", agentModel: "", review: "" });
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
   const drivers = useDrivers();
@@ -1679,7 +1786,7 @@ const NewTicketForm = ({ session, board, onCancel, onCreate }: { session: Sessio
       await onCreate({
         title: f.title.trim(),
         kind: f.kind,
-        repo: f.repo || undefined,
+        repos: f.repos,
         size: f.size,
         priority: Number(f.priority) || 100,
         deps: f.deps.split(/[,\s]+/).filter(Boolean),
@@ -1703,7 +1810,7 @@ const NewTicketForm = ({ session, board, onCancel, onCreate }: { session: Sessio
       <div className="three">
         <label>Title<input id="nt-title" value={f.title} onChange={(e) => setF({ ...f, title: e.target.value })} autoFocus placeholder="Mapping engine: 14-bit CC pairs" /></label>
         <label>Kind<select value={f.kind} onChange={(e) => setF({ ...f, kind: e.target.value })}><option>feature</option><option>bug</option><option>followup</option><option>chore</option></select></label>
-        <label>Repository<select value={f.repo} onChange={(e) => setF({ ...f, repo: e.target.value })}><option value="">(none)</option>{session.repos.map((r) => <option key={r.name} value={r.name}>{r.name}</option>)}</select></label>
+        <label>Expected repositories <span className="help">A hint for you and the worker; it may touch others</span><RepoPicker names={session.repos.map((r) => r.name)} value={f.repos} onChange={(repos) => setF({ ...f, repos })} /></label>
         <label>Size<select value={f.size} onChange={(e) => setF({ ...f, size: e.target.value })}><option>S</option><option>M</option><option>L</option></select></label>
         <label>
           Own agent <span className="help">Optional: a fresh worker on this agent does the ticket instead of the session's worker</span>
@@ -2207,14 +2314,14 @@ const SessionSettings = ({ session, onSave, part = "all" }: { session: Session; 
 
 // --- drawer ------------------------------------------------------------------
 
-const TicketDrawer = ({ ticket, board, clock, held, sessionId, onClose, onOpen, onAction, onShowLog }: { ticket: Ticket; board: Board; clock: TicketView; held: boolean; sessionId: string; onClose: () => void; onOpen: (tid: string) => void; onAction: (label: string, fn: () => Promise<unknown>) => Promise<void>; onShowLog: () => void }) => {
+const TicketDrawer = ({ ticket, board, repoNames, clock, held, sessionId, onClose, onOpen, onAction, onShowLog }: { ticket: Ticket; board: Board; repoNames: string[]; clock: TicketView; held: boolean; sessionId: string; onClose: () => void; onOpen: (tid: string) => void; onAction: (label: string, fn: () => Promise<unknown>) => Promise<void>; onShowLog: () => void }) => {
   const [note, setNote] = useState("");
   const neededBy = board.tickets.filter((t) => t.deps.includes(ticket.id));
   const now = useNow();
   const timing = ticketTiming(ticket, clock.mode, now);
   const drawerTiming = !timing ? "" : ticket.state === "done" ? timingLine(timing) : ticket.state === "in_progress" ? `Working for ${inProgressClock(ticket, clock, now)} · ${fmtSpan(timing.total)} since the first claim` : "";
   const [edit, setEdit] = useState(false);
-  const toDraft = (t: Ticket) => ({ title: t.title, spec: t.spec, acceptance: t.acceptance.join("\n"), priority: t.priority, size: t.size, repo: t.repo ?? "", deps: t.deps.join(", "), agentDriver: t.agent?.driver ?? "", agentModel: t.agent?.model ?? "", review: t.review ?? "" });
+  const toDraft = (t: Ticket) => ({ title: t.title, spec: t.spec, acceptance: t.acceptance.join("\n"), priority: t.priority, size: t.size, repos: t.repos, deps: t.deps.join(", "), agentDriver: t.agent?.driver ?? "", agentModel: t.agent?.model ?? "", review: t.review ?? "" });
   const [draft, setDraft] = useState(toDraft(ticket));
   const drivers = useDrivers();
   const [reports, setReports] = useState<{ runId: number; text: string }[]>([]);
@@ -2240,7 +2347,7 @@ const TicketDrawer = ({ ticket, board, clock, held, sessionId, onClose, onOpen, 
         acceptance: draft.acceptance.split(/\n/).map((s) => s.trim()).filter(Boolean),
         priority: Number(draft.priority),
         size: draft.size,
-        repo: draft.repo || null,
+        repos: draft.repos,
         deps: draft.deps.split(/[,\s]+/).filter(Boolean),
         agent: draft.agentDriver ? { driver: draft.agentDriver, model: draft.agentModel.trim() || undefined } : null,
         review: draft.review || null,
@@ -2263,7 +2370,7 @@ const TicketDrawer = ({ ticket, board, clock, held, sessionId, onClose, onOpen, 
           <span>{ticket.kind}</span>
           <span>size <b>{ticket.size}</b></span>
           <span>priority <b>{ticket.priority}</b></span>
-          {ticket.repo && <span>repo <span className="mono">{ticket.repo}</span></span>}
+          <TicketRepos ticket={ticket} />
           {ticket.deps.length > 0 && (
             <span>
               depends on{" "}
@@ -2279,7 +2386,7 @@ const TicketDrawer = ({ ticket, board, clock, held, sessionId, onClose, onOpen, 
             </span>
           )}
           {ticket.attempts > 0 && <span>attempts <b>{ticket.attempts}</b></span>}
-          {ticket.diff && <span className="mono">+{ticket.diff.added} −{ticket.diff.removed} in {ticket.diff.files} file{ticket.diff.files === 1 ? "" : "s"}</span>}
+          {ticket.diff && !ticket.touched?.length && <span className="mono">+{ticket.diff.added} −{ticket.diff.removed} in {ticket.diff.files} file{ticket.diff.files === 1 ? "" : "s"}</span>}
           {ticket.cost?.usd ? <span>cost <b>{fmtUsd(ticket.cost.usd)}</b></span> : null}
           {ticket.pinned && <span className="pill sig">pinned</span>}
           {ticket.review && <span title="Set by you for this ticket">{REVIEW_LABEL[ticket.review].toLowerCase()}</span>}
@@ -2301,7 +2408,7 @@ const TicketDrawer = ({ ticket, board, clock, held, sessionId, onClose, onOpen, 
             <div className="two">
               <label>Priority <span className="help">1 is first</span><input type="number" min={1} value={draft.priority} onChange={(e) => setDraft({ ...draft, priority: Number(e.target.value) })} /></label>
               <label>Size<select value={draft.size} onChange={(e) => setDraft({ ...draft, size: e.target.value })}><option>S</option><option>M</option><option>L</option></select></label>
-              <label>Repo<input value={draft.repo} onChange={(e) => setDraft({ ...draft, repo: e.target.value })} /></label>
+              <label>Expected repositories <span className="help">A hint; the worker may touch others</span><RepoPicker names={repoNames} value={draft.repos} onChange={(repos) => setDraft({ ...draft, repos })} /></label>
               <label>Deps <span className="help">ticket ids, comma separated</span><input value={draft.deps} onChange={(e) => setDraft({ ...draft, deps: e.target.value })} /></label>
               <label>
                 Own agent <span className="help">Optional: this ticket's implementer runs on this agent instead of the session's worker (a fresh worker; the reviewer stays the session's). In lead mode the lead hands it over with board_run.</span>

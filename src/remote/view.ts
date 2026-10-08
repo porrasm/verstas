@@ -100,7 +100,7 @@ export const remoteSession = (x: RemoteSessionInput) => {
       state: t.state,
       priority: t.priority,
       size: t.size,
-      ...(t.repo ? { repo: t.repo } : {}),
+      ...(t.repos.length ? { repo: t.repos.join(", ") } : {}),
       deps: t.deps,
       attempts: t.attempts,
       spec: cap(t.spec, 4000),

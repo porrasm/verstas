@@ -1,5 +1,6 @@
 import { z } from "zod";
 import {
+  importRepos,
   BOARD_FORMAT_VERSION,
   HOSTNAME_PATTERN,
   planningSchema,
@@ -67,6 +68,16 @@ export const DRAFT_DEFAULT_PACKS = DEFAULT_PACKS.filter((p) => p !== "anthropic"
 /** A ticket as a draft stores it: the import shape with its id fixed. */
 export const draftTicketSchema = ticketImportSchema.extend({ id: ticketIdSchema });
 export type DraftTicket = z.infer<typeof draftTicketSchema>;
+
+/** A draft ticket's expected repositories; drafts written before `repos` name one as `repo`. */
+export const draftRepos = (t: Pick<DraftTicket, "repos" | "repo">): string[] => importRepos(t) ?? [];
+
+/** Stores the list form only: `repo` becomes `repos`. */
+const withRepos = <T extends Pick<DraftTicket, "repos" | "repo">>(t: T): T => {
+  if (t.repo === undefined) return t;
+  const { repo: _repo, ...rest } = t;
+  return { ...rest, repos: importRepos(t) } as T;
+};
 
 export const draftSchema = z.object({
   verstasDraft: z.literal(DRAFT_FORMAT_VERSION),
@@ -161,7 +172,7 @@ export const addTickets = (draft: Draft, inputs: readonly NewTicket[]): { draft:
     }
     used.add(id);
     ids.push(id);
-    return draftTicketSchema.parse({ ...t, id, state: t.state ?? "ready" });
+    return draftTicketSchema.parse(withRepos({ ...t, id, state: t.state ?? "ready" }));
   });
   return { draft: { ...draft, tickets: [...draft.tickets, ...added] }, ids };
 };
@@ -175,7 +186,9 @@ export const updateTicket = (draft: Draft, id: string, patch: TicketPatch): Draf
   const i = draft.tickets.findIndex((t) => t.id === id);
   if (i < 0) throw new DraftError(`No ticket ${id} in this draft`, "not_found");
   const tickets = [...draft.tickets];
-  tickets[i] = draftTicketSchema.parse({ ...tickets[i], ...Object.fromEntries(Object.entries(p).filter(([, v]) => v !== undefined)) });
+  // A patch in the older form (`repo`) replaces the list like `repos` does.
+  const fields = Object.fromEntries(Object.entries(withRepos(p)).filter(([, v]) => v !== undefined));
+  tickets[i] = draftTicketSchema.parse({ ...withRepos(tickets[i]!), ...fields });
   return { ...draft, tickets };
 };
 
@@ -260,8 +273,8 @@ export const validateDraft = (draft: Draft, env: DraftEnv): DraftProblems => {
   if (!draft.tickets.length && !draft.goal.trim()) errors.push("Nothing to work on: add tickets, or a goal the planner can draft tickets from");
   const ids = new Set(draft.tickets.map((t) => t.id));
   for (const t of draft.tickets) {
-    if (t.repo && !dirs.includes(t.repo)) {
-      errors.push(dirs.length ? `${t.id} names repo "${t.repo}", but the draft's repositories are: ${dirs.join(", ")}` : `${t.id} names repo "${t.repo}", but the draft has no repositories`);
+    for (const r of draftRepos(t).filter((x) => !dirs.includes(x))) {
+      errors.push(dirs.length ? `${t.id} names repo "${r}", but the draft's repositories are: ${dirs.join(", ")}` : `${t.id} names repo "${r}", but the draft has no repositories`);
     }
     for (const d of t.deps ?? []) if (!ids.has(d)) errors.push(`${t.id} depends on ${d}, which is not in the draft`);
   }
@@ -280,7 +293,7 @@ export const validateDraft = (draft: Draft, env: DraftEnv): DraftProblems => {
   const large = draft.tickets.filter((t) => t.size === "L").map((t) => t.id);
   if (large.length) warnings.push(`Size L: ${large.join(", ")} (consider splitting; one worker has a fixed time and turn budget)`);
   if (dirs.length > 1) {
-    const noRepo = draft.tickets.filter((t) => !t.repo).map((t) => t.id);
+    const noRepo = draft.tickets.filter((t) => !draftRepos(t).length).map((t) => t.id);
     if (noRepo.length) warnings.push(`No repo on ${noRepo.join(", ")} while the draft has ${dirs.length} repositories`);
   }
   const titles = new Map<string, string>();
@@ -308,7 +321,7 @@ export const ticketSummary = (t: DraftTicket) => ({
   id: t.id,
   title: t.title,
   kind: t.kind ?? "feature",
-  repo: t.repo,
+  repos: draftRepos(t),
   size: t.size ?? "M",
   priority: t.priority ?? 100,
   deps: t.deps ?? [],

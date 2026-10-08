@@ -16,7 +16,7 @@ result imports as is. Markdown is accepted too (below).
       "id": "T-15",             // optional; assigned if missing or unknown
       "title": "Mapping engine: CC, note, pitch bend",
       "kind": "feature",        // feature | bug | followup | chore (default feature)
-      "repo": "nuppi",          // which clone under /workspace
+      "repos": ["nuppi"],       // the clones under /workspace it is expected to touch (a hint)
       "size": "M",              // S | M | L (default M)
       "priority": 20,           // lower runs first (default 100)
       "deps": ["T-12"],         // ids that must be done first
@@ -39,12 +39,18 @@ A bare array of tickets is accepted as well.
 
 ### Import rules
 
-- A ticket whose `id` exists on the board **updates** it: title, kind, repo,
+- A ticket whose `id` exists on the board **updates** it: title, kind, repos,
   size, priority, deps, spec, acceptance, pinned, agent, review. Notes are appended. The
   state changes only if the current state is `backlog` or `ready`; a ticket
   in flight keeps its state.
 - A ticket without an id, or with an unknown one, is **appended** with the
   next free id.
+- `repos` lists the repositories the ticket is expected to touch. It is a
+  hint for you and the worker, never a limit: the worker touches what the
+  work needs, and the judge acts on what actually changed (Judging, below).
+  Every name must be one of the session's, which catches typos on import
+  and edit; a run only notes an unknown name. The older single-repository
+  form `"repo": "nuppi"` is read as `"repos": ["nuppi"]`.
 - Dependencies are validated against the whole result: an unknown id or a
   cycle rejects the import with the reason.
 - Agents importing through the API may create `bug`, `followup` and `chore`
@@ -59,7 +65,8 @@ A bare array of tickets is accepted as well.
   lead may not claim such a ticket; it hands it over with `board_run`,
   which runs the worker and the judge while the lead waits. Use it for
   tickets that need a particular strength, such as judging rendered images.
-- `review` is optional and yours only: `full` runs the gates and the
+- `review` is optional and yours only, and wins over the repositories'
+  settings (Judging, below): `full` runs the gates and the
   reviewer, `checks` the gates alone (accepted when they pass, the
   implementer finished and there is a change or a report), `none` neither
   (accepted when the implementer finished; "Accepted without review").
@@ -69,20 +76,66 @@ A bare array of tickets is accepted as well.
   tickets always take the session's setting. A card whose mode differs
   from the session's shows a badge.
 
-### The repository's check
+### Judging
 
-Each repository may have a **check**: one bash command run in its clone,
-such as `bash scripts/check.sh`, set by you under Environment on the
-session page. With one set, the harness runs it once per submitted ticket
-(and per chore sweep) in place of its npm and pytest guesses. A failure
-is retried once, to absorb a flaky test; a second failure sends the
-ticket back to the implementer or the lead with the log's last lines and
-no reviewer is started. A pass reaches the reviewer as authoritative,
-with the instruction not to run it again. VERSTAS.md tells the workers
-the check runs at submission, so they run only the tests of what they
-changed instead of the whole suite (and stop sleeping on it). Logs:
-`/workspace/.verstas/logs/<ticket>-<repo>-check.log`. Mode `none` runs no
-check.
+A ticket may change any subset of the session's repositories. When it is
+submitted, the judge stages every repository and finds the ones that
+changed since the ticket started (its earlier attempts, committed as wip,
+count). The ticket's `repos` play no part in this; when they differ from
+what changed, the note and the reviewer say so.
+
+Each repository has a **policy**:
+
+- `check`: one bash command run in its clone (`bash scripts/check.sh`,
+  `npm test`), or none. Without one set, the harness guesses npm
+  `typecheck`, `lint` and `test` scripts or pytest; those results are
+  evidence for the reviewer, never a verdict.
+- `review`: `full` (a reviewer reads every change), `checks` (the check
+  decides alone) or `none` (accepted when the worker finishes). Absent,
+  the session's Reviewer setting.
+- `alsoCheck`: repositories that build on this one, whose checks also run
+  when it changes (a shared library's consumers).
+- `guardPaths`: the check's own files beyond its script (test and lint
+  config). The script a check command names, and `package.json` for a
+  package script, are guarded without being listed.
+
+The agents keep the policy, so you never have to. Setup writes it for
+every repository after it has made the build and tests work
+(`repo_policy_set`); the harness runs a proposed check command once on the
+repository as it is and refuses one that already fails. A ticket that
+changes what a check should be (a new test runner, a lint) proposes it
+with `repo_policy_propose`: the proposed check runs on the ticket's change
+in place of the current one, the reviewer sees the proposal, and it
+applies when the ticket is accepted. The lead, and the agent in your
+terminal, may repair a check between tickets with `repo_policy_set`; the
+lead's change lands in your inbox. Under Environment on the session page
+each field shows its value and who set it and why; overriding a field
+makes it yours (agents are refused on it), and handing it back returns it
+to them. A check you had typed before policies existed stays yours.
+
+How a submitted change is judged:
+
+1. **Checks.** The checks of every changed repository, plus their
+   `alsoCheck` repositories, once each, one after another. A repository
+   nobody changed is not checked. A failing check command is retried once;
+   a second failure sends the ticket back with the log's last lines and no
+   reviewer. Logs: `/workspace/.verstas/logs/<ticket>-<repo>-check.log`.
+2. **Review level.** The ticket's own `review` when you set one.
+   Otherwise `full` when the change touches a guarded file or proposes a
+   policy change; otherwise the strictest level among the changed
+   repositories (`full` over `checks` over `none`); with nothing changed,
+   the session's setting. `none` also skips the checks.
+3. **Review.** One reviewer reads every changed repository, one section
+   each. Repositories whose own level is `none` come last, as context, and
+   are cut first when the diff is too long.
+4. **Commit.** All or nothing: every changed repository is scanned for
+   credentials first, then each is committed with the same message and the
+   trailers `Verstas-Ticket` and, across several repositories,
+   `Verstas-Repos`.
+
+`board_changes` shows a worker what the judge would see if it submitted
+now. Chore sweeps go through the same checks without a reviewer, and are
+refused when they touch a guarded file.
 
 ### Ticket size
 
@@ -181,7 +234,7 @@ the session page.
 # Build the mapping engine
 
 ## T-3 · Mapping engine: CC and notes (M)
-Repo: nuppi · Deps: T-1, T-2 · Priority: 20
+Repos: nuppi · Deps: T-1, T-2 · Priority: 20
 Pure module in src/engine. Input is a 0..1 value.
 - [ ] 7-bit and 14-bit CC covered by tests
 - [ ] no Electron imports
@@ -194,7 +247,8 @@ Emit events to an injected sink.
 - A level-1 heading before the first ticket is the goal.
 - Level-2 or level-3 headings start tickets. The leading `T-n` and the size
   in parentheses are optional.
-- One line of `Key: value` pairs separated by `·` or `|` sets repo, deps,
+- One line of `Key: value` pairs separated by `·` or `|` sets repos
+  (`Repos: api, docs`; `Repo:` works too), deps,
   priority, size, kind, state, pinned, agent (`Agent: codex/gpt-5.1`, or
   just the driver) and review (`Review: none`).
 - Checklist items are acceptance criteria. Everything else is the spec.

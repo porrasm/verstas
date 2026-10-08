@@ -142,7 +142,7 @@ test("a draft is built step by step and every edit answers with its problems", a
 
     const got = await s.call("draft_get", { id });
     expect(got.json).toMatchObject({ name: "Nuppi MVP", requirements: "Chromium for Playwright launches", packs: ["node", "playwright", "debian"], recipes: ["chromium"], repos: [{ target: "nuppi" }, { target: "kapula", branch: "feature" }] });
-    expect(got.json.tickets[1]).toEqual({ id: "T-2", title: "Fader", kind: "feature", repo: "kapula", size: "S", priority: 100, deps: ["T-1"], state: "ready", pinned: false, acceptance: 1, specChars: 9 });
+    expect(got.json.tickets[1]).toEqual({ id: "T-2", title: "Fader", kind: "feature", repos: ["kapula"], size: "S", priority: 100, deps: ["T-1"], state: "ready", pinned: false, acceptance: 1, specChars: 9 });
     expect((await s.call("draft_get_ticket", { id, ticketId: "T-2" })).json).toMatchObject({ spec: "add fader", acceptance: ["tests"] });
 
     const removed = await s.call("draft_remove_tickets", { id, ticketIds: ["T-1"] });

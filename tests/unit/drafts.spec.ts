@@ -73,7 +73,7 @@ test("importIntoDraft merges by id or replaces, and takes the goal from the past
   expect(merged.draft.tickets.map((t) => t.title)).toEqual(["A", "B2", "C"]);
   const replaced = importIntoDraft(base, "# Goal here\n\n## T-1 · First (S)\nRepo: nuppi\nDo it.\n- [ ] works\n", "replace");
   expect(replaced.draft.tickets).toHaveLength(1);
-  expect(replaced.draft.tickets[0]).toMatchObject({ id: "T-1", title: "First", size: "S", repo: "nuppi", acceptance: ["works"] });
+  expect(replaced.draft.tickets[0]).toMatchObject({ id: "T-1", title: "First", size: "S", repos: ["nuppi"], acceptance: ["works"] });
   expect(() => importIntoDraft(base, "{ not json", "merge")).toThrow(DraftError);
 });
 

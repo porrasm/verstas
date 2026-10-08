@@ -275,9 +275,10 @@ behind until the next Codex terminal overwrites and removes it.
 
 **Commits are scanned.** Before the harness commits, it reads each repo's
 staged diff on the host and looks for every agent credential (the Claude
-token, the Cursor key, the tokens inside the Codex login). A repo where one
-appears is not committed (its changes are unstaged and kept), and a ticket
-that would have been done is blocked with the reason. This keeps the
+token, the Cursor key, the tokens inside the Codex login). If one appears
+in any repo, nothing is committed in any of them (the changes are unstaged
+and kept), and a ticket that would have been done is blocked with the
+reason. This keeps the
 token out of bundles and out of "Apply to repo". Taking the token out of
 the box entirely, with the proxy adding it to requests, is backlog V-04.
 

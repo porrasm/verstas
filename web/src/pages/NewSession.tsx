@@ -26,7 +26,7 @@ export const NewSessionPage = ({ draftId = null, fromSession = null }: { draftId
   const [unapplied, setUnapplied] = useState<Record<string, number | null>>({});
   const [name, setName] = useState("");
   const [board, setBoard] = useState("");
-  const [preview, setPreview] = useState<{ ok: boolean; error?: string; tickets?: { id: string; title: string; repo?: string; state: string }[] } | null>(null);
+  const [preview, setPreview] = useState<{ ok: boolean; error?: string; tickets?: { id: string; title: string; repos?: string[]; state: string }[] } | null>(null);
   const [draft, setDraft] = useState<DraftDetail | null>(null);
   const [draftChanged, setDraftChanged] = useState(false);
   const [busy, setBusy] = useState("");
@@ -140,7 +140,7 @@ export const NewSessionPage = ({ draftId = null, fromSession = null }: { draftId
   if (!cfg) return <div className={err ? "banner warn" : "loading"}>{err || "Loading…"}</div>;
   const boardInvalid = Boolean(board.trim()) && preview !== null && !preview.ok;
   const x = draft?.draft;
-  const boardRepos = [...new Set((preview?.tickets ?? []).map((t) => t.repo).filter((r): r is string => Boolean(r)))];
+  const boardRepos = [...new Set((preview?.tickets ?? []).flatMap((t) => t.repos ?? []))];
   return (
     <div className="form">
       <div>
@@ -214,7 +214,7 @@ export const NewSessionPage = ({ draftId = null, fromSession = null }: { draftId
         )}
         {preview?.ok && boardRepos.length > 0 && !x && (
           <div className="small muted">
-            The tickets name the repositor{boardRepos.length === 1 ? "y" : "ies"} <span className="mono">{boardRepos.join(", ")}</span>: add {boardRepos.length === 1 ? "it" : "them"} under Environment on the session page before you initialize. A run refuses to start while a ready ticket names a repository the session lacks.
+            The tickets name the repositor{boardRepos.length === 1 ? "y" : "ies"} <span className="mono">{boardRepos.join(", ")}</span>: add {boardRepos.length === 1 ? "it" : "them"} under Environment on the session page before you initialize. The names are a hint for the workers, but they must match the session's repositories.
           </div>
         )}
       </section>

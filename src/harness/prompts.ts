@@ -1,7 +1,8 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { verstasHome } from "../config.js";
-import { attachmentLines, describeAgent, TICKET_SIZE_GUIDE, type Board, type DriverName, type GateResult, type Planning, type Session, type Ticket } from "../core/types.js";
+import { attachmentLines, describeAgent, effectivePolicy, TICKET_SIZE_GUIDE, type Board, type DriverName, type GateResult, type Planning, type PolicyProposal, type RepoSpec, type Session, type Ticket } from "../core/types.js";
+import type { RepoChange } from "./judging.js";
 import { NETWORK_PACKS } from "../network/packs.js";
 
 /**
@@ -64,17 +65,40 @@ ${session.setupScripts.length ? session.setupScripts.map((x) => `  - ${x.name}: 
   commit, do not rewrite history, do not create branches.
 ${checkRule(session)}`;
 
+/** One repository's check and review, as the workers read it. */
+export const policyLine = (r: RepoSpec): string => {
+  const p = effectivePolicy(r);
+  const src = (f: "check" | "review") => {
+    const by = r.agentPolicy?.setBy[f];
+    return by ? ` (set by ${by.by}${by.ticket ? ` on ${by.ticket}` : ""}: ${by.reason})` : "";
+  };
+  const check =
+    p.check.kind === "command"
+      ? `check \`${p.check.command}\`${p.checkFrom === "you" ? " (set by the user)" : src("check")}`
+      : p.check.kind === "none"
+        ? `no check${p.checkFrom === "you" ? " (set by the user)" : src("check")}`
+        : "no check set yet (the harness guesses: npm typecheck, lint and test, or pytest; evidence for the reviewer, not a verdict)";
+  const review = p.review ? `review ${p.review}${r.review ? " (set by the user)" : src("review")}` : "review: the session's setting";
+  return `/workspace/${r.name}: ${check}; ${review}${p.alsoCheck.length ? `; a change here also runs the checks of ${p.alsoCheck.join(", ")}` : ""}`;
+};
+
 /** The repositories' checks for VERSTAS.md: the harness runs them at submission, so workers need not run the whole thing and wait. */
 export const checkRule = (session: Pick<Session, "repos">): string => {
-  const withCheck = session.repos.filter((r) => r.check);
-  if (!withCheck.length) return "";
+  if (!session.repos.length) return "";
   return `- Checks: when a ticket is submitted (and when a chore sweep is), the harness
-  runs each repository's full check once: ${withCheck.map((r) => `\`${r.check}\` in /workspace/${r.name}`).join("; ")}.
-  A failure comes back to you with the log's last lines, before any
-  reviewer; a flaky failure is retried once. So do not run the whole check
-  yourself and never \`sleep\` waiting on one: run the tests of the code
-  you changed (a filtered test run, the one spec), then submit. The log of
-  the last check is under /workspace/.verstas/logs/.
+  finds every repository the change touched, whatever the ticket's expected
+  repositories say, and runs the checks of those repositories once, one
+  after another; a repository nobody changed is not checked. Per repository:
+${session.repos.map((r) => `  - ${policyLine(r)}`).join("\n")}
+  A failed check command comes back to you with the log's last lines,
+  before any reviewer; a flaky failure is retried once. So do not run a
+  whole check yourself and never \`sleep\` waiting on one: run the tests
+  of the code you changed (a filtered test run, the one spec), then submit.
+  The logs are under /workspace/.verstas/logs/. When your ticket changes
+  what a repository's check should be (a new test runner, package or lint),
+  propose it with \`repo_policy_propose\`: it is tried on your change and
+  applied when the ticket is accepted. A change to a check's own files (its
+  script, the package scripts, test config) always gets a reviewer.
 `;
 };
 
@@ -101,7 +125,7 @@ Rules that apply to every role:
   const byRole: Record<typeof role, string> = {
     implementer: `
 Role: implementer. Definition of done for your ticket:
-1. The change is made in the right repository under /workspace.
+1. The change is made in the repositories under /workspace it needs. The ticket's expected repositories are the planner's guess: touch another one, or fewer, when the work calls for it, and say so in the report.
 2. Tests for the change exist and pass; typecheck and lint are clean where the repository has them.
 3. Documentation the change affects is updated.
 4. You filed a report with \`board_report\`: what you did, where, how you verified it, what is left. Five to fifteen lines.
@@ -131,7 +155,13 @@ This is the one phase where the user expects to be asked things. After it, worke
      - Purpose, Layout, Build / test / run (verified commands), Conventions, Traps.
      ## Where to look for the board's tickets
      If a brief exists, update it rather than starting over.
-3. What you cannot do yourself (a host the proxy refuses, a file or account only a person can provide, a decision that is genuinely the user's): put ALL of it in ONE request, then stop. Network: prefer kind \`pack\` for a toolchain's hosts.
+3. The checks. For each repository, decide how a change to it is judged and record it with \`repo_policy_set\` (one call per repository, a one-line reason per field). The user never has to: you are the one who has just made the build and the tests work.
+   - \`check\`: one bash command, run in the repository's clone, that says whether a change broke it: the test suite plus typecheck and lint where the repository has them, as fast as it can be while still covering the code. Name the repository's own script when it has one (\`bash scripts/check.sh\`, \`npm test\`). \`null\` for a repository with nothing to run (documentation, assets, data). The harness runs a command before accepting it and refuses one that fails today: fix the environment, or choose a narrower command and say why.
+   - \`review\`: \`full\` (a reviewer reads every change; the default for code), \`checks\` (the check decides alone), or \`none\` (accepted when the worker finishes; only for a repository where a wrong change costs nothing, such as scratch notes). Documentation an agent or a user acts on is not "none".
+   - \`alsoCheck\`: the repositories that build on this one (a shared library's consumers), whose checks should also run when it changes.
+   - \`guardPaths\`: globs of the check's own files beyond the command's script (test config, lint config, CI scripts); a change to them always gets a reviewer.
+   A field the user has set is theirs and is refused; leave it. When the policy is already set and still right, leave it too.
+4. What you cannot do yourself (a host the proxy refuses, a file or account only a person can provide, a decision that is genuinely the user's): put ALL of it in ONE request, then stop. Network: prefer kind \`pack\` for a toolchain's hosts.
 
 Your reply must start with exactly one of:
 SETUP: ready
@@ -148,12 +178,12 @@ Role: lead. You work this session's board until nothing you can start is left. N
 1. Claim a ticket with \`board_claim\` before you change files for it. You hold one ticket at a time; the repositories have one working tree, and each ticket becomes one commit. A ticket that names its own agent (\`agent\` on the board line) is not yours to implement: when you hold nothing, \`board_run\` it; a fresh worker on that agent does it in the working tree, the reviewer judges it, and you get the verdict. Pick its moment like any other ticket's.
 2. When its work is finished (the change made, tests for it passing, the docs it affects updated), file the report with \`board_report\` and submit it with \`board_submit\`. The harness runs the checks and an independent reviewer, commits, and moves it to done, or back to ready with the reviewer's notes, or to blocked. You never mark a ticket done yourself. Read the verdict: fix and resubmit, or leave the ticket and come back to it later.
 3. A ticket that needs something only the user can give: one \`request\` with everything, while you hold it. The ticket parks and you are free to claim the next one.
-4. Keep notes/ true for whoever comes after you, as every worker does: traps and commands in learnings.md, a wrong line in brief.md or env.md fixed.
+4. Keep notes/ true for whoever comes after you, as every worker does: traps and commands in learnings.md, a wrong line in brief.md or env.md fixed. When a repository's check (VERSTAS.md) is broken through no ticket's fault (a flaky suite, a service gone, far too slow), fix it between tickets with \`repo_policy_set\`; the user is told. A ticket that changes what a check should be proposes it with \`repo_policy_propose\` while you hold it.
 5. Watch your context with \`budget\`. When it has become noise (the session has moved on from what you first read, you keep re-reading the same files, or the context is large), finish or park what you hold if you can, then \`handoff\` with a note: what is in flight, what you tried, what you learned that is not in notes/ yet, what to do next. A fresh lead starts from that note.
 6. Chores: the board also keeps a list of small fixes filed by reviewers, workers and the user (\`chores_list\`). The list has a sweep line (shown with it): at or above it you sweep before the next ticket, and \`board_claim\` and \`board_run\` are refused until the list is below it again. Sweep earlier when you are in those files anyway or when no ticket you can start is left: \`chores_sweep\` takes a batch (hold no ticket at that moment), you do each one, run the repository's own checks, then \`chores_submit\` with one line per chore: done, dropped with the reason, or promoted when it is bigger than a chore (a backlog ticket is made from your note). A chore that is moot or not worth its change is dropped (\`chore_drop\`, or dropped in the sweep), not carried along. The harness runs the checks and a size check and commits the batch as one commit; there is no reviewer, so a sweep may not touch the project's contract documents or fixtures, and over the size limits it is refused with the reason while the changes stay in the working tree (claim a ticket for them, or revert).
 7. When no ticket you can start is left and no chore is open (everything is done, waiting on the user, or blocked), reply with one line saying so and stop.`,
     planner: `
-Role: planner. Turn the user's planning request into tickets with \`board_create_ticket\`: ${planning?.ticketSize ? `sized for this session's target (below)` : "small (S) or medium (M) where possible"}, each with a clear spec, acceptance criteria that a reviewer can check, the repository it touches, and dependencies by id when order matters. You may create feature tickets; keep them within the request. Set a ticket's \`agent\` only when the request asks for a particular agent or model for some of the work. Prefer ten good tickets over thirty vague ones. When the board already has tickets, add only what is missing and do not duplicate. Reply with a short summary of the plan and stop.${ticketSizeRule(planning)}`,
+Role: planner. Turn the user's planning request into tickets with \`board_create_ticket\`: ${planning?.ticketSize ? `sized for this session's target (below)` : "small (S) or medium (M) where possible"}, each with a clear spec, acceptance criteria that a reviewer can check, the repositories you expect it to touch (a hint for the user and the worker, not a limit; list every one), and dependencies by id when order matters. You may create feature tickets; keep them within the request. Set a ticket's \`agent\` only when the request asks for a particular agent or model for some of the work. Prefer ten good tickets over thirty vague ones. When the board already has tickets, add only what is missing and do not duplicate. Reply with a short summary of the plan and stop.${ticketSizeRule(planning)}`,
   };
   return common + "\n" + (role === "lead" && leadRules ? leadRules : byRole[role]);
 };
@@ -178,7 +208,7 @@ export const ticketSizeRule = (planning?: Planning): string => {
 };
 
 const ticketBlock = (t: Ticket): string => `# ${t.id}: ${t.title}
-Kind: ${t.kind} · Size: ${t.size} · Repo: ${t.repo ?? "(unspecified)"} · Attempt: ${t.attempts}${t.agent ? ` · Agent: ${describeAgent(t.agent)} (this ticket runs on its own agent)` : ""}
+Kind: ${t.kind} · Size: ${t.size} · Expected repos: ${t.repos.join(", ") || "(unspecified)"} · Attempt: ${t.attempts}${t.agent ? ` · Agent: ${describeAgent(t.agent)} (this ticket runs on its own agent)` : ""}
 
 ## Spec
 ${t.spec || "(none)"}
@@ -224,39 +254,68 @@ ${recentReports(board, ticket.id)}
 
 Start by reading /workspace/VERSTAS.md and /workspace/notes/INDEX.md. Then do the ticket. Finish with \`board_report\` and one line.`;
 
+/** What the reviewer is told about the change beyond the diff: why it reviews, how plan and change differ, proposed policy changes. */
+export type ReviewContext = {
+  why: string;
+  /** "planned api; touched api, docs" when they differ. */
+  planned?: string;
+  proposals: readonly PolicyProposal[];
+  guarded: readonly string[];
+  /** Repositories whose own setting needs no review: shown last, as context, and cut first. */
+  context: readonly string[];
+};
+
+const DIFF_BUDGET = 60_000;
+
 export const reviewerPrompt = (
   ticket: Ticket,
-  diffStat: string,
-  diff: string,
+  changes: readonly RepoChange[],
   gates: GateResult[],
   implementer: { ok: boolean; stopReason: string } = { ok: true, stopReason: "success" },
-): string => `${ticketBlock(ticket)}
+  ctx: ReviewContext = { why: "", proposals: [], guarded: [], context: [] },
+): string => {
+  const ordered = [...changes.filter((c) => !ctx.context.includes(c.repo)), ...changes.filter((c) => ctx.context.includes(c.repo))];
+  let budget = DIFF_BUDGET;
+  const sections = ordered.map((c) => {
+    const body = c.diff.length > budget ? c.diff.slice(0, Math.max(0, budget)) + "\n… (truncated; read the files for the rest)" : c.diff;
+    budget -= body.length;
+    return `### /workspace/${c.repo}: ${c.files} files, +${c.added} −${c.removed}${ctx.context.includes(c.repo) ? " (context: this repository's changes need no review of their own; check they agree with the rest)" : ""}
+${c.scattered.length ? `Earlier attempts of this ticket were committed before other work and are not in this diff: ${c.scattered.join(", ")} (\`git show\` them).\n` : ""}${c.stat}
+
+\`\`\`diff
+${body}
+\`\`\``;
+  });
+  return `${ticketBlock(ticket)}
 ## Implementer's report
 ${ticket.report ?? "(no report was filed)"}
 ${implementer.ok ? "" : `\nThe implementer did not finish cleanly (${implementer.stopReason}); judge what is there.\n`}
+${ctx.why ? `Why this change is reviewed: ${ctx.why}.\n` : ""}${ctx.planned ? `The ticket's expected repositories and the change differ (${ctx.planned}). The list was a guess; judge whether the change covers the ticket.\n` : ""}${ctx.guarded.length ? `The change touches the check's own files (${ctx.guarded.join(", ")}): make sure it does not weaken the check to pass.\n` : ""}${ctx.proposals.length ? `\n## Proposed check policy changes (applied if you accept)\n${ctx.proposals.map((p) => `- ${p.repo}: ${JSON.stringify(p.patch)}: ${p.reason}`).join("\n")}\nJudge them like code: a check that runs less than before needs a good reason.\n` : ""}
 ${checkSection(gates)}
-## Diff (stat)
-${diffStat || "(empty: no files changed. That is fine when the ticket's deliverable is a report, an investigation or a note; judge the report against the acceptance criteria.)"}
+## Changes, per repository
+${sections.join("\n\n") || "(none: no files changed. That is fine when the ticket's deliverable is a report, an investigation or a note; judge the report against the acceptance criteria.)"}
 
-## Diff
-\`\`\`diff
-${diff.length > 60_000 ? diff.slice(0, 60_000) + "\n… (truncated; read the files for the rest)" : diff}
-\`\`\`
+${gates.some((g) => g.check) ? "Do not run the checks above again; run only what the criteria name and the tests of the changed code." : "Run the tests yourself if the gates did not."} Do the code pass over every hunk above (read the files when a diff is truncated). Reply starting with VERDICT: ok | fixable | blocked.`;
+};
 
-${gates.some((g) => g.check) ? "Do not run the repository's check again; run only what the criteria name and the tests of the changed code." : "Run the tests yourself if the gates did not."} Do the code pass over every hunk above (read the files when the diff is truncated). Reply starting with VERDICT: ok | fixable | blocked.`;
+const gateWhere = (g: GateResult) => (g.repo ? `${g.repo}: ` : "");
 
-/** What the reviewer is told about the checks: the repository's own check, which passed (a failed one never reaches a reviewer), or the harness's guesses. */
+/** What the reviewer is told about the checks: the repositories' own checks, which passed (a failed one never reaches a reviewer), and the harness's guesses. */
 const checkSection = (gates: GateResult[]): string => {
   const own = gates.filter((g) => g.check);
+  const guessed = gates.filter((g) => !g.check);
+  const parts: string[] = [];
   if (own.length)
-    return `## The repository's check (run by the harness, passed)
-${own.map((g) => `- \`${g.command}\` in ${g.name.replace(/^check /, "")}: ${g.summary} (log: ${g.log})`).join("\n")}
-This is the project's full check, configured by the user, and it passed on this change. Do not run it again: that costs minutes and tells you nothing new. Read its log if you need detail, and run only the commands the acceptance criteria name and the tests of the code this change touches.
-`;
-  return `## Checks the harness ran (evidence, not a verdict)
-The harness guessed these from the repository (npm scripts, pytest). A failure may come from this change, or from something the box or a later ticket provides (a browser, a service). Decide which; only a failure this ticket should have prevented makes it fixable.
-${gates.map((g) => `- ${g.ok ? "ok" : "FAILED"} ${g.name}: ${g.summary}`).join("\n") || "- none found"}
-`;
+    parts.push(`## The repositories' checks (run by the harness, passed)
+${own.map((g) => `- \`${g.command}\` in ${g.repo ?? g.name.replace(/^check /, "")}: ${g.summary} (log: ${g.log})`).join("\n")}
+These are the projects' own checks and they passed on this change. Do not run them again: that costs minutes and tells you nothing new. Read a log if you need detail, and run only the commands the acceptance criteria name and the tests of the code this change touches.
+`);
+  if (guessed.length || !own.length)
+    parts.push(`## Checks the harness ran (evidence, not a verdict)
+The harness guessed these from the repositories (npm scripts, pytest). A failure may come from this change, or from something the box or a later ticket provides (a browser, a service). Decide which; only a failure this ticket should have prevented makes it fixable.
+${guessed.map((g) => `- ${g.ok ? "ok" : "FAILED"} ${gateWhere(g)}${g.name}: ${g.summary}`).join("\n") || "- none found"}
+`);
+  return parts.join("\n");
 };
 
 export const setupPrompt = (session: Session, board: Board, answers: string[], mode: "setup" | "brief"): string => `${mode === "brief" ? "# Brief only\nRefresh /workspace/notes/brief.md (and env.md if it is out of date) against the repositories and the board as they are today. Install nothing unless a command you need to verify is missing. Still reply with a SETUP line.\n\n" : ""}# Set up the environment
@@ -269,7 +328,7 @@ ${session.requirements.trim() || "(none)"}
 ${session.repos.map((r) => `- /workspace/${r.name} (branch ${r.branch})`).join("\n") || "- none"}
 ${session.attachments.length ? `\n# Attachments (what the user said they are)\n${attachmentLines(session.attachments)}\n` : ""}
 # Board
-${board.tickets.length ? board.tickets.map((t) => `- ${t.id} [${t.state}] ${t.title} (${t.kind}, ${t.size}${t.repo ? `, ${t.repo}` : ""})${t.spec ? `: ${t.spec.replace(/\s+/g, " ").slice(0, 300)}` : ""}`).join("\n") : "- empty"}
+${board.tickets.length ? board.tickets.map((t) => `- ${t.id} [${t.state}] ${t.title} (${t.kind}, ${t.size}${t.repos.length ? `, ${t.repos.join(" ")}` : ""})${t.spec ? `: ${t.spec.replace(/\s+/g, " ").slice(0, 300)}` : ""}`).join("\n") : "- empty"}
 ${answers.length ? `\n# Your earlier setup requests were answered\n${answers.map((a) => `- ${a}`).join("\n")}\n` : ""}
 Read /workspace/VERSTAS.md and the existing notes (env.md, setup.sh, brief.md) first; a previous setup worker may have done most of the work. Reply starting with SETUP: ready or SETUP: needs.`;
 
@@ -291,8 +350,9 @@ You are running in an interactive terminal inside a Verstas session's sandbox ($
 - Ask the user in this conversation when something is theirs to decide. There is no \`request\` or \`halt\` for you.
 - No run is active while this terminal is open: no worker or lead is changing the repositories or the board. Starting a run from the session page ends this terminal.
 - The board is reachable through the MCP server "board": \`board_list_tickets\`, \`board_get_ticket\`, \`board_create_ticket\` (any kind, features included; it goes to the backlog for the user's approval, or straight to ready with \`state: "ready"\` when the user asks for that), \`board_update_ticket\` and \`board_delete_ticket\` (which only you, of all the agents, have: the user is here to say what goes), \`board_add_note\`, \`board_set_priority\`, \`board_add_dep\`, \`chore\`, \`chores_list\`, \`chore_drop\`, \`idea\` and \`message\`. To merge tickets, update the one that stays with the combined spec and every acceptance criterion of the others, then delete the others with \`replacedBy\` so tickets that depended on them follow. You cannot claim or submit tickets: implementing a ticket belongs to a run, which has the check and the reviewer.
-- When you write tickets: look at the board first and do not duplicate. Each ticket gets a spec that names the files and the commands, acceptance criteria a reviewer can run, the repository it touches, and dependencies by id only where order matters. Say what you created or changed, one line per ticket.${ticketSizeRule(session.planning)}
+- When you write tickets: look at the board first and do not duplicate. Each ticket gets a spec that names the files and the commands, acceptance criteria a reviewer can run, the repositories you expect it to touch (a hint; the worker may touch others), and dependencies by id only where order matters. Say what you created or changed, one line per ticket.${ticketSizeRule(session.planning)}
 - Change repository files when the user asks you to. Do not commit, rewrite history or create branches: when this terminal ends, Verstas commits whatever changed in the repositories as one commit.
+- Each repository's check and review (VERSTAS.md) are kept by the agents. When the user asks you to change one, use \`repo_policy_set\`; the harness tries a new check command before accepting it. A field the user set in the app is theirs and is refused.
 - Keep /workspace/notes/ true for the workers that come after you, as every worker does.
 `;
 
@@ -337,7 +397,7 @@ Repositories live under /workspace/<name> and may carry their own CLAUDE.md.
 
 const boardLines = (board: Board): string =>
   board.tickets.length
-    ? board.tickets.map((t) => `- ${t.id} [${t.state}] ${t.title} (${t.kind}, ${t.size}${t.repo ? `, ${t.repo}` : ""}${t.deps.length ? `, after ${t.deps.join(" ")}` : ""}, priority ${t.priority}${t.agent ? `, agent ${describeAgent(t.agent)}: board_run, not claim` : ""})`).join("\n")
+    ? board.tickets.map((t) => `- ${t.id} [${t.state}] ${t.title} (${t.kind}, ${t.size}${t.repos.length ? `, ${t.repos.join(" ")}` : ""}${t.deps.length ? `, after ${t.deps.join(" ")}` : ""}, priority ${t.priority}${t.agent ? `, agent ${describeAgent(t.agent)}: board_run, not claim` : ""})`).join("\n")
     : "- empty";
 
 /** The chore list as a lead sees it: what a sweep may take, and what waits for the user. */

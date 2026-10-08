@@ -151,6 +151,12 @@ Then, in the web app:
    **A ticket's own agent**: a ticket may name a driver and model of its
    own; its implementer is then a fresh worker on that agent, judged by the
    session's reviewer. A lead hands such a ticket over with `board_run`.
+   **Several repositories**: a ticket's repositories are a hint; a worker
+   changes whichever it needs. Each change runs only the checks of the
+   repositories it touched, and gets the review the strictest of them asks
+   for. Setup writes each repository's check and review level and tickets
+   keep them current; you can override any of them under Environment
+   (`docs/BOARD.md`, Judging).
 9. **Apply to repo** when you want the work: the session page's Work panel
    puts a repository's commits on the branch `verstas/<session>` in your
    real checkout, one commit per ticket, without touching the branch you
