@@ -185,8 +185,8 @@ closed). Quitting stops them and requeues the ticket a worker held.
 their own interactive interface, running in the session's box, on the
 page. Slash commands, `/resume` and the rest work as in your own terminal.
 The agent has the board tools: it can read the board and write tickets
-(features too; to the backlog, or straight to ready when you ask), take
-notes and file chores, so you can plan with it in a conversation instead
+(features too; to the backlog, or straight to ready when you ask), edit,
+merge and delete tickets, take notes and file chores, so you can plan with it in a conversation instead
 of the one-shot planner. It is a run of its own: it starts only when
 nothing else runs, and starting a run (or planning) ends it. When it ends,
 whatever it changed in the repositories is committed as one commit,

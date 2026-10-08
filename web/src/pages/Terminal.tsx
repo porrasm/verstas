@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
-import { api } from "../api";
+import { api, copyText } from "../api";
 
 /**
  * An agent terminal on the session page: Claude Code or Codex in their own
@@ -40,10 +40,30 @@ const THEME = {
   brightWhite: "#ffffff",
 };
 
-export const AgentTerminal = ({ sessionId, base, title, onEnd, onClose }: { sessionId: string; base: string; title: string; onEnd: () => void; onClose: () => void }) => {
+/**
+ * What Shift+Enter sends. A terminal sends Enter for both, so the agent would
+ * submit; agents read a newline from another key instead: Claude Code from
+ * Esc+Enter (what its own /terminal-setup binds Shift+Enter to), Codex from
+ * Ctrl+J.
+ */
+export const SHIFT_ENTER: Record<"claude" | "codex", string> = { claude: "\x1b\r", codex: "\n" };
+
+export const AgentTerminal = ({ sessionId, base, title, driver, onEnd, onClose }: { sessionId: string; base: string; title: string; driver: "claude" | "codex"; onEnd: () => void; onClose: () => void }) => {
   const host = useRef<HTMLDivElement>(null);
+  const termRef = useRef<Terminal | null>(null);
   const [phase, setPhase] = useState<"connecting" | "open" | "ended">("connecting");
   const [note, setNote] = useState("");
+  const [selected, setSelected] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const copySelection = async () => {
+    const text = termRef.current?.getSelection() ?? "";
+    if (!text) return;
+    await copyText(text);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1500);
+  };
+  const copyRef = useRef(copySelection);
+  copyRef.current = copySelection;
 
   useEffect(() => {
     const el = host.current;
@@ -52,7 +72,31 @@ export const AgentTerminal = ({ sessionId, base, title, onEnd, onClose }: { sess
     let ended = false;
     let ws: WebSocket | null = null;
     let retry: number | undefined;
-    const term = new Terminal({ cursorBlink: true, fontFamily: 'ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace', fontSize: 13, lineHeight: 1.15, scrollback: 5000, theme: THEME });
+    // Agents' interfaces may capture the mouse; Option-drag (Shift-drag off the Mac) still selects text then.
+    const term = new Terminal({ cursorBlink: true, fontFamily: 'ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace', fontSize: 13, lineHeight: 1.15, scrollback: 5000, theme: THEME, macOptionClickForcesSelection: true });
+    termRef.current = term;
+    term.onSelectionChange(() => setSelected(term.hasSelection()));
+    // Agents that draw their own selection (Claude Code captures the mouse) copy with OSC 52: "52;<target>;<base64>".
+    // Only right after you clicked or typed in the pane: the box may not fill your clipboard on its own.
+    let touchedAt = 0;
+    const touched = () => (touchedAt = Date.now());
+    el.addEventListener("mouseup", touched);
+    el.addEventListener("keydown", touched, true);
+    term.parser.registerOscHandler(52, (data) => {
+      const b64 = data.slice(data.indexOf(";") + 1);
+      if (!b64 || b64 === "?") return true; // a read request: the page never hands the clipboard to the box
+      if (Date.now() - touchedAt > 3000) return true;
+      try {
+        const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+        void copyText(new TextDecoder().decode(bytes)).then(() => {
+          setCopied(true);
+          window.setTimeout(() => setCopied(false), 1500);
+        });
+      } catch {
+        // not base64; ignore
+      }
+      return true;
+    });
     const fit = new FitAddon();
     term.loadAddon(fit);
     term.open(el);
@@ -73,6 +117,19 @@ export const AgentTerminal = ({ sessionId, base, title, onEnd, onClose }: { sess
     const encoder = new TextEncoder();
     term.onData((d) => {
       if (ws?.readyState === WebSocket.OPEN) ws.send(encoder.encode(d));
+    });
+    const mac = /Mac|iPhone|iPad/.test(navigator.platform);
+    term.attachCustomKeyEventHandler((e) => {
+      // Copy: Cmd+C on the Mac, Ctrl+Shift+C elsewhere (Ctrl+C stays the agent's interrupt).
+      const copyKey = e.key.toLowerCase() === "c" && (mac ? e.metaKey && !e.ctrlKey : e.ctrlKey && e.shiftKey);
+      if (copyKey) {
+        if (e.type === "keydown" && term.hasSelection()) void copyRef.current();
+        return false;
+      }
+      if (e.key !== "Enter" || !e.shiftKey || e.ctrlKey || e.altKey || e.metaKey) return true;
+      // Swallow both the keydown and its keypress, or xterm would also send Enter.
+      if (e.type === "keydown" && ws?.readyState === WebSocket.OPEN) ws.send(encoder.encode(SHIFT_ENTER[driver]));
+      return false;
     });
     // Some mouse reports are sent as raw bytes rather than text.
     term.onBinary((d) => {
@@ -124,10 +181,13 @@ export const AgentTerminal = ({ sessionId, base, title, onEnd, onClose }: { sess
       disposed = true;
       if (retry) clearTimeout(retry);
       observer.disconnect();
+      el.removeEventListener("mouseup", touched);
+      el.removeEventListener("keydown", touched, true);
       ws?.close();
+      termRef.current = null;
       term.dispose();
     };
-  }, [sessionId, base]);
+  }, [sessionId, base, driver]);
 
   return (
     <section className="card stack tight term-card">
@@ -135,10 +195,11 @@ export const AgentTerminal = ({ sessionId, base, title, onEnd, onClose }: { sess
         <h3>Agent terminal · {title}</h3>
         <span className={`pill ${phase === "open" ? "sig" : phase === "ended" ? "quiet" : "info"}`}>{phase === "open" ? <><span className="dot run" />live</> : phase === "ended" ? "ended" : "connecting"}</span>
         {note && <span className="muted small">{note}</span>}
-        {phase === "ended" ? <button className="quiet sm end" onClick={onClose}>Close</button> : <button className="warn sm end" onClick={onEnd} title="Hang up the agent; its changes in the repositories are committed">End terminal</button>}
+        <button className="quiet sm end" onClick={() => void copySelection()} disabled={!selected && !copied} title="Copy the selected text (⌘C on the Mac, Ctrl+Shift+C elsewhere)">{copied ? "Copied" : "Copy"}</button>
+        {phase === "ended" ? <button className="quiet sm" onClick={onClose}>Close</button> : <button className="warn sm" onClick={onEnd} title="Hang up the agent; its changes in the repositories are committed">End terminal</button>}
       </div>
       <div className="term-host" ref={host} onClick={() => host.current?.querySelector("textarea")?.focus()} />
-      <div className="muted small">The agent works in the box with the board tools; its tickets go to the backlog unless you ask for them to be ready. Starting a run ends this terminal and commits what changed in the repositories.</div>
+      <div className="muted small">Select text by dragging, or with {/Mac/.test(navigator.platform) ? "⌥" : "Shift"}-drag when the agent has the mouse; {/Mac/.test(navigator.platform) ? "⌘C" : "Ctrl+Shift+C"} copies, Shift+Enter starts a new line. The agent works in the box with the board tools; its tickets go to the backlog unless you ask for them to be ready. Starting a run ends this terminal and commits what changed in the repositories.</div>
     </section>
   );
 };

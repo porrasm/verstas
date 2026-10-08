@@ -23,6 +23,8 @@ type Tool = {
   name: string;
   /** Shown only to a lead (VERSTAS_ROLE=lead); a worker's ticket is moved by the harness. */
   leadOnly?: boolean;
+  /** Shown only to the agent in the user's terminal (VERSTAS_ROLE=terminal): it edits the board with the user at the keyboard. */
+  terminalOnly?: boolean;
   description: string;
   inputSchema: Record<string, unknown>;
   call: (args: Record<string, unknown>) => Promise<unknown>;
@@ -274,6 +276,37 @@ export const TOOLS: Tool[] = [
     call: (a) => api("POST", `/tickets/${encodeURIComponent(String(a.id))}/priority`, { priority: a.priority, reason: a.reason }),
   },
   {
+    name: "board_update_ticket",
+    terminalOnly: true,
+    description:
+      "Change an existing ticket: title, kind, spec, acceptance criteria (replaces the list), size, repo, deps (replaces the list), priority, or state (backlog or ready). Fields left out stay as they are. Not for a ticket a worker holds. For a merge: update the ticket that stays with the combined spec and criteria, then board_delete_ticket the others with replacedBy.",
+    inputSchema: obj(
+      {
+        id: str("Ticket id", 20),
+        title: str("Short title", 200),
+        kind: { type: "string", enum: ["feature", "bug", "followup", "chore"] },
+        spec: str("What to do and where"),
+        acceptance: { type: "array", items: str("One acceptance criterion", 2000), maxItems: 20 },
+        size: { type: "string", enum: ["S", "M", "L"] },
+        repo: str("Which clone under /workspace", 100),
+        deps: { type: "array", items: str("Ticket id", 20), maxItems: 20 },
+        priority: { type: "integer", minimum: 0, maximum: 1000 },
+        state: { type: "string", enum: ["backlog", "ready"] },
+        reason: str("Why, in a line; it goes in the ticket's notes", 2000),
+      },
+      ["id", "reason"],
+    ),
+    call: ({ id, ...rest }) => api("PATCH", `/tickets/${encodeURIComponent(String(id))}`, rest),
+  },
+  {
+    name: "board_delete_ticket",
+    terminalOnly: true,
+    description:
+      "Delete a ticket that was merged into another or no longer applies, when the user wants it gone. With replacedBy (the ticket it was merged into), tickets that depended on it depend on that one instead. Not for a ticket a worker holds.",
+    inputSchema: obj({ id: str("Ticket id", 20), reason: str("Why, in a line", 2000), replacedBy: str("The ticket it was merged into", 20) }, ["id", "reason"]),
+    call: ({ id, ...rest }) => api("DELETE", `/tickets/${encodeURIComponent(String(id))}`, rest),
+  },
+  {
     name: "board_add_dep",
     description: "Declare that a ticket depends on another one, with a reason. Pinned tickets cannot be changed; cycles are rejected.",
     inputSchema: obj({ id: str("Ticket id", 20), dep: str("Ticket id it depends on", 20), reason: str("Why", 2000) }, ["id", "dep", "reason"]),
@@ -371,7 +404,7 @@ const forPlanning = (t: Tool, role: string): Tool => {
 
 /** The tools for this worker's role: a lead also drives the board; the agent in your terminal plans and asks you. */
 export const visibleTools = (role = process.env.VERSTAS_ROLE ?? ""): Tool[] =>
-  TOOLS.filter((t) => (!t.leadOnly || role === "lead") && !(role === "terminal" && NOT_FOR_TERMINAL.has(t.name))).map((t) => (t.name === "board_create_ticket" && (role === "planner" || role === "terminal") ? forPlanning(t, role) : t));
+  TOOLS.filter((t) => (!t.leadOnly || role === "lead") && (!t.terminalOnly || role === "terminal") && !(role === "terminal" && NOT_FOR_TERMINAL.has(t.name))).map((t) => (t.name === "board_create_ticket" && (role === "planner" || role === "terminal") ? forPlanning(t, role) : t));
 
 export const handle = async (msg: Rpc): Promise<void> => {
   const { id, method, params = {} } = msg;

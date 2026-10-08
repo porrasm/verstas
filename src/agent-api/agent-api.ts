@@ -14,13 +14,15 @@ import {
   sweepResultSchema,
   ticketIdSchema,
   ticketImportSchema,
+  ticketKindSchema,
+  ticketSizeSchema,
   type AgentRequest,
   type Board,
   type Inbox,
   type SweepResult,
   type Ticket,
 } from "../core/types.js";
-import { addChore, addNote, agentAddDep, agentSetPriority, beginSweep, BoardError, canStart, getTicket, importBoard, openChores, replaceTicket, setChoreState, sweepInFlight, sweepToJudging, transition, validateRepos, type AgentRole } from "../board/board.js";
+import { addChore, addNote, agentAddDep, agentSetPriority, beginSweep, BoardError, canStart, deleteTicket, editTicket, getTicket, importBoard, openChores, replaceTicket, setChoreState, sweepInFlight, sweepToJudging, transition, validateRepos, type AgentRole } from "../board/board.js";
 import type { SessionHub } from "../sessions/hub.js";
 
 /**
@@ -257,6 +259,55 @@ export const createAgentApi = (hub: SessionHub, tokens: RunTokens, hooks?: Agent
     res.status(403).json({ error: "You are in a terminal with the user at the keyboard: ask them directly instead" });
     return false;
   };
+
+  /** Editing and deleting tickets is yours, and the terminal agent's because you are at the keyboard with it; no unattended agent may. */
+  const terminalOnly = (req: AgentRequestWithRun, res: Response): boolean => {
+    if (req.run.role === "terminal") return true;
+    res.status(403).json({ error: "Only the agent in the user's terminal edits or deletes tickets; file a note, a chore or a ticket instead" });
+    return false;
+  };
+
+  r.patch(
+    "/tickets/:id",
+    wrap(async (req, res) => {
+      if (!terminalOnly(req, res)) return;
+      const body = z
+        .object({
+          title: z.string().min(1).max(200).optional(),
+          kind: ticketKindSchema.optional(),
+          spec: z.string().max(50_000).optional(),
+          acceptance: z.array(z.string().min(1).max(2000)).optional(),
+          size: ticketSizeSchema.optional(),
+          repo: z.string().min(1).max(100).optional(),
+          deps: z.array(ticketIdSchema).optional(),
+          priority: z.number().int().min(0).max(1000).optional(),
+          state: z.enum(["backlog", "ready"]).optional(),
+          reason: z.string().min(1).max(2000),
+        })
+        .parse(req.body);
+      const { reason, ...patch } = body;
+      const id = ticketIdSchema.parse(req.params.id);
+      const h = await hub.get(req.run.sessionId);
+      const t = await h.mutate((d) => {
+        const board = editTicket(d.board, id, patch, reason);
+        validateRepos(board.tickets.filter((x) => x.id === id), d.session.repos.map((x) => x.name));
+        return { next: { board }, result: getTicket(board, id) };
+      });
+      res.json({ ok: true, id, state: t.state });
+    }),
+  );
+
+  r.delete(
+    "/tickets/:id",
+    wrap(async (req, res) => {
+      if (!terminalOnly(req, res)) return;
+      const { reason, replacedBy } = z.object({ reason: z.string().min(1).max(2000), replacedBy: ticketIdSchema.optional() }).parse(req.body ?? {});
+      const id = ticketIdSchema.parse(req.params.id);
+      const h = await hub.get(req.run.sessionId);
+      await h.mutate((d) => ({ next: { board: deleteTicket(d.board, id, reason, replacedBy) } }));
+      res.json({ ok: true, deleted: id, replacedBy });
+    }),
+  );
 
   r.post(
     "/requests",

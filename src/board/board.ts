@@ -244,6 +244,59 @@ export const agentAddDep = (board: Board, id: string, dep: string, reason: strin
   return next;
 };
 
+/** What the agent in your terminal may change on a ticket. */
+export type TicketEdit = Partial<Pick<Ticket, "title" | "kind" | "spec" | "acceptance" | "size" | "repo" | "deps" | "priority">> & { state?: "backlog" | "ready" };
+
+const HELD_BY_WORKER: readonly TicketState[] = ["in_progress", "review"];
+
+/**
+ * An edit by the agent in your terminal. You are at the keyboard, so it may
+ * change a ticket as you would (pinned ones too), except one a worker holds;
+ * no run is active while a terminal is open, so that is a leftover. A state
+ * change follows the same transitions as yours. The reason lands in the notes.
+ */
+export const editTicket = (board: Board, id: string, patch: TicketEdit, reason: string): Board => {
+  const t = getTicket(board, id);
+  if (HELD_BY_WORKER.includes(t.state)) throw new BoardError(`${id} is ${t.state}: a worker holds it`, "forbidden_move");
+  const at = now();
+  const fields = Object.fromEntries(Object.entries(patch).filter(([k, v]) => v !== undefined && k !== "state")) as Partial<Ticket>;
+  let next: Ticket = { ...t, ...fields, updatedAt: at, notes: [...t.notes, { at, by: "agent", text: `Edited (${Object.keys(patch).join(", ") || "nothing"}): ${reason}` }] };
+  if (patch.state && patch.state !== t.state) {
+    if (!canTransition(t.state, patch.state)) throw new BoardError(`${id} cannot move from ${t.state} to ${patch.state}`, "illegal_transition");
+    next = { ...next, ...withStateClock(t, patch.state, at), state: patch.state };
+  }
+  for (const dep of next.deps) getTicket(board, dep);
+  const out = replaceTicket(board, next);
+  validateDeps(out.tickets);
+  return out;
+};
+
+/**
+ * Deletion by the agent in your terminal, for merges and tickets that no
+ * longer apply. Tickets that depended on it depend on `replacedBy` instead
+ * (the ticket it was merged into), or on nothing more; each says so in its
+ * notes. Never a ticket a worker holds.
+ */
+export const deleteTicket = (board: Board, id: string, reason: string, replacedBy?: string): Board => {
+  const t = getTicket(board, id);
+  if (HELD_BY_WORKER.includes(t.state)) throw new BoardError(`${id} is ${t.state}: a worker holds it`, "forbidden_move");
+  if (replacedBy !== undefined) {
+    if (replacedBy === id) throw new BoardError(`${id} cannot replace itself`, "unknown_dep");
+    getTicket(board, replacedBy);
+  }
+  const at = now();
+  const tickets = board.tickets
+    .filter((x) => x.id !== id)
+    .map((x) => {
+      if (!x.deps.includes(id)) return x;
+      const deps = [...new Set(x.deps.flatMap((d) => (d !== id ? [d] : replacedBy && replacedBy !== x.id ? [replacedBy] : [])))];
+      const text = `Depended on ${id}, which was deleted (${reason})${replacedBy && replacedBy !== x.id ? `; now depends on ${replacedBy}` : ""}`;
+      return { ...x, deps, updatedAt: at, notes: [...x.notes, { at, by: "agent" as const, text }] };
+    });
+  validateDeps(tickets);
+  return { ...board, tickets };
+};
+
 // --- Import / merge --------------------------------------------------------
 
 export type ImportResult = {

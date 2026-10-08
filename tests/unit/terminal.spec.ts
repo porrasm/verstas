@@ -5,7 +5,7 @@ import type net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { createAgentApi, RunTokens, type RunToken } from "../../src/agent-api/agent-api.js";
-import { emptyBoard, importBoard } from "../../src/board/board.js";
+import { deleteTicket, editTicket, emptyBoard, getTicket, importBoard, transition } from "../../src/board/board.js";
 import { saveBoard, writeJsonAtomic } from "../../src/board/store.js";
 import { inboxSchema, now, sessionSchema } from "../../src/core/types.js";
 import { driverInfo } from "../../src/harness/drivers.js";
@@ -203,6 +203,50 @@ test("Claude Code's onboarding is marked done once, keeping the rest of its conf
   }
 });
 
+test("the terminal agent alone gets the tools to edit and delete tickets", () => {
+  for (const name of ["board_update_ticket", "board_delete_ticket"]) {
+    expect(visibleTools("terminal").map((t) => t.name)).toContain(name);
+    for (const role of ["planner", "lead", "implementer", "reviewer"]) expect(visibleTools(role).map((t) => t.name)).not.toContain(name);
+  }
+});
+
+const mergeBoard = () => {
+  let b = importBoard(emptyBoard(), {
+    tickets: [
+      { id: "T-1", title: "Parser", state: "ready", pinned: true },
+      { id: "T-2", title: "Parser tests", state: "ready" },
+      { id: "T-3", title: "Docs", state: "backlog", deps: ["T-2"] },
+      { id: "T-4", title: "Held", state: "ready" },
+      { id: "T-5", title: "After both", state: "backlog", deps: ["T-1", "T-2"] },
+    ],
+  }).board;
+  b = transition(b, "T-4", "in_progress");
+  return b;
+};
+
+test("a merge: the kept ticket is edited (pinned too), the others are deleted and their dependents follow", () => {
+  let b = editTicket(mergeBoard(), "T-1", { title: "Parser with tests", acceptance: ["parses", "tested"], size: "L", state: "backlog" }, "merged T-2 into it");
+  const t1 = getTicket(b, "T-1");
+  expect(t1).toMatchObject({ title: "Parser with tests", acceptance: ["parses", "tested"], size: "L", state: "backlog", spec: "" });
+  expect(t1.notes.at(-1)?.text).toContain("merged T-2 into it");
+  b = deleteTicket(b, "T-2", "merged into T-1", "T-1");
+  expect(b.tickets.map((t) => t.id)).toEqual(["T-1", "T-3", "T-4", "T-5"]);
+  expect(getTicket(b, "T-3").deps).toEqual(["T-1"]);
+  // No duplicate dep when the dependent already had the replacement.
+  expect(getTicket(b, "T-5").deps).toEqual(["T-1"]);
+  expect(getTicket(b, "T-3").notes.at(-1)?.text).toContain("now depends on T-1");
+  // Without a replacement the dependency just goes.
+  expect(getTicket(deleteTicket(mergeBoard(), "T-2", "not needed"), "T-3").deps).toEqual([]);
+});
+
+test("edits and deletes never touch a held ticket, follow the state rules and keep deps sound", () => {
+  expect(() => editTicket(mergeBoard(), "T-4", { title: "x" }, "r")).toThrow(/in_progress/);
+  expect(() => deleteTicket(mergeBoard(), "T-4", "r")).toThrow(/in_progress/);
+  expect(() => editTicket(mergeBoard(), "T-2", { deps: ["T-3"] }, "r")).toThrow();
+  expect(() => editTicket(mergeBoard(), "T-2", { deps: ["T-99"] }, "r")).toThrow();
+  expect(() => deleteTicket(mergeBoard(), "T-2", "r", "T-99")).toThrow();
+});
+
 // --- the agent API for a terminal's token ---------------------------------------------
 
 const sessionDir = async (state: "created" | "finished" = "created") => {
@@ -240,6 +284,19 @@ test("a terminal's token creates features into the backlog or, when asked, ready
     const worker = tokens.issue({ sessionId: s.id, runId: 1, role: "worker" });
     const filed = await fetch(`http://127.0.0.1:${port}/agent/tickets`, { method: "POST", headers: { authorization: `Bearer ${worker}`, "content-type": "application/json" }, body: JSON.stringify({ title: "Sneaky", kind: "bug", spec: "…", state: "ready" }) });
     expect(((await filed.json()) as { state: string }).state).toBe("backlog");
+    // No unattended agent edits or deletes.
+    for (const role of ["worker", "lead", "planner"] as const) {
+      const other = tokens.issue({ sessionId: s.id, runId: 1, role });
+      const del = await fetch(`http://127.0.0.1:${port}/agent/tickets/${made.json.id}`, { method: "DELETE", headers: { authorization: `Bearer ${other}`, "content-type": "application/json" }, body: JSON.stringify({ reason: "x" }) });
+      expect(del.status).toBe(403);
+      const patch = await fetch(`http://127.0.0.1:${port}/agent/tickets/${made.json.id}`, { method: "PATCH", headers: { authorization: `Bearer ${other}`, "content-type": "application/json" }, body: JSON.stringify({ title: "x", reason: "x" }) });
+      expect(patch.status).toBe(403);
+    }
+    const edited = await call("PATCH", `/tickets/${made.json.id}`, { spec: "combined", reason: "merge" });
+    expect(edited.status).toBe(200);
+    expect((await call("PATCH", `/tickets/${made.json.id}`, { repo: "nope", reason: "x" })).status).toBe(400);
+    expect((await call("DELETE", "/tickets/T-1", { reason: "merged", replacedBy: made.json.id })).status).toBe(200);
+    expect((await s.hub.get(s.id)).board.tickets.some((x) => x.id === "T-1")).toBe(false);
     expect((await call("POST", "/requests", { summary: "need a host", actions: [] })).status).toBe(403);
     expect((await call("POST", "/halt", { reason: "x", severity: "major" })).status).toBe(403);
     expect((await call("POST", "/tickets/T-1/claim")).status).toBe(403);

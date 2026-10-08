@@ -191,6 +191,9 @@ host.docker.internal:host-gateway`).
 - An agent terminal's token (role `terminal`) plans like the planner: it
   may create tickets of any kind, and, because you are at the keyboard, put
   one straight into `ready` (every other agent files into `backlog`). It
+  is also the only agent that may edit a ticket's fields or delete a
+  ticket (`PATCH`/`DELETE /tickets/:id`, for merges), never one a worker
+  holds, with the reason in the notes of the tickets it touches. It
   holds no ticket, so it cannot claim, submit or report, and it is refused
   `request` and `halt`: it asks you in the terminal. Its page connection,
   `/ws/terminal` on the UI port, is accepted only from a loopback host

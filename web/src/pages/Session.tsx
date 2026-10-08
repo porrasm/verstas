@@ -446,6 +446,7 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
           sessionId={id}
           base={base}
           title={terminalPane.driver === "codex" ? "Codex" : "Claude Code"}
+          driver={terminalPane.driver === "codex" ? "codex" : "claude"}
           onEnd={() => runAction("stop")}
           onClose={() => setTerminalPane(null)}
         />
