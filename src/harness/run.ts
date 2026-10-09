@@ -34,8 +34,20 @@ export interface Shell {
 }
 
 /** Runs one worker job inside the container; streams events; resolves with the final line. */
+/** A running worker, as far as the harness can reach it: a message from the user down its stdin. */
+export type WorkerHandle = {
+  driver: DriverName;
+  /** Writes the message; false when the worker is gone. */
+  send(text: string): boolean;
+};
+
 export interface WorkerRunner {
-  run(job: Job, onEvent: (e: VerstasEvent) => void, signal: AbortSignal, opts?: { rawLog?: string; runToken?: string; /** The job file inside the container; it also tells this worker's processes from others'. */ jobFile?: string }): Promise<WorkerDone>;
+  run(
+    job: Job,
+    onEvent: (e: VerstasEvent) => void,
+    signal: AbortSignal,
+    opts?: { rawLog?: string; runToken?: string; /** The job file inside the container; it also tells this worker's processes from others'. */ jobFile?: string; /** Called once the worker runs, with the handle to reach it. */ attach?: (h: WorkerHandle) => void },
+  ): Promise<WorkerDone>;
 }
 
 export const DEBUG = Boolean(process.env.VERSTAS_DEBUG);
@@ -118,6 +130,8 @@ const tokenRole = (role: Job["role"]): "worker" | "planner" | "lead" => (role ==
 export class RunManager implements AgentRunHooks {
   private active = new Map<string, RunControl>();
   private leads = new Map<string, LeadContext>();
+  /** The worker running in each session right now, for messages from the user. */
+  private workers = new Map<string, WorkerHandle & { role: Job["role"]; ticket?: string; log: (e: VerstasEvent) => Promise<void> }>();
   /** The agent terminal of a session whose active run is one. */
   private terminals = new Map<string, LiveTerminal>();
   /** Numbers each worker's job directory. */
@@ -126,6 +140,24 @@ export class RunManager implements AgentRunHooks {
 
   status(sessionId: string): Run | undefined {
     return this.active.get(sessionId)?.run;
+  }
+
+  /**
+   * A message from the user to the worker running now: it arrives as a
+   * user message in the agent's conversation, prefixed so the agent knows
+   * who speaks, and starts a turn if the agent was waiting. Logged as a
+   * status event of the run; nothing on the board changes. Only a driver
+   * with streaming input (Claude Code) can take one.
+   */
+  async message(sessionId: string, text: string): Promise<{ ok: true; to: string } | { ok: false; error: string }> {
+    if (!this.active.has(sessionId)) return { ok: false, error: "No run is active" };
+    const w = this.workers.get(sessionId);
+    if (!w) return { ok: false, error: "No worker is running right now (the run is between workers); try again in a moment" };
+    if (w.driver !== "claude") return { ok: false, error: `The ${w.role} runs on ${w.driver}, which cannot take a message mid-run` };
+    const to = `${w.role}${w.ticket ? ` on ${w.ticket}` : ""}`;
+    if (!w.send(text.trim())) return { ok: false, error: `The ${to} just ended; the next worker will not see this` };
+    await w.log({ kind: "status", t: (this.deps.now ?? now)(), ticket: w.ticket, text: `message from the user to the ${to}: ${text.trim().slice(0, 500)}` });
+    return { ok: true, to };
   }
 
   /** The session's agent terminal while its run is active; pages attach to it (src/server.ts). */
@@ -1141,8 +1173,9 @@ export class RunManager implements AgentRunHooks {
     await fs.writeFile(path.join(dir, "job.json"), JSON.stringify(spec, null, 2));
     const rawLog = DEBUG ? path.join(h.paths.runs, String(run.id), `worker-${name}-${job.ticket ?? "none"}.raw.jsonl`) : undefined;
     const token = this.deps.tokens.issue({ sessionId: h.id, runId: run.id, role: tokenRole(job.role), job: job.role, currentTicket: job.holds ?? job.ticket });
+    const attach = (w: WorkerHandle) => this.workers.set(h.id, { ...w, role: job.role, ticket: job.ticket, log });
     try {
-      let done = await this.deps.worker(h.id).run(spec, (e) => void log(e), signal, { rawLog, runToken: token, jobFile });
+      let done = await this.deps.worker(h.id).run(spec, (e) => void log(e), signal, { rawLog, runToken: token, jobFile, attach });
       // A conversation that cannot be resumed (pruned, written by another CLI
       // version) fails before its first turn; start a fresh one under a new id.
       if (spec.agentSession?.resume && !done.ok && done.turns === 0 && !done.rateLimited && !signal.aborted) {
@@ -1151,13 +1184,14 @@ export class RunManager implements AgentRunHooks {
         if (job.freshPrompt) await fs.writeFile(path.join(dir, "prompt.md"), await job.freshPrompt());
         const fresh: Job = { ...spec, agentSession: { id: randomUUID(), resume: false } };
         await fs.writeFile(path.join(dir, "job.json"), JSON.stringify(fresh, null, 2));
-        done = await this.deps.worker(h.id).run(fresh, (e) => void log(e), signal, { rawLog, runToken: token, jobFile });
+        done = await this.deps.worker(h.id).run(fresh, (e) => void log(e), signal, { rawLog, runToken: token, jobFile, attach });
         done = { ...done, agentSession: fresh.agentSession!.id };
       } else if (spec.agentSession) done = { ...done, agentSession: spec.agentSession.id };
       await log(done);
       await this.addAgentSeconds(h, done);
       return done;
     } finally {
+      this.workers.delete(h.id);
       this.deps.tokens.revoke(token);
     }
   }

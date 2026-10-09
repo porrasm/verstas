@@ -11,10 +11,12 @@ export type StreamContext = { ticket?: string; role?: "implementer" | "reviewer"
 
 export type Translated = {
   events: VerstasEvent[];
-  /** Set on the final `result` line. */
+  /** Set on a `result` line: the end of a turn (with streaming input, one per turn; the last one ends the session). */
   result?: { ok: boolean; stopReason: string; costUsd: number; turns: number; text: string; rateLimited: boolean };
   /** True when the line was an assistant message (counts as a turn). */
   assistantTurn: boolean;
+  /** Set when the agent reported its background commands: how many are still running. */
+  backgroundTasks?: number;
 };
 
 let CLIP = 200;
@@ -63,6 +65,19 @@ export const translateLine = (line: string, ctx: StreamContext = {}): Translated
     return empty;
   }
   const type = msg.type;
+
+  // Claude Code's background commands (Bash with run_in_background): the
+  // list changes when one starts or ends, and a finished one is announced.
+  // The worker keeps the session open while any is running: the agent is
+  // re-invoked when one finishes (src/worker/worker.ts).
+  if (type === "system" && msg.subtype === "background_tasks_changed") {
+    const tasks = Array.isArray(msg.tasks) ? msg.tasks.length : 0;
+    return { events: [], assistantTurn: false, backgroundTasks: tasks };
+  }
+  if (type === "system" && msg.subtype === "task_notification") {
+    const what = String(msg.description ?? msg.summary ?? msg.task_id ?? "a background command");
+    return { events: [{ kind: "status", ...base, text: `background command ${String(msg.status ?? "finished")}: ${clip(what)}` }], assistantTurn: false };
+  }
 
   if (type === "system" && msg.subtype === "init") {
     const servers = Array.isArray(msg.mcp_servers) ? (msg.mcp_servers as { name?: string; status?: string }[]) : [];
@@ -119,7 +134,8 @@ export const translateLine = (line: string, ctx: StreamContext = {}): Translated
     const costUsd = typeof msg.total_cost_usd === "number" ? msg.total_cost_usd : 0;
     const turns = typeof msg.num_turns === "number" ? msg.num_turns : 0;
     return {
-      events: [{ kind: "status", ...base, text: `worker finished · ${subtype}${errors ? ` · ${clip(errors)}` : ""} · $${costUsd.toFixed(2)}` }],
+      // One per turn with streaming input; the worker_done line says when the worker is really done.
+      events: [{ kind: "status", ...base, text: `turn ended · ${subtype}${errors ? ` · ${clip(errors)}` : ""} · $${costUsd.toFixed(2)}` }],
       result: { ok, stopReason: subtype, costUsd, turns, text, rateLimited },
       assistantTurn: false,
     };

@@ -946,6 +946,20 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
     }),
   );
 
+  /** A message to the worker running now (src/harness/run.ts, `message`): it lands in the agent's conversation, not on the board. */
+  api.post(
+    "/sessions/:id/run/message",
+    wrap(async (req, res) => {
+      const { text } = z.object({ text: z.string().trim().min(1).max(10_000) }).parse(req.body ?? {});
+      const r = await d.runs.message(param(req, "id"), text);
+      if (!r.ok) {
+        res.status(409).json({ error: r.error });
+        return;
+      }
+      res.json({ ok: true, to: r.to });
+    }),
+  );
+
   /**
    * An agent terminal: Claude Code or Codex in their own interface, in the
    * box, with the board tools. It is a run of its own, so it starts only

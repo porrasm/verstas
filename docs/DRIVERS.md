@@ -62,7 +62,18 @@ The driver must:
    schema (`src/core/types.ts`, `eventSchema`). Unknown lines are ignored.
    The useful kinds: `text`, `tool_use`, `tool_result`, `status`, `cost`,
    `error`.
-4. Stop by itself at the caps, and end with one `worker_done` line:
+4. Stop by itself at the caps, and end with one `worker_done` line.
+   Optionally, read **messages from the user** on stdin, one JSON line
+   `{"kind":"message","text":"…"}` each, and hand them to the agent as
+   user messages; a driver that cannot is simply never sent one (the
+   harness refuses the message with a reason).
+5. Keep the agent alive while one of its background commands runs. The
+   built-in Claude driver uses streaming input for this: a turn that ends
+   with a command still running is not the end of the session, the agent
+   is re-invoked when the command finishes, and the session ends when a
+   turn ends with nothing running. That is what makes sleep-polling
+   unnecessary; the rules tell the agent so.
+6. End with the `worker_done` line:
 
 ```json
 {"kind":"worker_done","t":"…","ticket":"T-12","role":"implementer","ok":true,
@@ -99,7 +110,9 @@ Inside the box, plain HTTP must go through the proxy (`HTTP_PROXY` is set);
 
 | | Claude Code | Codex CLI | Cursor CLI |
 |---|---|---|---|
-| Command | `claude -p --output-format stream-json` | `codex exec --json` (prompt on stdin) | `agent -p --output-format stream-json --force` |
+| Command | `claude -p --input-format stream-json --output-format stream-json` | `codex exec --json` (prompt on stdin) | `agent -p --output-format stream-json --force` |
+| Messages from the user mid-run | yes (a user message on stdin) | no | no |
+| Background commands outlive a turn | yes (the agent is re-invoked) | no | no |
 | Rules (`system.md`) | `--append-system-prompt` | prepended to the prompt | prepended to the prompt |
 | Board MCP server | `--mcp-config .verstas/mcp.json` | `$CODEX_HOME/config.toml`, written per run | `~/.cursor/mcp.json`, written per run (a project-level file would need an interactive approval) |
 | Pointers file | `CLAUDE.md` | `AGENTS.md` | `AGENTS.md` (and `CLAUDE.md`) |

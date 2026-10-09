@@ -85,11 +85,17 @@ export const verifyRule = (session: Pick<Session, "repos" | "caps">): string => 
   repository's own check (the command the brief names under Build / test /
   run, such as \`bash scripts/check.sh\` or \`npm test\`) before you submit.`
 }
-- Long commands (a build, a test suite, anything that takes minutes): run
-  them in the foreground and raise the Bash tool's timeout to what the
-  command needs (it may go up to 30 minutes). Do not start them in the
-  background and \`sleep\` while polling: every sleep is a turn against your
-  cap, and the log shows you as idle.
+- Long commands (a build, a test suite, anything that takes minutes):
+  either run them in the foreground with the Bash tool's timeout raised to
+  what the command needs (up to 30 minutes), or, when you have other work
+  to do meanwhile, run them in the background and END YOUR TURN: you are
+  re-invoked with the result when the command finishes. Never \`sleep\` and
+  poll: every sleep is a turn against your cap, and the log shows you as
+  idle.
+- The user may send you a message while you work; it arrives as a user
+  message starting with "Message from the user:". Answer it briefly in
+  text and carry on with your task; it neither widens the ticket nor ends
+  your work, and the board is still changed only through the tools.
 `;
 
 /** Where a lead's rules can be replaced without a rebuild: read for every new lead. */

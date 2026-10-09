@@ -61,7 +61,7 @@ test("result line reports success, cost and turns", () => {
     ctx,
   );
   expect(out.result).toEqual({ ok: true, stopReason: "success", costUsd: 0.42, turns: 12, text: "Done.", rateLimited: false });
-  expect(out.events[0]).toMatchObject({ kind: "status", text: "worker finished · success · $0.42" });
+  expect(out.events[0]).toMatchObject({ kind: "status", text: "turn ended · success · $0.42" });
 });
 
 test("result line detects rate limits and errors", () => {
@@ -83,4 +83,13 @@ test("garbage and unknown types are dropped", () => {
   expect(translateLine("not json", ctx).events).toEqual([]);
   expect(translateLine("", ctx).events).toEqual([]);
   expect(translateLine(JSON.stringify({ type: "stream_event", event: {} }), ctx).events).toEqual([]);
+});
+
+test("background commands: the task list says how many run, and a finished one is a status line", () => {
+  const changed = translateLine(JSON.stringify({ type: "system", subtype: "background_tasks_changed", tasks: [{ task_id: "a" }, { task_id: "b" }] }), ctx);
+  expect(changed).toEqual({ events: [], assistantTurn: false, backgroundTasks: 2 });
+  expect(translateLine(JSON.stringify({ type: "system", subtype: "background_tasks_changed", tasks: [] }), ctx).backgroundTasks).toBe(0);
+  const done = translateLine(JSON.stringify({ type: "system", subtype: "task_notification", task_id: "a", status: "completed", description: "Run the e2e suite" }), ctx);
+  expect(done.backgroundTasks).toBeUndefined();
+  expect(done.events).toEqual([{ kind: "status", t: ctx.now(), ticket: "T-7", text: "background command completed: Run the e2e suite" }]);
 });

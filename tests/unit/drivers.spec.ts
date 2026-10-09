@@ -227,7 +227,8 @@ test("worker: the budget file tracks turns and the context size, and the agent i
   const bin = path.join(dir, "fake-claude");
   await fs.writeFile(
     bin,
-    `#!/bin/sh\ncat >/dev/null\necho '${assistant(1000)}'\necho '${assistant(4000)}'\necho "{\\"type\\":\\"result\\",\\"subtype\\":\\"success\\",\\"result\\":\\"$VERSTAS_BUDGET_FILE\\",\\"total_cost_usd\\":0.2,\\"num_turns\\":2}"\n`,
+    // Streaming input: the prompt is the first line; the worker closes stdin after the result, which ends the `cat`.
+    `#!/bin/sh\nread -r first\necho '${assistant(1000)}'\necho '${assistant(4000)}'\necho "{\\"type\\":\\"result\\",\\"subtype\\":\\"success\\",\\"result\\":\\"$VERSTAS_BUDGET_FILE\\",\\"total_cost_usd\\":0.2,\\"num_turns\\":2}"\ncat >/dev/null\n`,
     { mode: 0o755 },
   );
   const job: Job = { role: "implementer", ticket: "T-1", promptFile: path.join(dir, "p.md"), systemPromptFile: path.join(dir, "s.md"), caps: { minutes: 5, turns: 20, budgetUsd: 1 }, mcpConfigFile: path.join(dir, "m.json"), cwd: dir, binary: bin, budgetFile };
@@ -251,4 +252,115 @@ test("worker: the budget file tracks turns and the context size, and the agent i
   }
   const done = lines.map((l) => JSON.parse(l) as Record<string, unknown>).find((e) => e.kind === "worker_done")!;
   expect(done).toMatchObject({ ok: true, text: budgetFile });
+});
+
+/** Runs a job with stdout captured; returns the worker's event lines. The role variables the worker sets are put back (other tests read them). */
+const captureRun = async (job: Job, io?: { input?: NodeJS.ReadableStream }) => {
+  const lines: string[] = [];
+  const orig = process.stdout.write.bind(process.stdout);
+  const saved = { role: process.env.VERSTAS_ROLE, budget: process.env.VERSTAS_BUDGET_FILE };
+  (process.stdout as unknown as { write: (s: string) => boolean }).write = (s: string) => {
+    lines.push(String(s));
+    return true;
+  };
+  try {
+    const code = await runJob(job, io);
+    return { code, events: lines.map((l) => JSON.parse(l) as Record<string, unknown>) };
+  } finally {
+    (process.stdout as unknown as { write: typeof orig }).write = orig;
+    if (saved.role === undefined) delete process.env.VERSTAS_ROLE; else process.env.VERSTAS_ROLE = saved.role;
+    if (saved.budget === undefined) delete process.env.VERSTAS_BUDGET_FILE; else process.env.VERSTAS_BUDGET_FILE = saved.budget;
+  }
+};
+
+test("claude streams its input: the prompt is the first user message and stdin stays open", async () => {
+  const job = { role: "implementer", promptFile: "/p", systemPromptFile: "/s", caps: { minutes: 1, turns: 1, budgetUsd: 1 }, mcpConfigFile: "/m" } as Job;
+  const args = claudeArgs(job);
+  expect(args.slice(args.indexOf("--input-format"), args.indexOf("--input-format") + 2)).toEqual(["--input-format", "stream-json"]);
+  const spawned = await DRIVER_IMPLS.claude.prepare(job, "do the ticket", "rules", "/usr/bin/claude");
+  expect(spawned.streaming).toBe(true);
+  expect(JSON.parse(spawned.stdin!.trim())).toEqual({ type: "user", message: { role: "user", content: "do the ticket" } });
+  expect(JSON.parse(DRIVER_IMPLS.claude.message!("why so slow?").trim())).toMatchObject({ type: "user", message: { content: "why so slow?" } });
+  // Long commands and messages from the user are allowed for by the Bash limits the driver sets.
+  expect(spawned.env.BASH_DEFAULT_TIMEOUT_MS).toBe(String(10 * 60_000));
+  expect(spawned.env.BASH_MAX_TIMEOUT_MS).toBe(String(30 * 60_000));
+});
+
+test("worker: a turn that ends with a background command running keeps the session open until the agent is re-invoked; a message from the user is forwarded; every turn's text is the reply", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "verstas-stream-"));
+  await fs.writeFile(path.join(dir, "p.md"), "task");
+  await fs.writeFile(path.join(dir, "s.md"), "rules");
+  const j = (o: unknown) => JSON.stringify(o).replace(/'/g, "'\\''");
+  const assistant = (text: string) => j({ type: "assistant", message: { content: [{ type: "text", text }], usage: { input_tokens: 1, output_tokens: 1 } } });
+  const result = (text: string, cost: number) => j({ type: "result", subtype: "success", result: text, total_cost_usd: cost, num_turns: 1 });
+  // A fake Claude Code on streaming input: reads one line per turn from stdin and answers it. Turn 1 starts a
+  // background command and ends; the command "finishes" on its own, which re-invokes the agent (turn 2) with
+  // no new input; a message from the user then makes turn 3; the agent exits when stdin closes.
+  const bin = path.join(dir, "fake-claude");
+  await fs.writeFile(
+    bin,
+    `#!/bin/sh
+read -r first
+echo '${assistant("STARTED")}'
+echo '${j({ type: "system", subtype: "background_tasks_changed", tasks: [{ task_id: "bg1" }] })}'
+echo '${result("VERDICT: ok, started the suite", 0.1)}'
+sleep 0.3
+echo '${j({ type: "system", subtype: "task_notification", task_id: "bg1", status: "completed", description: "the suite" })}'
+echo '${j({ type: "system", subtype: "background_tasks_changed", tasks: [] })}'
+echo '${assistant("FINISHED")}'
+echo '${result("the suite passed", 0.2)}'
+read -r second
+printf '%s' "$second" > received.txt
+echo '${assistant("got it")}'
+echo '${result("HELLO", 0.3)}'
+cat >/dev/null
+`,
+    { mode: 0o755 },
+  );
+  const job: Job = { role: "reviewer", ticket: "T-1", promptFile: path.join(dir, "p.md"), systemPromptFile: path.join(dir, "s.md"), caps: { minutes: 5, turns: 20, budgetUsd: 1 }, mcpConfigFile: path.join(dir, "m.json"), cwd: dir, binary: bin };
+  const input = new PassThrough();
+  // The message arrives while the first turn's background command still runs (the only time one can land: once a
+  // turn ends with nothing pending the session is closed); it is written to the agent as a user message.
+  setTimeout(() => input.write(JSON.stringify({ kind: "message", text: "why so slow?" }) + "\n"), 100);
+  try {
+    const { code, events } = await captureRun(job, { input });
+    expect(code).toBe(0);
+    const texts = events.filter((e) => e.kind === "text").map((e) => String(e.text));
+    expect(texts[0]).toBe("STARTED");
+    expect(texts[1]).toBe("FINISHED");
+    expect(texts[2]).toBe("got it");
+    expect(JSON.parse(await fs.readFile(path.join(dir, "received.txt"), "utf8"))).toMatchObject({ type: "user", message: { role: "user", content: "Message from the user: why so slow?" } });
+    const statuses = events.filter((e) => e.kind === "status").map((e) => String(e.text));
+    expect(statuses).toContain("turn ended with 1 background command running; the agent is re-invoked when one finishes");
+    expect(statuses).toContain("background command completed: the suite");
+    const done = events.find((e) => e.kind === "worker_done")!;
+    expect(done).toMatchObject({ ok: true, stopReason: "success", costUsd: 0.3, turns: 3 });
+    expect(String(done.text)).toBe("VERDICT: ok, started the suite\n\nthe suite passed\n\nHELLO");
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("worker: a turn that ends with nothing in the background closes the session at once", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "verstas-stream2-"));
+  await fs.writeFile(path.join(dir, "p.md"), "task");
+  await fs.writeFile(path.join(dir, "s.md"), "rules");
+  const bin = path.join(dir, "fake-claude");
+  // Without a closed stdin the fake would hang on `cat`; the worker closes it after the result.
+  await fs.writeFile(bin, `#!/bin/sh
+read -r first
+echo '{"type":"assistant","message":{"content":[{"type":"text","text":"done"}]}}'
+echo '{"type":"result","subtype":"success","result":"done","total_cost_usd":0.05,"num_turns":1}'
+cat >/dev/null
+`, { mode: 0o755 });
+  const job: Job = { role: "implementer", ticket: "T-1", promptFile: path.join(dir, "p.md"), systemPromptFile: path.join(dir, "s.md"), caps: { minutes: 5, turns: 20, budgetUsd: 1 }, mcpConfigFile: path.join(dir, "m.json"), cwd: dir, binary: bin };
+  try {
+    const t0 = Date.now();
+    const { code, events } = await captureRun(job, { input: new PassThrough() });
+    expect(code).toBe(0);
+    expect(Date.now() - t0).toBeLessThan(5_000);
+    expect(events.find((e) => e.kind === "worker_done")).toMatchObject({ ok: true, text: "done", costUsd: 0.05, turns: 1 });
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
 });

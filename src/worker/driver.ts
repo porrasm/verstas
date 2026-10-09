@@ -49,8 +49,15 @@ export type Spawned = {
   args: string[];
   env: NodeJS.ProcessEnv;
   cwd: string;
-  /** Written to the child's stdin, then stdin is closed. */
+  /** Written to the child's stdin first. Without `streaming`, stdin is then closed. */
   stdin?: string;
+  /**
+   * The agent takes a stream of messages on stdin and stays alive between
+   * turns: the worker keeps stdin open, forwards messages from the user
+   * with `message`, and closes it when a turn ended with no background
+   * command running (the agent then exits).
+   */
+  streaming?: boolean;
 };
 
 /** Per job: `line` translates one output line; `end` gives a result when the stream ended without a terminal line. */
@@ -67,6 +74,8 @@ export type DriverImpl = {
   translator(job: Job): Translator;
   /** Matched against stderr when the stream gave no result; a hit means a rate limit, not a broken ticket. */
   stderrRateLimit: RegExp;
+  /** The line to write to the agent's stdin for a message from the user mid-run; absent when the driver cannot take one. */
+  message?(text: string): string;
   /** After the agent exited: clean up, and hand back a refreshed credential when the agent rotated it. */
   finish?(job: Job): Promise<{ credential?: string } | undefined>;
 };

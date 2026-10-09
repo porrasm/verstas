@@ -1432,3 +1432,65 @@ test("a session from another's environment with its readiness carried over initi
     }
   }
 });
+
+test("a message from the user reaches the worker running now, is logged, and is refused when nothing runs or the driver cannot take it", async () => {
+  const s = await makeSession({ reviewer: false });
+  try {
+    const sent: string[] = [];
+    let release: () => void = () => undefined;
+    const worker: WorkerRunner & { jobs: Job[] } = {
+      jobs: [],
+      async run(job, onEvent, signal, opts) {
+        this.jobs.push(job);
+        opts?.attach?.({ driver: job.driver ?? "claude", send: (t) => (sent.push(`${job.ticket}: ${t}`), true) });
+        await fileReport(s.hub, s.id, job.ticket!, "done");
+        // Hold the first worker until the test has messaged it.
+        if (job.ticket === "T-1") await new Promise<void>((r) => (release = r));
+        onEvent({ kind: "text", t: now(), ticket: job.ticket, role: job.role, text: "working" });
+        return { kind: "worker_done", t: now(), ticket: job.ticket, role: job.role, ok: true, stopReason: signal.aborted ? "aborted" : "success", rateLimited: false, costUsd: 0, turns: 1, seconds: 1, text: "", stderr: "" };
+      },
+    };
+    const mgr = manager(s, fakeShell(), worker);
+    expect(await mgr.message(s.id, "hello?")).toEqual({ ok: false, error: "No run is active" });
+    const ctl = await mgr.start(s.id);
+    while (!sent.length && worker.jobs.length === 0) await new Promise((r) => setTimeout(r, 5));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(await mgr.message(s.id, "  why is this taking so long?  ")).toEqual({ ok: true, to: "implementer on T-1" });
+    expect(sent).toEqual(["T-1: why is this taking so long?"]);
+    release();
+    await ctl.done;
+    const events = (await fs.readFile(path.join(s.paths.runs, "1", "events.jsonl"), "utf8")).split("\n").filter(Boolean).map((l) => JSON.parse(l) as VerstasEvent);
+    expect(events.some((e) => e.kind === "status" && e.ticket === "T-1" && e.text === "message from the user to the implementer on T-1: why is this taking so long?")).toBe(true);
+    expect(await mgr.message(s.id, "late")).toEqual({ ok: false, error: "No run is active" });
+  } finally {
+    await fs.rm(s.root, { recursive: true, force: true });
+  }
+});
+
+test("a message is refused while the run is between workers and for a worker on a driver without streaming input", async () => {
+  const s = await makeSession({ reviewer: false, agents: { worker: { driver: "codex" } } });
+  try {
+    let release: () => void = () => undefined;
+    const worker: WorkerRunner & { jobs: Job[] } = {
+      jobs: [],
+      async run(job, _onEvent, signal, opts) {
+        this.jobs.push(job);
+        opts?.attach?.({ driver: "codex", send: () => true });
+        await fileReport(s.hub, s.id, job.ticket!, "done");
+        if (job.ticket === "T-1") await new Promise<void>((r) => (release = r));
+        return { kind: "worker_done", t: now(), ticket: job.ticket, role: job.role, ok: true, stopReason: signal.aborted ? "aborted" : "success", rateLimited: false, costUsd: 0, turns: 1, seconds: 1, text: "", stderr: "" };
+      },
+    };
+    const mgr = manager(s, fakeShell(), worker);
+    const ctl = await mgr.start(s.id);
+    while (worker.jobs.length === 0) await new Promise((r) => setTimeout(r, 5));
+    await new Promise((r) => setTimeout(r, 20));
+    const r = await mgr.message(s.id, "hi");
+    expect(r.ok).toBe(false);
+    expect(String((r as { error: string }).error)).toContain("codex, which cannot take a message mid-run");
+    release();
+    await ctl.done;
+  } finally {
+    await fs.rm(s.root, { recursive: true, force: true });
+  }
+});

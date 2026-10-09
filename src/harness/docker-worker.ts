@@ -86,8 +86,18 @@ const runWorkerExec = async (
   store: CredentialStore,
 ): Promise<WorkerDone> => {
   const jobFile = opts.jobFile ?? DEFAULT_JOB_FILE;
-  const child = execInSandbox(cfg, sessionId, workerCommand(jobFile), { secretEnv });
-  child.stdin?.end();
+  const driver = driverInfo(job.driver);
+  // stdin stays open: messages from the user go down it as JSON lines (src/worker/worker.ts).
+  const child = execInSandbox(cfg, sessionId, workerCommand(jobFile), { secretEnv, stdin: true });
+  child.stdin?.on("error", () => undefined);
+  opts.attach?.({
+    driver: driver.name,
+    send: (text) => {
+      if (!child.stdin || child.stdin.destroyed || child.exitCode !== null) return false;
+      child.stdin.write(JSON.stringify({ kind: "message", text }) + "\n");
+      return true;
+    },
+  });
   let stderr = "";
   const raw = opts.rawLog ? createWriteStream(opts.rawLog, { flags: "a" }) : null;
   child.stderr?.setEncoding("utf8").on("data", (d: string) => {
@@ -116,6 +126,7 @@ const runWorkerExec = async (
   });
   const code = await new Promise<number>((resolve) => child.on("close", (c) => resolve(c ?? 1)));
   signal.removeEventListener("abort", onAbort);
+  child.stdin?.end();
   raw?.end();
   return (
     done ?? {

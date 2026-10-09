@@ -49,7 +49,13 @@ const doneLine = (job: Job, t0: number, fields: Partial<Extract<VerstasEvent, { 
     ...fields,
   });
 
-export const runJob = async (job: Job): Promise<number> => {
+/** A message from the user for the running agent, one JSON line on the worker's stdin (the harness writes it). */
+export type WorkerMessage = { kind: "message"; text: string };
+
+/** How long after the last background command ended the worker waits for the agent to be re-invoked before it closes the session. */
+const REINVOKE_GRACE_MS = 15_000;
+
+export const runJob = async (job: Job, io: { /** Where messages from the user arrive; the process's stdin by default. */ input?: NodeJS.ReadableStream } = {}): Promise<number> => {
   const t0 = Date.now();
   const driver = DRIVER_IMPLS[job.driver ?? "claude"];
   if (!driver) {
@@ -94,7 +100,69 @@ export const runJob = async (job: Job): Promise<number> => {
   const env = { ...spawned.env, VERSTAS_ROLE: job.role, ...(job.budgetFile ? { VERSTAS_BUDGET_FILE: job.budgetFile } : {}) };
 
   const child = spawn(spawned.bin, spawned.args, { cwd: spawned.cwd, stdio: ["pipe", "pipe", "pipe"], env });
-  child.stdin.end(spawned.stdin ?? "");
+  // Streaming: the first message goes in and stdin stays open; the agent
+  // lives until a turn ends with no background command running (below) or
+  // a cap stops it. Otherwise the prompt is all the agent ever reads.
+  if (spawned.streaming) child.stdin.write(spawned.stdin ?? "");
+  else child.stdin.end(spawned.stdin ?? "");
+  let stdinOpen = Boolean(spawned.streaming);
+  const closeStdin = () => {
+    if (!stdinOpen) return;
+    stdinOpen = false;
+    child.stdin.end();
+  };
+  child.stdin.on("error", () => (stdinOpen = false));
+
+  // The results of every turn: the text of all of them is the worker's
+  // reply (the harness reads the SETUP or VERDICT line from it), the cost
+  // of the last (cumulative in the stream).
+  const results: NonNullable<Translated["result"]>[] = [];
+  // Background commands still running, as the agent last reported them.
+  let pending = 0;
+  // A turn is open from the first assistant line after a result (or the start) until the next result.
+  let turnOpen = true;
+  let reinvokeTimer: NodeJS.Timeout | undefined;
+  const status = (text: string) => emit({ kind: "status", t: new Date().toISOString(), ticket: job.ticket, text });
+  /** After a result: close when nothing runs in the background, else wait to be re-invoked. */
+  const settleTurn = () => {
+    if (!stdinOpen || turnOpen) return;
+    if (pending > 0) {
+      status(`turn ended with ${pending} background command${pending === 1 ? "" : "s"} running; the agent is re-invoked when one finishes`);
+      return;
+    }
+    closeStdin();
+  };
+  // The agent is re-invoked by itself when a background command finishes;
+  // if that does not happen within the grace period, the session is over.
+  const armReinvoke = () => {
+    clearTimeout(reinvokeTimer);
+    reinvokeTimer = setTimeout(() => {
+      if (!turnOpen && pending === 0) closeStdin();
+    }, REINVOKE_GRACE_MS).unref();
+  };
+
+  // Messages from the user, forwarded to the agent as its own user messages.
+  if (spawned.streaming && driver.message) {
+    const input = io.input ?? process.stdin;
+    const fromUser = readline.createInterface({ input, crlfDelay: Infinity });
+    fromUser.on("line", (line) => {
+      let m: WorkerMessage;
+      try {
+        m = JSON.parse(line) as WorkerMessage;
+      } catch {
+        return;
+      }
+      if (m.kind !== "message" || typeof m.text !== "string" || !m.text.trim()) return;
+      if (!stdinOpen) {
+        status("a message from the user arrived after the agent's last turn; not delivered");
+        return;
+      }
+      child.stdin.write(driver.message!(`Message from the user: ${m.text.trim()}`));
+      clearTimeout(reinvokeTimer);
+      turnOpen = true;
+    });
+    input.on?.("error", () => undefined);
+  }
 
   const stop = () => {
     child.kill("SIGTERM");
@@ -144,8 +212,20 @@ export const runJob = async (job: Job): Promise<number> => {
         budget.outputTokens += e.cost.outputTokens;
       }
     }
-    if (out.result) result = out.result;
+    if (out.result) {
+      result = out.result;
+      results.push(out.result);
+      turnOpen = false;
+      settleTurn();
+    }
+    if (out.backgroundTasks !== undefined) {
+      const before = pending;
+      pending = out.backgroundTasks;
+      if (before > 0 && pending === 0 && !turnOpen) armReinvoke();
+    }
     if (out.assistantTurn) {
+      turnOpen = true;
+      clearTimeout(reinvokeTimer);
       turns++;
       budget.turns = turns;
       writeBudget();
@@ -158,8 +238,12 @@ export const runJob = async (job: Job): Promise<number> => {
   }
   const code = await exited;
   clearTimeout(timer);
+  clearTimeout(reinvokeTimer);
   await budgetWrites;
   if (!result) result = translator.end();
+  // Every turn's reply, oldest first: the SETUP or VERDICT line is usually in the first; a later turn (after a background command) may add to it.
+  const text = results.length > 1 ? results.map((r) => r.text).filter(Boolean).join("\n\n") : (result?.text ?? "");
+  const costUsd = results.reduce((m, r) => Math.max(m, r.costUsd), result?.costUsd ?? 0);
 
   const after = await driver.finish?.(job).catch(() => undefined);
   // A rotated login goes back to the host on its own line; the harness stores it and never logs it.
@@ -171,9 +255,9 @@ export const runJob = async (job: Job): Promise<number> => {
     ok,
     stopReason: stopReason || result?.stopReason || `exit_${code}`,
     rateLimited: result?.rateLimited ?? (!ok && driver.stderrRateLimit.test(stderr)),
-    costUsd: result?.costUsd ?? 0,
+    costUsd,
     turns,
-    text: (result?.text ?? "").slice(0, 4000),
+    text: text.slice(0, 4000),
     stderr: stderr.slice(0, 2000),
   });
   return ok ? 0 : 1;

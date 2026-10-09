@@ -515,18 +515,62 @@ const useBoardActions = (p: BodyProps) => ({
 });
 
 const SessionLog = (p: BodyProps) => (
-  <LogPanel
-    events={p.events}
-    runs={p.runs}
-    liveRun={p.active ? p.run : undefined}
-    shownRun={p.eventsRun}
-    picked={p.pickedRun}
-    onPick={p.setPickedRun}
-    ticket={p.logTicket}
-    onTicket={p.setLogTicket}
-    tickets={p.board.tickets.map((t) => t.id)}
-  />
+  <>
+    <LogPanel
+      events={p.events}
+      runs={p.runs}
+      liveRun={p.active ? p.run : undefined}
+      shownRun={p.eventsRun}
+      picked={p.pickedRun}
+      onPick={p.setPickedRun}
+      ticket={p.logTicket}
+      onTicket={p.setLogTicket}
+      tickets={p.board.tickets.map((t) => t.id)}
+    />
+    {p.active && <WorkerMessageBox base={p.base} />}
+  </>
 );
+
+/**
+ * A line to the worker running now. It lands in the agent's conversation
+ * as "Message from the user: …" and the reply shows up in the log as
+ * worker text; nothing on the board changes. For "why is this taking so
+ * long" and "is the setup wrong", not for new work (that is a ticket).
+ */
+const WorkerMessageBox = ({ base }: { base: string }) => {
+  const [text, setText] = useState("");
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+  const send = async () => {
+    if (!text.trim()) return;
+    setBusy(true);
+    setNote("");
+    try {
+      const r = await api<{ to: string }>("POST", `${base}/run/message`, { text });
+      setText("");
+      setNote(`Sent to the ${r.to}; its reply appears in the log.`);
+    } catch (e) {
+      setNote((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="row" style={{ gap: 6, marginTop: 6, alignItems: "flex-start" }}>
+      <textarea
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        onKeyDown={(e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) void send(); }}
+        placeholder="Message the running worker: why is this taking so long?"
+        title="Reaches the worker running now as a user message in its conversation. Not for new work: that is a ticket."
+        style={{ minHeight: 36, flex: 1 }}
+        maxLength={10_000}
+      />
+      <button className="sm" onClick={() => void send()} disabled={busy || !text.trim()} title="Send (⌘↵)">Send</button>
+      {note && <span className="muted small">{note}</span>}
+    </div>
+  );
+};
 
 /**
  * The box exists: the board and the live log in front, the inbox and the
@@ -1870,7 +1914,7 @@ const GROUPS: { key: KindGroup; label: string }[] = [
   { key: "network", label: "Network" },
 ];
 
-type Row = { e: VEvent };
+type Row = { e: VEvent; /** A tool call of the live run with no result yet: shown with the time it has been running. */ open?: boolean };
 
 const LogPanel = ({ events, runs, liveRun, shownRun, picked, onPick, ticket, onTicket, tickets }: { events: VEvent[]; runs: Run[]; liveRun?: Run; shownRun: number | null; picked: number | null; onPick: (r: number | null) => void; ticket: string; onTicket: (t: string) => void; tickets: string[] }) => {
   const [groups, setGroups] = useState<Set<KindGroup>>(new Set(["tools", "text", "board", "network"]));
@@ -1887,8 +1931,15 @@ const LogPanel = ({ events, runs, liveRun, shownRun, picked, onPick, ticket, onT
       if (e.kind === "tool_result" && e.ok && !String(e.summary ?? "").trim()) continue;
       out.push({ e });
     }
+    // The last tool call of a live run with nothing after it is still running (a long test, a sleep):
+    // say so with the time, so a waiting worker is not mistaken for a stuck one.
+    if (liveRun) {
+      const last = events[events.length - 1];
+      const lastRow = out[out.length - 1];
+      if (last && lastRow && last.kind === "tool_use" && lastRow.e === last) lastRow.open = true;
+    }
     return out;
-  }, [events, ticket, groups]);
+  }, [events, ticket, groups, liveRun]);
 
   const ticketsSeen = useMemo(() => {
     const s = new Set<string>();
@@ -1934,7 +1985,7 @@ const LogPanel = ({ events, runs, liveRun, shownRun, picked, onPick, ticket, onT
         <span className="end">{rows.length} of {events.length} events</span>
       </div>
       <div className="body" ref={bodyRef} onScroll={onScroll}>
-        {rows.map((r, i) => <EventRow key={i} row={r} onTicket={onTicket} />)}
+        {rows.map((r, i) => <EventRow key={i} row={r} onTicket={onTicket} now={now} />)}
         {rows.length === 0 && <div className="none">{events.length === 0 ? "Nothing logged yet. Start a run and the workers' steps appear here." : "No events match the filters."}</div>}
         {!follow && rows.length > 0 && <button className="jump sm" onClick={() => { setFollow(true); if (bodyRef.current) bodyRef.current.scrollTop = bodyRef.current.scrollHeight; }}>↓ Latest</button>}
       </div>
@@ -1952,13 +2003,14 @@ const evClass = (e: VEvent): string => {
   return e.kind;
 };
 
-const EventRow = ({ row, onTicket }: { row: Row; onTicket: (t: string) => void }) => {
+const EventRow = ({ row, onTicket, now }: { row: Row; onTicket: (t: string) => void; now?: number }) => {
   const { e } = row;
+  const running = row.open && now ? Math.max(0, Math.round((now - new Date(e.t).getTime()) / 1000)) : undefined;
   return (
     <div className={`ev ${evClass(e)}`}>
       <span className="t" title={fmtDateTime(e.t)}>{fmtTime(e.t)}</span>
       <span className="tid" onClick={() => e.ticket && onTicket(e.ticket)} title={e.ticket ? `Only ${e.ticket}` : ""}>{e.ticket ?? ""}</span>
-      <span className="m"><EventText e={e} /></span>
+      <span className="m"><EventText e={e} />{running !== undefined && <span className="muted" title="This command has not returned yet"> · running for {fmtSecs(running)}</span>}</span>
     </div>
   );
 };
