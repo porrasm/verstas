@@ -186,14 +186,14 @@ host.docker.internal:host-gateway`).
   request inbox, nothing else. Its role limits it further: a worker
   cannot move tickets at all; a lead may claim a ready ticket and submit
   the one it holds, but never move one to `done`, which only the
-  harness's judge does after gates and an independent reviewer. A ticket's
-  review mode (`full`, `checks`, `none`), which decides whether that
-  reviewer and those gates run, is yours alone: the agent API strips it
-  from tickets an agent files and no agent route changes it, so an agent
-  cannot judge its own work by filing it as "no review". The same goes
-  for a repository's check command: only you set it. The script it runs
-  lives in the repository, so an agent can change that script in a
-  ticket; the change is in the diff the reviewer reads.
+  harness's judge does after an independent reviewer. A ticket's review
+  mode (`full`, `none`), which decides whether that reviewer runs, is
+  yours alone: the agent API strips it from tickets an agent files and no
+  agent route changes it, so an agent cannot judge its own work by filing
+  it as "no review". The harness runs no checks of its own; the reviewer
+  runs the repository's check script, which lives in the repository, so an
+  agent can change that script in a ticket; the change is in the diff the
+  reviewer reads.
 - An agent terminal's token (role `terminal`) plans like the planner: it
   may create tickets of any kind, and, because you are at the keyboard, put
   one straight into `ready` (every other agent files into `backlog`). It
@@ -245,7 +245,7 @@ Two secrets enter a session per worker, and neither is in the container's
 environment. Each worker's `docker exec` passes them by name only
 (`-e CLAUDE_CODE_OAUTH_TOKEN`, or the chosen agent's variable), with the
 value in the docker CLI's own environment, so they never appear in a
-command line on the host or in the box, and setup scripts, recipes, gates
+command line on the host or in the box, and setup scripts, recipes
 and harness git do not see them.
 
 - The agent's credential: `CLAUDE_CODE_OAUTH_TOKEN` (made once with

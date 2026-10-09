@@ -15,7 +15,7 @@ import { dockerTerminal } from "./docker-terminal.js";
 
 /**
  * The real implementations of the loop's two interfaces, over the session
- * container. `shell` runs gates and git as the agent user; `worker` starts
+ * container. `shell` runs git as the agent user; `worker` starts
  * the in-image driver and streams its JSON lines back.
  */
 
@@ -58,7 +58,7 @@ const serializeCodex = async <T>(fn: () => Promise<T>): Promise<T> => {
 /**
  * The agent's credential and the run token reach the worker process only:
  * passed by name on its `docker exec`, not in the container's environment,
- * so setup scripts, recipes, gates and harness git never see them. Which
+ * so setup scripts, recipes and harness git never see them. Which
  * credential depends on the job's driver.
  */
 export const dockerWorker = (cfg: SandboxConfig, sessionId: string, store: CredentialStore = { secrets: async () => ({}), save: async () => undefined }): WorkerRunner => ({

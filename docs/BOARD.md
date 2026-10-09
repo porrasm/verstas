@@ -23,7 +23,7 @@ result imports as is. Markdown is accepted too (below).
       "state": "ready",         // backlog | ready (default backlog)
       "pinned": false,          // true: the agent may not reprioritize it
       "agent": { "driver": "codex", "model": "gpt-5.1" }, // optional: this ticket's own agent
-      "review": "checks",       // optional: full | checks | none (default: the session's)
+      "review": "full",         // optional: full | none (default: the session's)
       "spec": "Pure module in src/engine. Input: control value 0..1 ...",
       "acceptance": [
         "unit tests cover 7-bit and 14-bit CC, note on/off, pitch bend",
@@ -65,16 +65,14 @@ A bare array of tickets is accepted as well.
   lead may not claim such a ticket; it hands it over with `board_run`,
   which runs the worker and the judge while the lead waits. Use it for
   tickets that need a particular strength, such as judging rendered images.
-- `review` is optional and yours only, and wins over the repositories'
-  settings (Judging, below): `full` runs the gates and the
-  reviewer, `checks` the gates alone (accepted when they pass, the
-  implementer finished and there is a change or a report), `none` neither
-  (accepted when the implementer finished; "Accepted without review").
-  Absent, the session's Reviewer setting applies: on means `full`, off
-  means `checks`. Use `checks` or `none` for a doc update or a trivial
-  change. Agents cannot set it: the agent API drops it, and an agent's
-  tickets always take the session's setting. A card whose mode differs
-  from the session's shows a badge.
+- `review` is optional and yours only (Judging, below): `full` runs the
+  reviewer, `none` accepts the ticket when the implementer finished
+  ("Accepted without review"). Absent, the session's Reviewer setting
+  applies: on means `full`, off means `none`. Use `none` for a doc update
+  or a trivial change. `checks` is a value from before the harness
+  stopped running checks itself and reads as `none`. Agents cannot set it:
+  the agent API drops it, and an agent's tickets always take the session's
+  setting. A card whose mode differs from the session's shows a badge.
 
 ### Judging
 
@@ -84,58 +82,37 @@ changed since the ticket started (its earlier attempts, committed as wip,
 count). The ticket's `repos` play no part in this; when they differ from
 what changed, the note and the reviewer say so.
 
-Each repository has a **policy**:
-
-- `check`: one bash command run in its clone (`bash scripts/check.sh`,
-  `npm test`), or none. Without one set, the harness guesses npm
-  `typecheck`, `lint` and `test` scripts or pytest; those results are
-  evidence for the reviewer, never a verdict.
-- `review`: `full` (a reviewer reads every change), `checks` (the check
-  decides alone) or `none` (accepted when the worker finishes). Absent,
-  the session's Reviewer setting.
-- `alsoCheck`: repositories that build on this one, whose checks also run
-  when it changes (a shared library's consumers).
-- `guardPaths`: the check's own files beyond its script (test and lint
-  config). The script a check command names, and `package.json` for a
-  package script, are guarded without being listed.
-
-The agents keep the policy, so you never have to. Setup writes it for
-every repository after it has made the build and tests work
-(`repo_policy_set`); the harness runs a proposed check command once on the
-repository as it is and refuses one that already fails. A ticket that
-changes what a check should be (a new test runner, a lint) proposes it
-with `repo_policy_propose`: the proposed check runs on the ticket's change
-in place of the current one, the reviewer sees the proposal, and it
-applies when the ticket is accepted. The lead, and the agent in your
-terminal, may repair a check between tickets with `repo_policy_set`; the
-lead's change lands in your inbox. Under Environment on the session page
-each field shows its value and who set it and why; overriding a field
-makes it yours (agents are refused on it), and handing it back returns it
-to them. A check you had typed before policies existed stays yours.
+The harness runs no checks of its own. Each repository's check is the
+command the project brief names under Build / test / run (`bash
+scripts/check.sh`, `npm test`, or "nothing to run"): setup writes that
+line after it has made the build and tests work and has run the command
+once, and the reviewer of every ticket runs it. An implementer runs the
+tests of the code it changed and submits; the reviewer runs the whole
+check of every changed repository (and of the repositories the brief says
+build on a changed one), the commands the acceptance criteria name, and
+then reads the diff. Without a reviewer, the implementer's word is the
+verdict, and it is told to run the check itself before submitting.
 
 How a submitted change is judged:
 
-1. **Checks.** The checks of every changed repository, plus their
-   `alsoCheck` repositories, once each, one after another. A repository
-   nobody changed is not checked. A failing check command is retried once;
-   a second failure sends the ticket back with the log's last lines and no
-   reviewer. Logs: `/workspace/.verstas/logs/<ticket>-<repo>-check.log`.
-2. **Review level.** The ticket's own `review` when you set one.
-   Otherwise `full` when the change touches a guarded file or proposes a
-   policy change; otherwise the strictest level among the changed
-   repositories (`full` over `checks` over `none`); with nothing changed,
-   the session's setting. `none` also skips the checks.
-3. **Review.** One reviewer reads every changed repository, one section
-   each. Repositories whose own level is `none` come last, as context, and
-   are cut first when the diff is too long.
-4. **Commit.** All or nothing: every changed repository is scanned for
+1. **Review level.** The ticket's own `review` when you set one, else the
+   session's Reviewer setting.
+2. **Review.** With `full`, one reviewer reads every changed repository,
+   one section each, after running their checks. With `none`, the ticket
+   is accepted when the implementer finished, or requeued when it stopped
+   at a cap.
+3. **Commit.** All or nothing: every changed repository is scanned for
    credentials first, then each is committed with the same message and the
    trailers `Verstas-Ticket` and, across several repositories,
    `Verstas-Repos`.
 
 `board_changes` shows a worker what the judge would see if it submitted
-now. Chore sweeps go through the same checks without a reviewer, and are
-refused when they touch a guarded file.
+now. Chore sweeps go through a size check and, when the session has a
+reviewer, the same reviewer (Chores, below).
+
+A proper harness-run check (one command per repository, run once per
+submission out of band, as evidence for the reviewer first) is on the
+backlog; the first version cost more than it saved and was removed.
 
 ### Ticket size
 
@@ -192,13 +169,15 @@ session page or in an import, and a lead sweeps them in batches: it takes
 some open chores (`chores_sweep`), does them, runs the repository's own
 checks, and submits one line per chore (`chores_submit`: done, dropped
 with the reason, or promoted to a backlog ticket when it turned out
-bigger). Verstas then runs the checks itself and a size check, and
-commits the whole batch as **one commit without a reviewer**. Over the
-size caps (`sweepMaxLines`, `sweepMaxFiles` in the session's caps), or
-when the sweep touched a protected path (contract documents such as
-`DESIGN.md`, anything under `fixtures/`, snapshots), the sweep is refused
-with the reason, the chores go back to open, and the changes stay in the
-working tree for the lead to turn into a ticket or revert.
+bigger). Verstas then runs a size check, has the session's reviewer read
+the batch when the session has one (the chores stand in for the ticket,
+the lead's lines for the report), and commits the whole batch as **one
+commit**. Over the size caps (`sweepMaxLines`, `sweepMaxFiles` in the
+session's caps), when the sweep touched a protected path (contract
+documents such as `DESIGN.md`, anything under `fixtures/`, snapshots), or
+when the reviewer's verdict is not ok, the sweep is refused with the
+reason, the chores go back to open, and the changes stay in the working
+tree for the lead to turn into a ticket or revert.
 
 The list has a sweep line, the `choreSweepAt` cap (default 10): with that
 many chores open, the lead sweeps before it starts another ticket, and

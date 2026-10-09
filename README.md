@@ -146,30 +146,29 @@ Then, in the web app:
    it is in those files anyway, and always once the list reaches the
    session's sweep line (`choreSweepAt`, default 10: claims are refused
    until it sweeps). Anyone drops a chore that is not worth doing
-   (`chore_drop`). Verstas commits the batch as one commit after the
-   checks and a size check, with no reviewer (`docs/BOARD.md`, Chores).
+   (`chore_drop`). Verstas commits the batch as one commit after a size
+   check and, when the session has a reviewer, its review (`docs/BOARD.md`,
+   Chores).
    **A ticket's own agent**: a ticket may name a driver and model of its
    own; its implementer is then a fresh worker on that agent, judged by the
    session's reviewer. A lead hands such a ticket over with `board_run`.
    **Several repositories**: a ticket's repositories are a hint; a worker
-   changes whichever it needs. Each change runs only the checks of the
-   repositories it touched, and gets the review the strictest of them asks
-   for. Setup writes each repository's check and review level and tickets
-   keep them current; you can override any of them under Environment
-   (`docs/BOARD.md`, Judging).
+   changes whichever it needs. The harness runs no checks of its own: the
+   reviewer runs each changed repository's check (the command the brief
+   names) and reads the change (`docs/BOARD.md`, Judging).
 9. **Apply to repo** when you want the work: the session page's Work panel
    puts a repository's commits on the branch `verstas/<session>` in your
    real checkout, one commit per ticket, without touching the branch you
    have checked out. Merge, rebase or cherry-pick from there. Export
    bundles remain for moving work to another machine: one `git fetch` line per
    repository is shown. Bundles are pure data; nothing from the repository
+   runs on your machine.
    **Restore from repo** beside it goes the other way: when the real
    repository moved on (you merged the run branch, committed by hand), it
    replaces the clone in the box with a fresh clone of the repository as it
    is now, at the branch you pick, instead of a new session. Unapplied
    commits on the run branch and ignored files inside the clone go with
    the old clone; the dialog counts the commits and offers Apply first.
-   runs on your machine.
 10. **Move a session to another machine** with **Export session (.ver)**
    in the session page's menu (stop the run first). The archive holds the
    settings, board, inbox, notes, attachments, run history and each clone

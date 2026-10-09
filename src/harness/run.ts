@@ -2,15 +2,15 @@ import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
-import { agentFor, boardDrivers, describeAgent, DRIVER_NAMES, type GateResult, eventSchema, isInitialized, matchesAnyGlob, now, requestOutcome, runSchema, SWEEP_PROTECTED_GLOBS, type AgentSpec, type RepoPolicyPatch, type TouchedRepo, type Board, type DriverName, type Readiness, type Run, type Session, type SweepResult, type Ticket, type TicketState, type VerstasEvent } from "../core/types.js";
+import { agentFor, boardDrivers, describeAgent, DRIVER_NAMES, eventSchema, isInitialized, matchesAnyGlob, now, requestOutcome, runSchema, SWEEP_PROTECTED_GLOBS, type AgentSpec, type TouchedRepo, type Board, type DriverName, type Readiness, type Run, type Session, type SweepResult, type Ticket, type TicketState, type VerstasEvent } from "../core/types.js";
 import { addNote, canStart, getTicket, hasOpenWork, nextReady, openChores, releaseSweep, replaceTicket, settleSweep, sweepInFlight, transition, unknownRepos } from "../board/board.js";
-import { earlierAttempts, guardHits, mergePolicy, planChecks, plannedVsTouched, reviewLevel, type PlannedCheck, type RepoChange } from "./judging.js";
+import { earlierAttempts, plannedVsTouched, reviewLevel, type RepoChange } from "./judging.js";
 import { writeJsonAtomic } from "../board/store.js";
 import type { SessionHandle, SessionHub } from "../sessions/hub.js";
 import type { AgentRunHooks, RunToken, RunTokens } from "../agent-api/agent-api.js";
 import { withAgentPacks, workspaceSizeMb } from "../sessions/sessions.js";
 import { allowlistFor } from "../network/packs.js";
-import { implementerPrompt, leadContinuePrompt, leadPrompt, mcpConfig, readLeadRules, notesIndexMd, plannerPrompt, reviewerPrompt, setupPrompt, systemMd, terminalMd, userPrompt, verstasMd, withContext, workspaceClaudeMd } from "./prompts.js";
+import { implementerPrompt, leadContinuePrompt, leadPrompt, mcpConfig, readLeadRules, notesIndexMd, plannerPrompt, reviewerPrompt, setupPrompt, sweepReviewerPrompt, systemMd, terminalMd, userPrompt, verstasMd, withContext, workspaceClaudeMd } from "./prompts.js";
 import { driverInfo, missingCredentialError } from "./drivers.js";
 import { LiveTerminal, type TerminalRunner } from "./terminal.js";
 import type { Job } from "../worker/worker.js";
@@ -18,8 +18,9 @@ import type { TerminalJob } from "../worker/terminal.js";
 
 /**
  * The loop. Deterministic TypeScript: picks tickets, starts workers,
- * runs gates and the reviewer, commits, moves cards. Models only ever run
- * as workers. Everything that touches Docker is behind two small
+ * runs the reviewer, commits, moves cards. Models only ever run as
+ * workers, and the harness runs no checks of its own: the reviewer runs
+ * the repositories' checks (docs/BOARD.md, "Judging"). Everything that touches Docker is behind two small
  * interfaces so the loop is unit-tested with fakes.
  */
 
@@ -107,6 +108,9 @@ export type RunControl = {
 };
 
 const WORKSPACE_FILES = ".verstas";
+/** The setup worker's floor on the worker caps: it waits on installs and on every repository's check, so it needs time more than turns. */
+const SETUP_MIN_MINUTES = 60;
+const SETUP_MIN_TURNS = 120;
 
 /** What a worker of this role may do through the agent API (src/agent-api/agent-api.ts). */
 const tokenRole = (role: Job["role"]): "worker" | "planner" | "lead" => (role === "planner" ? "planner" : role === "lead" ? "lead" : "worker");
@@ -823,10 +827,11 @@ export class RunManager implements AgentRunHooks {
   }
 
   /**
-   * The verdict on a chore sweep: the repositories' own checks, then a size
-   * check (lines, files, protected paths), then one commit for the batch,
-   * or a refusal that leaves the changes in the working tree. No reviewer:
-   * the size check is what stands in for one, so it is strict.
+   * The verdict on a chore sweep: a size check (lines, files, protected
+   * paths), then the session's reviewer over the batch when the session has
+   * one, then one commit for the batch, or a refusal that leaves the changes
+   * in the working tree. Without a reviewer the size check is all that
+   * stands in for one, so it is strict either way.
    */
   async judgeSweep(h: SessionHandle, run: Run, results: readonly SweepResult[], log: (e: VerstasEvent) => Promise<void>, signal: AbortSignal): Promise<"accepted" | "refused"> {
     const clock = this.deps.now ?? now;
@@ -834,22 +839,15 @@ export class RunManager implements AgentRunHooks {
     if (!sw) return "refused";
     const caps = h.session.caps;
     const sh = this.deps.shell(h.id);
-    // The same judging as a ticket's, without a reviewer: every changed repository's check (and its also-checks), one after another.
     const changes = await this.collectChanges(h);
     const added = sum(changes, "added");
     const removed = sum(changes, "removed");
     const files = sum(changes, "files");
     const touched = changes.map((c) => c.repo);
     const protectedHits = changes.flatMap((c) => c.paths.filter((p) => matchesAnyGlob(p, SWEEP_PROTECTED_GLOBS)).map((p) => `${c.repo}/${p}`));
-    const guarded = guardHits(h.session, changes);
-    const gates: GateResult[] = [];
-    for (const c of planChecks(h.session, touched)) gates.push(...(await this.runGates(h, c, log)));
-    const failed = gates.filter((g) => !g.ok);
     const lines = added + removed;
     let refusal: string | undefined;
     if (signal.aborted) refusal = "the run stopped before the sweep was judged";
-    else if (failed.length) refusal = `checks failed: ${failed.map((g) => `${g.repo && h.session.repos.length > 1 ? `${g.repo}: ` : ""}${g.name} (${g.summary.slice(0, 160)})`).join("; ")}. Fix and sweep again, or revert the changes.`;
-    else if (guarded.length) refusal = `a sweep may not change a check's own files (${guarded.slice(0, 6).join(", ")}): that change needs a reviewer. Revert them, or claim a ticket that covers the change.`;
     else if (protectedHits.length) refusal = `a sweep may not change ${protectedHits.slice(0, 6).join(", ")}${protectedHits.length > 6 ? ` and ${protectedHits.length - 6} more` : ""}: contract documents and fixtures change through a ticket, with a reviewer. Revert those files, or claim a ticket that covers the change.`;
     else if (files > caps.sweepMaxFiles || lines > caps.sweepMaxLines) refusal = `too large for a sweep: ${files} files, ${lines} lines changed (limits ${caps.sweepMaxFiles} files, ${caps.sweepMaxLines} lines). The changes stay in the working tree: claim a ticket that covers them (file one with board_create_ticket if none fits), or revert.`;
     const counts = { done: results.filter((r) => r.outcome === "done").length, dropped: results.filter((r) => r.outcome === "dropped").length, promoted: results.filter((r) => r.outcome === "promoted").length };
@@ -862,13 +860,23 @@ export class RunManager implements AgentRunHooks {
       await log({ kind: "status", t: clock(), text: `sweep ${sw.n} ${accepted ? "committed" : "refused"}: ${note.slice(0, 300)}` });
       return out;
     };
-    if (refusal) {
+    const refuse = async (why: string) => {
       // Unstage but keep the working tree: the lead decides what becomes a ticket and what is reverted.
       for (const repo of touched) await sh.exec(["git", "reset", "-q"], { workdir: `/workspace/${repo}`, timeoutMs: 60_000 });
-      await settle(false, refusal);
-      return "refused";
-    }
+      await settle(false, why);
+      return "refused" as const;
+    };
+    if (refusal) return refuse(refusal);
     const chores = h.board.chores;
+    // The session's reviewer judges the batch like a ticket's change; a sweep that changed nothing has nothing to review.
+    if (caps.reviewer && files) {
+      const rev = await this.runJob(h, run, { role: "reviewer", promptText: await this.withNotes(h, sweepReviewerPrompt(sw, chores, results, changes)) }, log, signal);
+      addCost(run, rev.costUsd);
+      if (signal.aborted) return refuse("the run stopped before the sweep was judged");
+      if (rev.rateLimited) return refuse("the reviewer was rate limited; sweep again later (the changes stay in the working tree)");
+      const parsed = parseVerdict(rev.text);
+      if (parsed?.verdict !== "ok") return refuse(`the reviewer did not accept the sweep (${parsed ? `${parsed.verdict}: ${parsed.reason}` : `no verdict, ${rev.stopReason}`}). Read its notes; fix and sweep again, split the change into a ticket, or revert.`);
+    }
     const lineFor = (r: SweepResult) => {
       const c = chores.find((x) => x.id === r.id);
       return `- ${r.id} ${r.outcome}${r.outcome === "done" ? "" : ` (${r.note?.trim() || "no reason given"})`}: ${c?.text.split("\n")[0] ?? ""}${c?.where ? ` [${c.where}]` : ""}`;
@@ -959,12 +967,12 @@ export class RunManager implements AgentRunHooks {
   }
 
   /**
-   * The verdict on a ticket whose work is finished: the harness's gates and
-   * the diff, the reviewer (or the harness's own rule without one), one
-   * judged attempt, the commit, and the move out of review to done, back to
-   * ready, or to blocked. Only this moves a ticket to done. The work may
-   * come from an implementer the loop started or from an agent that
-   * submitted it; `impl` says how that worker ended.
+   * The verdict on a ticket whose work is finished: the diff, the reviewer
+   * (who runs the repositories' checks; without one the implementer's word
+   * is the verdict), one judged attempt, the commit, and the move out of
+   * review to done, back to ready, or to blocked. Only this moves a ticket
+   * to done. The work may come from an implementer the loop started or from
+   * an agent that submitted it; `impl` says how that worker ended.
    */
   async judge(
     h: SessionHandle,
@@ -988,18 +996,9 @@ export class RunManager implements AgentRunHooks {
     const names = changes.map((c) => c.repo);
     const numstat = { added: sum(changes, "added"), removed: sum(changes, "removed"), files: sum(changes, "files") };
     const changed = numstat.files > 0;
-    const proposals = getTicket(h.board, ticketId).policyProposals ?? [];
-    const guarded = guardHits(h.session, changes);
-    const level = reviewLevel(ticket, caps, h.session, changes, { guarded, proposals });
+    const level = reviewLevel(ticket, caps);
     const mode = level.mode;
-    // A proposed check is tried on this change in place of the repository's own; "none" runs no checks.
-    const override = new Map(proposals.filter((p) => p.patch.check !== undefined).map((p) => [p.repo, p.patch.check ?? null] as const));
-    const gates: GateResult[] = [];
-    if (mode !== "none") for (const c of planChecks(h.session, names, override)) gates.push(...(await this.runGates(h, c, log, ticketId)));
-    const touched: TouchedRepo[] = changes.map((c) => {
-      const own = gates.filter((g) => g.repo === c.repo);
-      return { repo: c.repo, added: c.added, removed: c.removed, files: c.files, check: mode === "none" ? "skipped" : !own.length ? "none" : own.every((g) => g.ok) ? "passed" : "failed" };
-    });
+    const touched: TouchedRepo[] = changes.map((c) => ({ repo: c.repo, added: c.added, removed: c.removed, files: c.files }));
     const planned = plannedVsTouched(ticket.repos, names);
     const perRepo = changes.length ? changes.map((c) => `${c.repo} ${c.files} files, +${c.added} −${c.removed}`).join("; ") : "0 files, +0 −0";
     const summary = `Implementer ${impl.ok ? "finished" : `stopped (${impl.stopReason})`}; ${perRepo}${planned ? ` (${planned})` : ""}; judged: ${mode} (${level.why})`;
@@ -1007,29 +1006,20 @@ export class RunManager implements AgentRunHooks {
     else await h.mutate((docs) => ({ next: { board: addNote(docs.board, ticketId, "harness", summary) } }));
 
     // Who decides. With a reviewer: the reviewer, always, including when no
-    // files changed (a report or an investigation can be the deliverable).
-    // The harness's own gates are guesses (npm test may need a browser the
-    // next ticket installs), so they are evidence for the reviewer, never a
-    // verdict on their own. Without a reviewer the harness decides from what
-    // it can see: the implementer finished, the gates pass, and there is a
-    // change or at least a report.
-    // With "none" the implementer's word is the verdict: it finished, or it gets another attempt.
+    // files changed (a report or an investigation can be the deliverable);
+    // it runs the repositories' checks itself. With "none" the
+    // implementer's word is the verdict: it finished, or it gets another
+    // attempt.
     let verdict: "ok" | "fixable" | "blocked";
     let verdictNote = "";
-    // A repository's own check is authoritative: a failure goes back without a reviewer.
-    const failedChecks = gates.filter((g) => g.check && !g.ok);
     if (mode === "none") {
-      verdict = impl.ok ? "ok" : "fixable";
+      const report = getTicket(h.board, ticketId).report;
       if (!impl.ok) verdictNote = `implementer stopped (${impl.stopReason})`;
-    } else if (failedChecks.length) {
-      verdict = "fixable";
-      const proposed = (g: GateResult) => (g.repo && override.has(g.repo) ? " (the check this ticket proposes)" : "");
-      verdictNote = `the check failed twice in ${failedChecks.map((g) => `${g.repo}${proposed(g)}: ${g.command}; log ${g.log}`).join(", and in ")}`;
-      for (const g of failedChecks) await h.mutate((docs) => ({ next: { board: addNote(docs.board, ticketId, "harness", `The check \`${g.command}\` in ${g.repo}${proposed(g)} failed twice; no reviewer ran. Last lines of ${g.log}:\n\n${g.tail}`) } }));
-    } else if (mode === "full") {
+      else if (!changed && !report) verdictNote = "no files changed and no report was filed";
+      verdict = verdictNote ? "fixable" : "ok";
+    } else {
       if (signal.aborted) return "requeued";
-      const context = changes.filter((c) => h.session.repos.find((r) => r.name === c.repo && (r.review ?? r.agentPolicy?.review) === "none")).map((c) => c.repo);
-      const rev = await this.runJob(h, run, { role: "reviewer", ticket: ticketId, promptText: await this.withNotes(h, reviewerPrompt(getTicket(h.board, ticketId), changes, gates, { ok: impl.ok, stopReason: impl.stopReason }, { why: level.why, planned, proposals, guarded, context })) }, log, signal);
+      const rev = await this.runJob(h, run, { role: "reviewer", ticket: ticketId, promptText: await this.withNotes(h, reviewerPrompt(getTicket(h.board, ticketId), changes, { ok: impl.ok, stopReason: impl.stopReason }, { why: level.why, planned })) }, log, signal);
       addCost(run, rev.costUsd);
       await this.writeTicketReport(h, run, ticketId, "reviewer", rev);
       if (rev.rateLimited) {
@@ -1042,13 +1032,6 @@ export class RunManager implements AgentRunHooks {
       const parsed = parseVerdict(rev.text);
       verdict = parsed?.verdict ?? "fixable";
       verdictNote = parsed?.reason ?? `reviewer gave no verdict (${rev.stopReason})`;
-    } else {
-      const failed = gates.filter((g) => !g.ok).map((g) => (g.repo && h.session.repos.length > 1 ? `${g.repo}: ${g.name}` : g.name));
-      const report = getTicket(h.board, ticketId).report;
-      if (!impl.ok) verdictNote = `implementer stopped (${impl.stopReason})`;
-      else if (failed.length) verdictNote = `failed: ${failed.join(", ")}`;
-      else if (!changed && !report) verdictNote = "no files changed and no report was filed";
-      verdict = verdictNote ? "fixable" : "ok";
     }
 
     // One judged attempt, whatever the verdict.
@@ -1063,14 +1046,11 @@ export class RunManager implements AgentRunHooks {
         await move("blocked", note);
         return "blocked";
       }
-      const applied = proposals.length ? await this.applyProposals(h, ticketId, proposals) : [];
       await h.mutate((docs) => {
         const t = getTicket(docs.board, ticketId);
-        let board = replaceTicket(docs.board, { ...t, diff: numstat, touched, policyProposals: undefined, cost: { ...(t.cost ?? { inputTokens: 0, outputTokens: 0 }), usd: (t.cost?.usd ?? 0) + impl.costUsd } });
-        if (applied.length) board = addNote(board, ticketId, "harness", `Check policy updated: ${applied.join("; ")}`);
-        return { next: { board } };
+        return { next: { board: replaceTicket(docs.board, { ...t, diff: numstat, touched, cost: { ...(t.cost ?? { inputTokens: 0, outputTokens: 0 }), usd: (t.cost?.usd ?? 0) + impl.costUsd } }) } };
       });
-      await move("done", `${mode === "full" ? "Reviewed ok" : mode === "checks" ? "Accepted" : "Accepted without review"}${changed ? "" : " (no files changed)"}${verdictNote ? `: ${verdictNote}` : ""}`);
+      await move("done", `${mode === "full" ? "Reviewed ok" : "Accepted without review"}${changed ? "" : " (no files changed)"}${verdictNote ? `: ${verdictNote}` : ""}`);
       run.ticketsDone++;
       return "done";
     }
@@ -1084,58 +1064,19 @@ export class RunManager implements AgentRunHooks {
     return "blocked";
   }
 
-  /**
-   * Applies an accepted ticket's proposals to the repositories' agent
-   * policies (fields you set are left alone); returns one line per change.
-   * The proposed check already ran on the ticket's change.
-   */
-  private async applyProposals(h: SessionHandle, ticketId: string, proposals: readonly PolicyProposalLike[]): Promise<string[]> {
-    return h.mutate((docs) => {
-      const lines: string[] = [];
-      let repos = docs.session.repos;
-      for (const p of proposals) {
-        const r = repos.find((x) => x.name === p.repo);
-        if (!r) continue;
-        const { policy, changed, refused } = mergePolicy(r, p.patch, { by: "ticket", ticket: ticketId, reason: p.reason, at: now() });
-        if (changed.length) lines.push(`${p.repo}: ${changed.join(", ")} (${p.reason})`);
-        if (refused.length) lines.push(`${p.repo}: ${refused.join(", ")} left as the user set ${refused.length === 1 ? "it" : "them"}`);
-        repos = repos.map((x) => (x.name === p.repo ? { ...x, agentPolicy: policy } : x));
-      }
-      return { next: { session: { ...docs.session, repos } }, result: lines };
-    });
-  }
-
   /** board_changes: what the judge would see now, without the diffs. */
   async previewJudging(sessionId: string, ticketId?: string): Promise<unknown> {
     const h = await this.deps.hub.get(sessionId);
     const ticket = ticketId ? h.board.tickets.find((t) => t.id === ticketId) : undefined;
     const changes = await this.collectChanges(h, ticket?.id);
-    const proposals = ticket?.policyProposals ?? [];
-    const guarded = guardHits(h.session, changes);
-    const override = new Map(proposals.filter((p) => p.patch.check !== undefined).map((p) => [p.repo, p.patch.check ?? null] as const));
-    const level = ticket ? reviewLevel(ticket, h.session.caps, h.session, changes, { guarded, proposals }) : { mode: "checks" as const, why: "a sweep has no reviewer" };
+    const level = ticket ? reviewLevel(ticket, h.session.caps) : { mode: h.session.caps.reviewer ? ("full" as const) : ("none" as const), why: "a sweep takes the session's setting" };
     return {
       ticket: ticket?.id,
       touched: changes.map((c) => ({ repo: c.repo, files: c.files, added: c.added, removed: c.removed, paths: c.paths.slice(0, 50), ...(c.scattered.length ? { earlierAttemptsNotInDiff: c.scattered } : {}) })),
       planned: ticket?.repos ?? [],
       plannedVsTouched: ticket ? plannedVsTouched(ticket.repos, changes.map((c) => c.repo)) : undefined,
-      checks: level.mode === "none" ? [] : planChecks(h.session, changes.map((c) => c.repo), override).map((c) => ({ repo: c.repo.name, check: c.policy.check.kind === "command" ? c.policy.check.command : "guessed (npm typecheck/lint/test, pytest)", why: c.why })),
       review: level,
-      guardedPathsTouched: guarded,
-      proposals,
     };
-  }
-
-  /**
-   * Runs a check command an agent proposes for a repository, on the tree as
-   * it is: a check that fails before any ticket runs would fail them all.
-   */
-  async verifyCheck(sessionId: string, repo: string, command: string): Promise<{ ok: boolean; summary: string; tail: string }> {
-    const h = await this.deps.hub.get(sessionId);
-    const r = h.session.repos.find((x) => x.name === repo);
-    if (!r) return { ok: false, summary: `no repository ${repo}`, tail: "" };
-    const [g] = await this.runGates(h, { repo: r, policy: { check: { kind: "command", command }, checkFrom: "agents", alsoCheck: [], guardPaths: [] }, why: "verify" }, async () => undefined, undefined, "verify");
-    return { ok: g?.ok ?? false, summary: g?.summary ?? "did not run", tail: g?.tail ?? "" };
   }
 
   /**
@@ -1186,7 +1127,10 @@ export class RunManager implements AgentRunHooks {
       caps:
         job.role === "lead"
           ? { minutes: h.session.caps.leadMinutes, turns: h.session.caps.leadTurns, budgetUsd: h.session.caps.budgetUsd }
-          : { minutes: h.session.caps.workerMinutes, turns: h.session.caps.workerTurns, budgetUsd: h.session.caps.budgetUsd },
+          : job.role === "setup"
+            ? // Setup installs toolchains and runs every repository's check once; most of its time is waiting on those, not model turns.
+              { minutes: Math.max(h.session.caps.workerMinutes, SETUP_MIN_MINUTES), turns: Math.max(h.session.caps.workerTurns, SETUP_MIN_TURNS), budgetUsd: h.session.caps.budgetUsd }
+            : { minutes: h.session.caps.workerMinutes, turns: h.session.caps.workerTurns, budgetUsd: h.session.caps.budgetUsd },
       mcpConfigFile: `/workspace/${WORKSPACE_FILES}/mcp.json`,
       model: agent.model || undefined,
       budgetFile: `/workspace/${rel}/budget.json`,
@@ -1322,72 +1266,6 @@ export class RunManager implements AgentRunHooks {
     await fs.appendFile(file, block);
   }
 
-  /** Gates are whatever the repository itself offers: npm scripts and pytest. */
-  /**
-   * The checks for one repository. With the repository's own check
-   * configured (repo.check), that command alone, once, retried once when it
-   * fails so a flaky test does not cost an attempt; its log goes under
-   * .verstas/logs. Without one, the guessed npm scripts and pytest.
-   */
-  /** One repository's check: its command (retried once), or the npm/pytest guesses when it has none set. */
-  private async runGates(h: SessionHandle, planned: PlannedCheck, log: (e: VerstasEvent) => Promise<void>, ticketId?: string, logName = ticketId ?? "sweep"): Promise<GateResult[]> {
-    const clock = this.deps.now ?? now;
-    const sh = this.deps.shell(h.id);
-    const repo = planned.repo;
-    const repoDir = `/workspace/${repo.name}`;
-    const policy = planned.policy.check;
-    if (policy.kind === "none") return [];
-    if (policy.kind === "command") {
-      const command = policy.command;
-      const runCheck = () => sh.exec(["bash", "-lc", command], { workdir: repoDir, timeoutMs: 30 * 60_000 });
-      const t0 = Date.now();
-      let r = await runCheck();
-      let retried = false;
-      if (r.code !== 0) {
-        retried = true;
-        await log({ kind: "status", t: clock(), ticket: ticketId, text: `check failed in ${repo.name} (exit ${r.code}); running it once more in case a test is flaky` });
-        r = await runCheck();
-      }
-      const out = (r.stdout + "\n" + r.stderr).trim();
-      const ok = r.code === 0;
-      const rel = `${WORKSPACE_FILES}/logs/${logName}-${repo.name}-check.log`;
-      await fs.mkdir(path.join(h.paths.workspace, WORKSPACE_FILES, "logs"), { recursive: true });
-      await fs.writeFile(path.join(h.paths.workspace, rel), out);
-      const secs = Math.round((Date.now() - t0) / 1000);
-      const summary = `${ok ? (retried ? "passed on the second run (the first failed: a flaky test?)" : "passed") : `failed twice (exit ${r.code})`} in ${secs} s: ${out.slice(-300).replace(/\s+/g, " ")}`;
-      const result: GateResult = { name: `check ${repo.name}`, ok, summary, check: true, command, tail: out.slice(-3000), log: `/workspace/${rel}`, repo: repo.name };
-      await log({ kind: "gate", t: clock(), ticket: ticketId, name: result.name, ok, summary });
-      return [result];
-    }
-    const results: GateResult[] = [];
-    const pkg = await sh.exec(["cat", "package.json"], { workdir: repoDir, timeoutMs: 10_000 });
-    const scripts = pkg.code === 0 ? safeScripts(pkg.stdout) : {};
-    const candidates: [string, string[]][] = [];
-    if (Object.keys(scripts).length) {
-      const installed = await sh.exec(["test", "-d", "node_modules"], { workdir: repoDir, timeoutMs: 10_000 });
-      if (installed.code !== 0) {
-        const summary = "skipped: node_modules is missing, the implementer did not install dependencies";
-        results.push({ name: "npm scripts", ok: true, summary, repo: repo.name });
-        await log({ kind: "gate", t: clock(), ticket: ticketId, name: "npm scripts", ok: true, summary });
-      } else {
-        for (const name of ["typecheck", "lint", "test"]) if (scripts[name]) candidates.push([`npm run ${name}`, ["npm", "run", "--silent", name]]);
-      }
-    }
-    const py = await sh.exec(["sh", "-c", "test -f pyproject.toml -o -f pytest.ini -o -d tests && command -v pytest >/dev/null && echo yes"], { workdir: repoDir, timeoutMs: 10_000 });
-    if (py.stdout.trim() === "yes" && !scripts.test) candidates.push(["pytest", ["python3", "-m", "pytest", "-q"]]);
-    for (const [name, cmd] of candidates) {
-      const r = await sh.exec(cmd, { workdir: repoDir, timeoutMs: 15 * 60_000 });
-      const out = (r.stdout + "\n" + r.stderr).trim();
-      // 127 is "command not found": the repository's tool is not installed in the box; that is a skip, not a failure.
-      const missing = r.code === 127 || /: not found$/m.test(out);
-      const ok = r.code === 0 || missing;
-      const summary = (missing ? "skipped: tool not installed in the sandbox: " : "") + out.slice(-300).replace(/\s+/g, " ");
-      results.push({ name, ok, summary, repo: repo.name });
-      await log({ kind: "gate", t: clock(), ticket: ticketId, name: h.session.repos.length > 1 ? `${repo.name}: ${name}` : name, ok, summary });
-    }
-    return results;
-  }
-
   /**
    * Stages everything and reads what changed in every repository: since the
    * ticket's earliest attempt still at the top of the history (its earlier
@@ -1476,7 +1354,6 @@ export class RunManager implements AgentRunHooks {
 
 const sum = <K extends "added" | "removed" | "files">(xs: readonly Record<K, number>[], k: K): number => xs.reduce((n, x) => n + x[k], 0);
 
-type PolicyProposalLike = { repo: string; patch: RepoPolicyPatch; reason: string };
 
 
 const addCost = (run: Run, usd: number) => {
@@ -1551,14 +1428,6 @@ export const parseVerdict = (text: string): { verdict: "ok" | "fixable" | "block
   return { verdict: m[1]!.toLowerCase() as "ok" | "fixable" | "blocked", reason };
 };
 
-const safeScripts = (pkgJson: string): Record<string, string> => {
-  try {
-    const s = (JSON.parse(pkgJson) as { scripts?: Record<string, string> }).scripts;
-    return s && typeof s === "object" ? s : {};
-  } catch {
-    return {};
-  }
-};
 
 const waitOrAbort = (ms: number, signal: AbortSignal): Promise<void> =>
   new Promise((resolve) => {

@@ -129,7 +129,7 @@ const manager = (s: Awaited<ReturnType<typeof makeSession>>, shell: Shell, worke
     rateLimitSleepMs: 20,
   });
 
-test("a ticket that passes gates and review is committed and done; dependents follow", async () => {
+test("a ticket that passes review is committed and done; dependents follow", async () => {
   const s = await makeSession();
   try {
     const shell = fakeShell();
@@ -152,7 +152,9 @@ test("a ticket that passes gates and review is committed and done; dependents fo
     expect(h.board.tickets.every((t) => t.firstClaimAt && t.stateSince && t.timeIn?.in_progress !== undefined)).toBe(true);
     expect(shell.commits).toEqual(["T-1: Schema", "T-2: Engine"]);
     expect(worker.jobs.map((j) => `${j.role}:${j.ticket}`)).toEqual(["implementer:T-1", "reviewer:T-1", "implementer:T-2", "reviewer:T-2"]);
-    expect(events.filter((e) => e.kind === "gate")).toHaveLength(2);
+    // The harness runs no checks of its own.
+    expect(events.filter((e) => e.kind === "gate")).toHaveLength(0);
+    expect(shell.calls.some((c) => c[0] === "npm" || c[0] === "bash")).toBe(false);
     expect(h.session.state).toBe("finished");
     // Files the worker reads exist.
     expect(await fs.readFile(path.join(s.paths.workspace, "VERSTAS.md"), "utf8")).toContain("/workspace/app");
@@ -370,28 +372,6 @@ test("a ticket's expected repositories are a hint: a name the session lacks is n
   }
 });
 
-test("gates are skipped, not failed, when dependencies are not installed", async () => {
-  const s = await makeSession({ reviewer: false });
-  try {
-    const shell = fakeShell();
-    const base = shell.exec.bind(shell);
-    shell.exec = async (cmd, opts) => (cmd.join(" ") === "test -d node_modules" ? { code: 1, stdout: "", stderr: "" } : base(cmd, opts));
-    const worker = fakeWorker(s.hub, s.id, async (job, hub, id) => {
-      await fileReport(hub, id, job.ticket!, "done");
-      return {};
-    });
-    const events: VerstasEvent[] = [];
-    s.hub.on("event", (e: { event: VerstasEvent }) => events.push(e.event));
-    const run = await (await manager(s, shell, worker).start(s.id)).done;
-    expect(run.state).toBe("finished");
-    const gates = events.filter((e) => e.kind === "gate") as Extract<VerstasEvent, { kind: "gate" }>[];
-    expect(gates.every((g) => g.ok && g.summary.startsWith("skipped"))).toBe(true);
-    expect((await s.hub.get(s.id)).board.tickets.map((t) => t.state)).toEqual(["done", "done"]);
-  } finally {
-    await fs.rm(s.root, { recursive: true, force: true });
-  }
-});
-
 test("describeBlockers groups waiting tickets by what they wait on", () => {
   const b = importBoard(emptyBoard(), {
     tickets: [
@@ -601,31 +581,6 @@ test("parking on a request costs no attempt; only verdicts count", async () => {
     expect(t1.attempts).toBe(2);
     expect(t1.state).toBe("blocked");
     expect(t1.notes.map((n) => n.text).join("\n")).toContain("attempt 1 of 2");
-  } finally {
-    await fs.rm(s.root, { recursive: true, force: true });
-  }
-});
-
-test("a failing harness gate is evidence for the reviewer, not a verdict", async () => {
-  const s = await makeSession();
-  try {
-    const shell = fakeShell();
-    const base = shell.exec.bind(shell);
-    shell.exec = async (cmd, opts) => (cmd.join(" ").startsWith("npm run --silent test") ? { code: 1, stdout: "", stderr: "browserType.launch: Executable doesn't exist" } : base(cmd, opts));
-    const reviewerPrompts: string[] = [];
-    const worker = fakeWorker(s.hub, s.id, async (job, hub, id) => {
-      if (job.role === "implementer") await fileReport(hub, id, job.ticket!, "done; e2e needs the browser from T-2");
-      if (job.role === "reviewer") {
-        reviewerPrompts.push(await fs.readFile(job.promptFile.replace("/workspace", s.paths.workspace), "utf8"));
-        return { text: "VERDICT: ok\nThe e2e failure is the missing browser, which a later ticket installs." };
-      }
-      return {};
-    });
-    const run = await (await manager(s, shell, worker).start(s.id)).done;
-    expect(run.state).toBe("finished");
-    expect((await s.hub.get(s.id)).board.tickets.map((t) => t.state)).toEqual(["done", "done"]);
-    expect(reviewerPrompts[0]).toContain("evidence, not a verdict");
-    expect(reviewerPrompts[0]).toContain("FAILED app: npm run test");
   } finally {
     await fs.rm(s.root, { recursive: true, force: true });
   }
@@ -846,7 +801,7 @@ type LeadScript = (api: Api, job: Job, n: number, signal: AbortSignal) => Promis
  * server inside the box would call it. The reviewer is scripted; the lead
  * script gets an API client bound to that lead's own run token.
  */
-const leadRun = async (s: Awaited<ReturnType<typeof makeSession>>, lead: LeadScript, opts: { verdict?: (ticket: string) => string; reviewerRateLimited?: boolean; heal?: (mgr: RunManager) => Promise<string[]>; shell?: ReturnType<typeof fakeShell> } = {}) => {
+const leadRun = async (s: Awaited<ReturnType<typeof makeSession>>, lead: LeadScript, opts: { verdict?: (ticket: string | undefined) => string; reviewerRateLimited?: boolean; heal?: (mgr: RunManager) => Promise<string[]>; shell?: ReturnType<typeof fakeShell> } = {}) => {
   const tokens = new RunTokens();
   const shell = opts.shell ?? fakeShell();
   const jobs: Job[] = [];
@@ -857,7 +812,7 @@ const leadRun = async (s: Awaited<ReturnType<typeof makeSession>>, lead: LeadScr
     async run(job, _onEvent, signal, o) {
       jobs.push(job);
       const base = { kind: "worker_done" as const, t: now(), ticket: job.ticket, role: job.role, ok: true, stopReason: "success", rateLimited: false, costUsd: 0.1, turns: 3, seconds: 1, text: "", stderr: "" };
-      if (job.role === "reviewer") return opts.reviewerRateLimited ? { ...base, ok: false, rateLimited: true, stopReason: "error" } : { ...base, text: opts.verdict?.(job.ticket!) ?? "VERDICT: ok" };
+      if (job.role === "reviewer") return opts.reviewerRateLimited ? { ...base, ok: false, rateLimited: true, stopReason: "error" } : { ...base, text: opts.verdict?.(job.ticket) ?? "VERDICT: ok" };
       prompts.push(await fs.readFile(onHost(s, job.promptFile), "utf8"));
       const api: Api = async (method, p, body) => {
         const res = await fetch(`http://127.0.0.1:${port}/agent${p}`, { method, headers: { authorization: `Bearer ${o!.runToken}`, "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
@@ -1189,7 +1144,7 @@ const withChores = async (s: Awaited<ReturnType<typeof makeSession>>, texts: str
   await h.mutate((d) => ({ next: { board: importBoard(d.board, { chores: texts.map((text) => ({ text })) }).board } }));
 };
 
-test("lead mode: a sweep of chores is committed as one commit without a reviewer; promoted chores become backlog tickets", async () => {
+test("lead mode: a sweep of chores is read by the session's reviewer and committed as one commit; promoted chores become backlog tickets", async () => {
   const s = await makeSession({ mode: "lead" });
   await withChores(s, ["Rename tmp to pending", "Doc the exit codes", "Rework the loop"]);
   const r = await leadRun(s, async (api) => {
@@ -1210,8 +1165,12 @@ test("lead mode: a sweep of chores is committed as one commit without a reviewer
     const run = await (await r.mgr.start(s.id)).done;
     expect(run.state).toBe("finished");
     expect(run.ticketsDone).toBe(2);
-    // No reviewer for the sweep.
-    expect(r.jobs.map((j) => j.role)).toEqual(["lead", "reviewer", "reviewer"]);
+    // The session has a reviewer, so the sweep got one too, with no ticket and the chores as its brief.
+    expect(r.jobs.map((j) => `${j.role}:${j.ticket ?? "-"}`)).toEqual(["lead:-", "reviewer:T-1", "reviewer:T-2", "reviewer:-"]);
+    const sweepPrompt = await fs.readFile(onHost(s, r.jobs[3]!.promptFile), "utf8");
+    expect(sweepPrompt).toContain("# Chore sweep 1");
+    expect(sweepPrompt).toContain("- C-1 done (renamed): Rename tmp to pending");
+    expect(sweepPrompt).toContain("Nobody has run the repositories' checks");
     expect(r.shell.commits).toHaveLength(3);
     expect(r.shell.commits[2]).toMatch(/^Chores \(sweep 1\): 1 done, 1 dropped, 1 promoted\n\n- C-1 done: Rename tmp to pending\n- C-2 dropped \(already in the README\): Doc the exit codes\n- C-3 promoted \(the loop needs a redesign, not a nit\): Rework the loop$/);
     const h = await s.hub.get(s.id);
@@ -1227,17 +1186,15 @@ test("lead mode: a sweep of chores is committed as one commit without a reviewer
   }
 });
 
-test("lead mode: a sweep that is too large, touches a protected path, or fails the checks is refused; nothing is committed and the chores reopen", async () => {
+test("lead mode: a sweep that is too large, touches a protected path, or the reviewer refuses is refused; nothing is committed and the chores reopen", async () => {
   const s = await makeSession({ mode: "lead" });
   await withChores(s, ["One", "Two"]);
   const shell = fakeShell();
   let numstat = "300\t200\tsrc/big.ts\n";
-  let tests = 0;
   const orig = shell.exec.bind(shell);
   shell.exec = async (cmd, o) => {
     const line = cmd.join(" ");
     if (line === "git diff --cached --numstat") return { code: 0, stdout: numstat, stderr: "" };
-    if (line.startsWith("npm run --silent test")) return { code: tests, stdout: tests ? "1 failing" : "3 passing", stderr: "" };
     return orig(cmd, o);
   };
   const r = await leadRun(
@@ -1254,18 +1211,17 @@ test("lead mode: a sweep that is too large, touches a protected path, or fails t
       expect(prot).toMatchObject({ n: 2, state: "refused" });
       expect(String(prot.note)).toContain("may not change app/docs/DESIGN.md");
       numstat = "3\t1\tsrc/a.ts\n";
-      tests = 1;
       expect((await api("POST", "/chores/sweep", {})).status).toBe(200);
-      const fail = await submitSweep(api, [{ id: "C-1", outcome: "done" }]);
-      expect(fail).toMatchObject({ n: 3, state: "refused" });
-      expect(String(fail.note)).toContain("checks failed: npm run test");
+      const no = await submitSweep(api, [{ id: "C-1", outcome: "done" }]);
+      expect(no).toMatchObject({ n: 3, state: "refused" });
+      expect(String(no.note)).toContain("the reviewer did not accept the sweep (fixable: the rename missed a call site)");
       // Chores are open again after each refusal; a ticket can be claimed in between.
       expect(((await api("GET", "/chores?state=open")).json.chores as unknown[]).length).toBe(2);
-      tests = 0;
       expect(await finishTicket(api, "T-2")).toMatchObject({ state: "done" });
       return {};
     },
-    { shell },
+    // The ticket reviews pass; the sweep's reviewer (no ticket) refuses.
+    { shell, verdict: (ticket) => (ticket ? "VERDICT: ok" : "VERDICT: fixable\nthe rename missed a call site") },
   );
   try {
     const run = await (await r.mgr.start(s.id)).done;
@@ -1397,7 +1353,7 @@ test("lead mode: the lead hands a ticket with its own agent to the harness with 
 });
 
 test("each ticket is judged by its own review mode, or the session's when it sets none", async () => {
-  // The session has the reviewer off: T-4 (no mode) gets checks only.
+  // The session has the reviewer off: T-4 (no mode) gets no review; T-2 carries the old "checks" value, which reads as none.
   const s = await makeSession({ reviewer: false });
   try {
     const h0 = await s.hub.get(s.id);
@@ -1423,15 +1379,15 @@ test("each ticket is judged by its own review mode, or the session's when it set
     s.hub.on("event", (e: { event: VerstasEvent }) => events.push(e.event));
     const run = await (await manager(s, shell, worker).start(s.id)).done;
     expect(run.ticketsDone).toBe(4);
-    // Only the full ticket had a reviewer; the none ticket ran no gates.
+    // Only the full ticket had a reviewer; nothing ran a check.
     expect(worker.jobs.filter((j) => j.role === "reviewer").map((j) => j.ticket)).toEqual(["T-1"]);
-    expect(events.filter((e) => e.kind === "gate").map((e) => (e as { ticket?: string }).ticket)).toEqual(["T-1", "T-2", "T-4"]);
+    expect(events.filter((e) => e.kind === "gate")).toHaveLength(0);
     const h = await s.hub.get(s.id);
     const doneNote = (tid: string) => getTicket(h.board, tid).notes.at(-1)!.text;
     expect(doneNote("T-1")).toMatch(/^Reviewed ok/);
-    expect(doneNote("T-2")).toMatch(/^Accepted/);
+    expect(doneNote("T-2")).toMatch(/^Accepted without review/);
     expect(doneNote("T-3")).toMatch(/^Accepted without review/);
-    expect(doneNote("T-4")).toMatch(/^Accepted(?! without)/);
+    expect(doneNote("T-4")).toMatch(/^Accepted without review/);
     expect(shell.commits).toEqual(["T-1: Full", "T-2: Checks", "T-3: None", "T-4: Default"]);
   } finally {
     await fs.rm(s.root, { recursive: true, force: true });
@@ -1471,85 +1427,6 @@ test("a session from another's environment with its readiness carried over initi
       const h = await s.hub.get(s.id);
       expect(h.session.initializedAt).toBeTruthy();
       expect(worker.jobs.map((j) => j.role)).toEqual(carried ? [] : ["setup"]);
-    } finally {
-      await fs.rm(s.root, { recursive: true, force: true });
-    }
-  }
-});
-
-/** A shell whose repository check (bash -lc) exits with the given codes in turn. */
-const checkShell = (codes: number[]) => {
-  const base = fakeShell();
-  let i = 0;
-  const checks: string[] = [];
-  return {
-    ...base,
-    checks,
-    async exec(cmd: readonly string[], opts?: { workdir?: string; timeoutMs?: number }) {
-      if (cmd[0] === "bash" && cmd[1] === "-lc") {
-        checks.push(cmd[2]!);
-        const code = codes[Math.min(i++, codes.length - 1)]!;
-        return { code, stdout: code === 0 ? "Passed! 1125 tests" : "Failed! preview.spec.ts:67 timed out", stderr: "" };
-      }
-      return base.exec(cmd, opts);
-    },
-  };
-};
-
-const withCheck = async (s: Awaited<ReturnType<typeof makeSession>>, check = "bash scripts/check.sh") => {
-  const h = await s.hub.get(s.id);
-  await h.mutate((d) => ({ next: { session: { ...d.session, repos: d.session.repos.map((r) => ({ ...r, check })) }, board: importBoard(emptyBoard("g"), { tickets: [{ id: "T-1", title: "Leaf", state: "ready", repo: "app" }] }).board } }));
-};
-
-test("with the repository's check configured, the harness runs it once instead of guessing; the reviewer is told not to rerun it", async () => {
-  const s = await makeSession();
-  try {
-    await withCheck(s);
-    const shell = checkShell([0]);
-    const worker = fakeWorker(s.hub, s.id, async (job, hub, id) => {
-      if (job.role === "implementer") await fileReport(hub, id, job.ticket!, "done");
-      if (job.role === "reviewer") return { text: "VERDICT: ok\nFine." };
-      return {};
-    });
-    const events: VerstasEvent[] = [];
-    s.hub.on("event", (e: { event: VerstasEvent }) => events.push(e.event));
-    const run = await (await manager(s, shell, worker).start(s.id)).done;
-    expect(run.ticketsDone).toBe(1);
-    expect(shell.checks).toEqual(["bash scripts/check.sh"]);
-    expect(shell.calls.some((c) => c.join(" ").startsWith("npm run"))).toBe(false);
-    expect(events.filter((e) => e.kind === "gate").map((e) => (e as { name: string }).name)).toEqual(["check app"]);
-    const prompt = await fs.readFile(onHost(s, worker.jobs.find((j) => j.role === "reviewer")!.promptFile), "utf8");
-    expect(prompt).toContain("The repositories' checks (run by the harness, passed)");
-    expect(prompt).toContain("Do not run them again");
-    expect(await fs.readFile(path.join(s.paths.workspace, ".verstas", "logs", "T-1-app-check.log"), "utf8")).toContain("Passed!");
-    expect(await fs.readFile(path.join(s.paths.workspace, "VERSTAS.md"), "utf8")).toContain("/workspace/app: check `bash scripts/check.sh` (set by the user)");
-  } finally {
-    await fs.rm(s.root, { recursive: true, force: true });
-  }
-});
-
-test("a check that fails twice sends the ticket back with the log's tail and no reviewer; a flaky first failure passes on the retry", async () => {
-  for (const [codes, expectDone] of [[[1, 1], false], [[1, 0], true]] as const) {
-    const s = await makeSession({ attempts: 1 });
-    try {
-      await withCheck(s);
-      const shell = checkShell([...codes]);
-      const worker = fakeWorker(s.hub, s.id, async (job, hub, id) => {
-        if (job.role === "implementer") await fileReport(hub, id, job.ticket!, "done");
-        if (job.role === "reviewer") return { text: "VERDICT: ok\nFine." };
-        return {};
-      });
-      await (await manager(s, shell, worker).start(s.id)).done;
-      const t = getTicket((await s.hub.get(s.id)).board, "T-1");
-      expect(shell.checks).toHaveLength(2);
-      if (expectDone) {
-        expect(t.state).toBe("done");
-        expect(worker.jobs.map((j) => j.role)).toEqual(["implementer", "reviewer"]);
-      } else {
-        expect(t.state).toBe("blocked");
-        expect(worker.jobs.map((j) => j.role)).toEqual(["implementer"]);
-        expect(t.notes.some((n) => n.text.includes("failed twice; no reviewer ran") && n.text.includes("preview.spec.ts:67 timed out"))).toBe(true);
-      }
     } finally {
       await fs.rm(s.root, { recursive: true, force: true });
     }

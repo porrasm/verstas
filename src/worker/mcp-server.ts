@@ -163,7 +163,7 @@ export const TOOLS: Tool[] = [
     name: "board_submit",
     leadOnly: true,
     description:
-      "Submit the ticket you hold for judgment once its work is finished and your report is filed with board_report. The harness runs the checks and an independent reviewer, commits, and moves it to done, back to ready with notes, or to blocked. Waits for the verdict and returns it with the reviewer's notes.",
+      "Submit the ticket you hold for judgment once its work is finished and your report is filed with board_report. An independent reviewer runs the repository's checks and reads the change (when the session has one), then the harness commits and moves it to done, back to ready with notes, or to blocked. Waits for the verdict and returns it with the reviewer's notes.",
     inputSchema: obj({ id: str("Ticket id", 20) }, ["id"]),
     call: (a) => submitAndWait(String(a.id)),
   },
@@ -227,40 +227,10 @@ export const TOOLS: Tool[] = [
     call: (a) => api("POST", `/tickets`, a),
   },
   {
-    name: "repo_policy_set",
-    roles: ["setup", "lead", "terminal"],
-    description:
-      "Set how changes to one repository are judged: its check command, its review level, the repositories whose checks also run when it changes, and the check's own files. Fields left out stay as they are. A check command is run once in the clone as it is now and refused if it fails. A field the user set is theirs and is refused. The current policies are in /workspace/VERSTAS.md.",
-    inputSchema: obj({
-        repo: str("Directory name under /workspace", 64),
-        check: { type: ["string", "null"], maxLength: 2000, description: "One bash command run in the clone that says whether a change broke the repository (tests, typecheck, lint); null for a repository with nothing to run" },
-        review: { type: "string", enum: ["full", "checks", "none"], description: "full: a reviewer reads every change; checks: the check decides alone; none: accepted when the worker finishes" },
-        alsoCheck: { type: "array", items: str("Repository name", 64), maxItems: 20, description: "Repositories that build on this one, whose checks also run when it changes" },
-        guardPaths: { type: "array", items: str("Glob, relative to the repository", 300), maxItems: 50, description: "The check's own files beyond its script (test and lint config); a change to them always gets a reviewer" },
-        reason: str("Why, in one line", 500),
-      }, ["repo", "reason"]),
-    call: ({ repo, ...rest }) => api("PUT", `/repos/${encodeURIComponent(String(repo))}/policy`, rest),
-  },
-  {
-    name: "repo_policy_propose",
-    roles: ["implementer", "lead"],
-    description:
-      "Propose a change to a repository's check policy as part of the ticket you hold, when the ticket changes what the check should be (it adds a test runner, a package, a lint). When the ticket is judged, a proposed check runs in place of the current one, the reviewer sees the proposal, and it applies if the ticket is accepted. A newer proposal for the same repository replaces the older.",
-    inputSchema: obj({
-        repo: str("Directory name under /workspace", 64),
-        check: { type: ["string", "null"], maxLength: 2000, description: "One bash command run in the clone that says whether a change broke the repository (tests, typecheck, lint); null for a repository with nothing to run" },
-        review: { type: "string", enum: ["full", "checks", "none"], description: "full: a reviewer reads every change; checks: the check decides alone; none: accepted when the worker finishes" },
-        alsoCheck: { type: "array", items: str("Repository name", 64), maxItems: 20, description: "Repositories that build on this one, whose checks also run when it changes" },
-        guardPaths: { type: "array", items: str("Glob, relative to the repository", 300), maxItems: 50, description: "The check's own files beyond its script (test and lint config); a change to them always gets a reviewer" },
-        reason: str("Why, in one line", 500),
-      }, ["repo", "reason"]),
-    call: ({ repo, ...rest }) => api("POST", `/repos/${encodeURIComponent(String(repo))}/policy/propose`, rest),
-  },
-  {
     name: "board_changes",
     roles: ["implementer", "lead"],
     description:
-      "What the judge would see if you submitted now: the repositories your change touches (whatever the ticket expected), the checks that would run and why, the review level, and any change to a check's own files. Use it before submitting to catch a stray edit or a repository you forgot.",
+      "What the judge would see if you submitted now: the repositories your change touches (whatever the ticket expected) and the review level. Use it before submitting to catch a stray edit or a repository you forgot.",
     inputSchema: obj({}, []),
     call: () => api("GET", "/changes"),
   },
@@ -288,7 +258,7 @@ export const TOOLS: Tool[] = [
     name: "chores_sweep",
     leadOnly: true,
     description:
-      "Take a batch of open chores to do in one go (you must hold no ticket): the given ids, or the oldest ones up to max. When the list is at the session's sweep line, board_claim and board_run are refused until a sweep (or chore_drop) brings it below. Returns the chores and the size limits of a sweep. Do them, run the repository's own checks yourself, then chores_submit. The batch becomes one commit without a reviewer, so stay within the limits and never touch the project's contract documents or fixtures from a sweep; make that a ticket instead.",
+      "Take a batch of open chores to do in one go (you must hold no ticket): the given ids, or the oldest ones up to max. When the list is at the session's sweep line, board_claim and board_run are refused until a sweep (or chore_drop) brings it below. Returns the chores and the size limits of a sweep. Do them, run the repository's own checks yourself, then chores_submit. The batch becomes one commit (read by the session's reviewer first, when it has one), so stay within the limits and never touch the project's contract documents or fixtures from a sweep; make that a ticket instead.",
     inputSchema: obj({ ids: { type: "array", items: str("Chore id, e.g. C-3", 20), maxItems: 50 }, max: { type: "integer", minimum: 1, maximum: 50 } }, []),
     call: (a) => api("POST", `/chores/sweep`, { ids: a.ids, max: a.max }),
   },
@@ -296,7 +266,7 @@ export const TOOLS: Tool[] = [
     name: "chores_submit",
     leadOnly: true,
     description:
-      "Submit the sweep you hold: one result per chore, outcome done (note: what changed), dropped (note: why) or promoted (note: what the ticket should say; a backlog ticket is created). A chore you leave out goes back to the list. The harness runs the checks and the size check, commits the batch as one commit or refuses it (the changes stay in the working tree; split them into a ticket or revert them), and returns the verdict.",
+      "Submit the sweep you hold: one result per chore, outcome done (note: what changed), dropped (note: why) or promoted (note: what the ticket should say; a backlog ticket is created). A chore you leave out goes back to the list. The harness runs a size check and, when the session has a reviewer, has it read the batch; then it commits the batch as one commit or refuses it (the changes stay in the working tree; split them into a ticket or revert them), and returns the verdict.",
     inputSchema: obj(
       {
         results: {

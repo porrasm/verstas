@@ -19,14 +19,12 @@ export type Ticket = {
   pinned: boolean;
   /** Runs this ticket's implementer on its own agent instead of the session's worker. */
   agent?: AgentSpec;
-  /** How the ticket is judged; absent, the session's setting (reviewer on: full, off: checks). */
+  /** How the ticket is judged; absent, the session's setting (reviewer on: full, off: none). "checks" is an old value that reads as none. */
   review?: ReviewMode;
   report?: string;
   diff?: { added: number; removed: number; files: number };
-  /** Each repository the last verdict found changed, with its check. */
+  /** Each repository the last verdict found changed. */
   touched?: TouchedRepo[];
-  /** Check policy changes the worker proposed; applied when the ticket is accepted. */
-  policyProposals?: { repo: string; patch: Record<string, unknown>; reason: string; at: string }[];
   cost?: { usd?: number };
   /** Timing (absent on tickets from before it was recorded): see ticketTiming. */
   stateSince?: string;
@@ -39,7 +37,9 @@ export type Ticket = {
 };
 
 export type ReviewMode = "full" | "checks" | "none";
-export const REVIEW_LABEL: Record<ReviewMode, string> = { full: "Full review", checks: "Checks only", none: "No review" };
+/** "checks" is from before the harness stopped running checks; it means no reviewer, which is now "none". */
+export const REVIEW_LABEL: Record<ReviewMode, string> = { full: "Full review", checks: "No review", none: "No review" };
+export const normalizeReviewMode = (m: ReviewMode): "full" | "none" => (m === "full" ? "full" : "none");
 
 /** How a ticket's time was spent, in seconds. Mirrors ticketTiming in src/core/types.ts. */
 export type TicketTiming = { working: number; judging: number; waitingOnYou: number; requeued: number; agent: number; total: number };
@@ -320,22 +320,14 @@ export const copyText = async (text: string): Promise<void> => {
 };
 export type ApplyResult = { targetPath: string; branch: string; base: string | null; commits: { sha: string; subject: string }[]; howTo: string[] };
 
-export type TouchedRepo = { repo: string; added: number; removed: number; files: number; check: "passed" | "failed" | "skipped" | "none" };
+/** `check` is what the harness's own check said, from before it stopped running checks; new verdicts leave it out. */
+export type TouchedRepo = { repo: string; added: number; removed: number; files: number; check?: "passed" | "failed" | "skipped" | "none" };
 
-export type PolicySource = { by: "setup" | "lead" | "ticket" | "terminal"; ticket?: string; reason: string; at: string };
-
-/** A session repository and how changes to it are judged: your fields lock, the agents keep the rest (agentPolicy). */
+/** A session repository. */
 export type RepoSpec = {
   name: string;
   sourcePath: string;
   branch: string;
   runBranch: string;
   baseCommit?: string;
-  /** Your check command. */
-  check?: string;
-  /** Yours: no check at all. */
-  noCheck?: boolean;
-  review?: ReviewMode;
-  alsoCheck?: string[];
-  agentPolicy?: { check?: string | null; review?: ReviewMode; alsoCheck?: string[]; guardPaths?: string[]; setBy: Partial<Record<"check" | "review" | "alsoCheck" | "guardPaths", PolicySource>> };
 };

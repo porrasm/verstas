@@ -358,6 +358,39 @@ session's list after it ends, stops or fails; `recover()` restores it.
 proxy.spec: a CONNECT under `*` to a public name is tunnelled to the
 checked address.
 
+## V-16 · Harness-run checks, done properly  (M)
+
+**Status: not started.** The first version (repository policies kept by
+the agents, `repo_policy_set` / `repo_policy_propose`, a trial run inside
+the tool call, `alsoCheck`, `guardPaths`, guessed npm and pytest gates,
+checks as a gate before the reviewer; commits 75df7b9 and 0b0aa8f) was
+removed on 2026-10-09: it halted a ready setup (every check ran twice, the
+policy tool's 30-second client timeout reported a successful trial as an
+error, four parallel trials competed for the box) and its surface was out
+of proportion to "run one command once". Until this item is built, the
+reviewer runs the repositories' checks (docs/BOARD.md, Judging).
+
+What to build, and the traps the first version fell into:
+
+- One command per repository, typed by the user on the session page or
+  copied from the repository's own script by setup into the brief. No
+  agent-authored policy, no propose flow, no guard paths, no also-check.
+- Run it once per submission (and per sweep), out of band: never inside
+  a tool call or an HTTP request. The tool returns at once; the result
+  arrives as a run event and in the review's evidence.
+- Evidence first, gate later: attach the result to the reviewer's prompt
+  and let the reviewer read it, telling it not to run that command again.
+  Bouncing a failure without a reviewer is a second step, once the first
+  is trusted.
+- Setup never runs a check the harness is about to run as a trial, and
+  the harness never runs a check setup just ran.
+- One check at a time per box: a sweep's and a ticket's checks never
+  overlap, and two policy trials never run together.
+- Show the check in the log as a running command with elapsed time, so a
+  waiting run is distinguishable from a stuck one.
+- Docs: docs/BOARD.md Judging; the reviewer prompt; the setup prompt step
+  3; tests in tests/unit/judging.spec.ts and run.spec.ts.
+
 ## Loop manager, Phase 2 (needs design before it starts)
 
 From the Loop Manager design. Not started; each item wants a short design

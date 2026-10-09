@@ -32,7 +32,7 @@ export const ticketStateSchema = z.enum([
   "backlog", // exists, not yet approved to run
   "ready", // the loop may pick it
   "in_progress", // a worker holds it
-  "review", // implementer finished, reviewer or gates running
+  "review", // implementer finished, the reviewer running
   "waiting", // a request is open; returns to ready when answered
   "blocked", // gave up (attempts exhausted, cap hit, reviewer said no)
   "done",
@@ -52,9 +52,9 @@ export type TicketSize = z.infer<typeof ticketSizeSchema>;
 
 /**
  * What each size means when a session asks its planning agents for one (see
- * `planningSchema`). Every ticket pays a fixed cost (a worker reads in, the
- * check runs, a reviewer reads in, a commit), so the size is the main lever
- * on how fast a board goes.
+ * `planningSchema`). Every ticket pays a fixed cost (a worker reads in, a
+ * reviewer reads in and runs the checks, a commit), so the size is the main
+ * lever on how fast a board goes.
  */
 export const TICKET_SIZE_GUIDE: Record<TicketSize, string> = {
   S: "one change in one place (a fix, a guard, one test, a doc section); under about 150 changed lines, under 15 minutes of agent time",
@@ -87,13 +87,15 @@ export const costSchema = z.object({
 });
 
 /**
- * How a ticket is judged: `full` runs the gates and the reviewer, `checks`
- * the gates alone (accepted when they pass, the implementer finished and
- * there is a change or a report), `none` neither (accepted when the
- * implementer finished). Only you set it; agents' tickets take the session's.
+ * How a ticket is judged: `full` runs the reviewer, `none` accepts the
+ * ticket when the implementer finished. Only you set it; agents' tickets
+ * take the session's. `checks` is a value from before the harness stopped
+ * running checks itself (boards still carry it); it reads as `none`.
  */
 export const reviewModeSchema = z.enum(["full", "checks", "none"]);
 export type ReviewMode = z.infer<typeof reviewModeSchema>;
+/** `checks` meant "the harness's checks decide, no reviewer"; without harness checks that is `none`. */
+export const normalizeReviewMode = (m: ReviewMode): "full" | "none" => (m === "full" ? "full" : "none");
 
 /** Boards and drafts from before `repos` name one repository as `repo`; read that as a list of one. */
 const legacyRepo = (v: unknown): unknown => {
@@ -104,14 +106,14 @@ const legacyRepo = (v: unknown): unknown => {
   return { ...rest, repos };
 };
 
-/** What the judge found in one repository for a ticket or a sweep: the change and its check. */
+/** What the judge found in one repository for a ticket or a sweep: the change. */
 export const touchedRepoSchema = z.object({
   repo: z.string().min(1).max(100),
   added: z.number().int().nonnegative(),
   removed: z.number().int().nonnegative(),
   files: z.number().int().nonnegative(),
-  /** passed / failed: its check ran; skipped: the ticket's review mode skips checks; none: the repository has no check. */
-  check: z.enum(["passed", "failed", "skipped", "none"]),
+  /** From before the harness stopped running checks: what its check said then. New verdicts leave it out. */
+  check: z.enum(["passed", "failed", "skipped", "none"]).optional(),
 });
 export type TouchedRepo = z.infer<typeof touchedRepoSchema>;
 
@@ -150,10 +152,8 @@ export const ticketSchema = z.preprocess(legacyRepo, z.object({
   report: z.string().max(20_000).optional(),
   /** All touched repositories together, as of the last verdict. */
   diff: diffStatSchema.optional(),
-  /** Each repository the last verdict found changed, with its check. */
+  /** Each repository the last verdict found changed. */
   touched: z.array(touchedRepoSchema).optional(),
-  /** Changes to repository policies the implementer proposed; applied when the ticket is accepted (see repo_policy_propose). */
-  policyProposals: z.array(z.lazy(() => policyProposalSchema)).optional(),
   cost: costSchema.optional(),
   /**
    * Timing, recorded by transition() and the run (all optional: boards from
@@ -173,13 +173,10 @@ export const ticketSchema = z.preprocess(legacyRepo, z.object({
 }));
 export type Ticket = z.infer<typeof ticketSchema>;
 
-/** The ticket's own review mode, or the session's: the reviewer on means full, off means checks. */
-export const reviewModeFor = (t: Pick<Ticket, "review">, caps: { reviewer: boolean }): ReviewMode => t.review ?? (caps.reviewer ? "full" : "checks");
+/** The ticket's own review mode, or the session's: the reviewer on means full, off means none. */
+export const reviewModeFor = (t: Pick<Ticket, "review">, caps: { reviewer: boolean }): "full" | "none" => (t.review ? normalizeReviewMode(t.review) : caps.reviewer ? "full" : "none");
 
 /** How a ticket's time was spent, in seconds; see ticketTiming. */
-/** One check the harness ran on a submission: a guessed npm/pytest gate, or a repository's own check command (`check: true`), whose failure is a verdict. */
-export type GateResult = { name: string; ok: boolean; summary: string; check?: boolean; command?: string; tail?: string; log?: string; /** The repository it ran in. */ repo?: string };
-
 export type TicketTiming = { working: number; judging: number; waitingOnYou: number; requeued: number; agent: number; total: number };
 
 const secondsBetween = (from: string, to: string): number => Math.max(0, (Date.parse(to) - Date.parse(from)) / 1000);
@@ -471,106 +468,11 @@ export const repoSpecSchema = z.object({
   runBranch: z.string().min(1).max(200),
   /** The commit the clone started from; the feature branch's base when applying. */
   baseCommit: z.string().optional(),
-  /**
-   * The repository's own check, a bash command run in its clone (for
-   * example `bash scripts/check.sh`). Yours only. When set, the harness runs
-   * it once per submitted ticket and per chore sweep instead of guessing
-   * npm scripts: a failure goes back to the implementer without a reviewer,
-   * a pass is evidence the reviewer does not repeat. Absent, the guesses.
-   */
-  check: z.string().min(1).max(2000).optional(),
-  /** Yours: this repository has no check at all, whatever the agents set. */
-  noCheck: z.boolean().optional(),
-  /** Yours: how much judging a change here needs; absent, the agents' value, then the session's. */
-  review: reviewModeSchema.optional(),
-  /** Yours: repositories whose check also runs when this one changes; absent, the agents' list. */
-  alsoCheck: z.array(z.string().min(1).max(64)).max(20).optional(),
-  /** The policy the agents keep (setup writes it, tickets and the lead update it). Your fields above win. */
-  agentPolicy: z.lazy(() => agentPolicySchema).optional(),
+  // Sessions from before the harness stopped running checks carry `check`,
+  // `noCheck`, `review`, `alsoCheck` and `agentPolicy` here; they are dropped on
+  // parse (the schema is not strict) and the reviewer runs the checks instead.
 });
 export type RepoSpec = z.infer<typeof repoSpecSchema>;
-
-/** The fields of a repository's policy an agent may set. `check: null` means no check. */
-export const repoPolicyPatchSchema = z.object({
-  check: z.string().min(1).max(2000).nullable().optional(),
-  review: reviewModeSchema.optional(),
-  alsoCheck: z.array(z.string().min(1).max(64)).max(20).optional(),
-  /** The check's own files (its script, test and lint config), as globs: a change to one gets a full review. */
-  guardPaths: z.array(z.string().min(1).max(300)).max(50).optional(),
-});
-export type RepoPolicyPatch = z.infer<typeof repoPolicyPatchSchema>;
-export const POLICY_FIELDS = ["check", "review", "alsoCheck", "guardPaths"] as const;
-export type PolicyField = (typeof POLICY_FIELDS)[number];
-
-export const policySourceSchema = z.object({
-  by: z.enum(["setup", "lead", "ticket", "terminal"]),
-  ticket: ticketIdSchema.optional(),
-  reason: z.string().max(500),
-  at: z.string(),
-});
-export type PolicySource = z.infer<typeof policySourceSchema>;
-
-export const agentPolicySchema = repoPolicyPatchSchema.extend({
-  /** Who set each field, and why. */
-  setBy: z.partialRecord(z.enum(POLICY_FIELDS), policySourceSchema).default({}),
-});
-export type AgentPolicy = z.infer<typeof agentPolicySchema>;
-
-export const policyProposalSchema = z.object({
-  repo: z.string().min(1).max(64),
-  patch: repoPolicyPatchSchema,
-  reason: z.string().min(1).max(500),
-  at: z.string(),
-});
-export type PolicyProposal = z.infer<typeof policyProposalSchema>;
-
-/**
- * What the judge applies to a repository: your fields, then the agents',
- * then the defaults (the harness's npm/pytest guesses, the session's review).
- * `checkFrom` says whose check it is.
- */
-export type EffectivePolicy = {
-  check: { kind: "command"; command: string } | { kind: "auto" } | { kind: "none" };
-  checkFrom: "you" | "agents" | "default";
-  /** Absent: the session's (or the ticket's) review mode applies. */
-  review?: ReviewMode;
-  alsoCheck: string[];
-  guardPaths: string[];
-};
-
-export const effectivePolicy = (r: RepoSpec): EffectivePolicy => {
-  const a = r.agentPolicy;
-  const check: EffectivePolicy["check"] = r.noCheck
-    ? { kind: "none" }
-    : r.check
-      ? { kind: "command", command: r.check }
-      : a?.check === null
-        ? { kind: "none" }
-        : a?.check
-          ? { kind: "command", command: a.check }
-          : { kind: "auto" };
-  const checkFrom = r.noCheck || r.check ? "you" : a?.check !== undefined ? "agents" : "default";
-  return {
-    check,
-    checkFrom,
-    review: r.review ?? a?.review,
-    alsoCheck: r.alsoCheck ?? a?.alsoCheck ?? [],
-    guardPaths: [...new Set([...(a?.guardPaths ?? []), ...(check.kind === "command" ? checkFiles(check.command) : [])])],
-  };
-};
-
-/** Files a check command names (`bash scripts/check.sh`, `node tools/ci.mjs`), and package.json when it runs a package script: changing them changes the check. */
-export const checkFiles = (command: string): string[] => {
-  const out = new Set<string>();
-  for (const tok of command.split(/[\s;&|()]+/)) {
-    const t = tok.replace(/^\.\//, "").replace(/^["']|["']$/g, "");
-    if (!t || t.startsWith("-") || t.includes("=") || t.startsWith("/") || t.includes("..")) continue;
-    if (/\.(sh|bash|mjs|cjs|js|ts|py|rb|pl)$/.test(t) || t === "Makefile" || t === "justfile") out.add(t);
-  }
-  if (/\b(npm|pnpm|yarn|bun)\b/.test(command)) out.add("package.json");
-  if (/\bmake\b/.test(command)) out.add("Makefile");
-  return [...out];
-};
 
 export const attachmentSchema = z.object({
   name: z.string().min(1).max(200),
@@ -889,6 +791,7 @@ export const eventSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("tool_use"), t: z.string(), ticket: ticketIdSchema.optional(), tool: z.string(), summary: z.string() }),
   z.object({ kind: z.literal("tool_result"), t: z.string(), ticket: ticketIdSchema.optional(), tool: z.string(), ok: z.boolean(), summary: z.string() }),
   z.object({ kind: z.literal("status"), t: z.string(), ticket: ticketIdSchema.optional(), text: z.string() }),
+  // From before the harness stopped running checks: logs of old runs still carry gate events.
   z.object({ kind: z.literal("gate"), t: z.string(), ticket: ticketIdSchema.optional(), name: z.string(), ok: z.boolean(), summary: z.string() }),
   z.object({ kind: z.literal("ticket"), t: z.string(), ticket: ticketIdSchema, from: ticketStateSchema, to: ticketStateSchema, note: z.string().optional() }),
   z.object({ kind: z.literal("denied_network"), t: z.string(), host: z.string(), port: z.number().int() }),

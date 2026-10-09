@@ -6,6 +6,10 @@ import type { DriverImpl, Job } from "./driver.js";
 import { translateLine } from "./translate.js";
 
 
+/** Bash tool limits for workers: a check script may take ten minutes, and the worker is told to wait in the foreground. */
+export const BASH_DEFAULT_TIMEOUT_MS = 10 * 60_000;
+export const BASH_MAX_TIMEOUT_MS = 30 * 60_000;
+
 export const claudeArgs = (job: Job): string[] => [
   "-p",
   "--output-format",
@@ -31,7 +35,8 @@ export const claudeDriver: DriverImpl = {
     return {
       bin,
       args: claudeArgs(job).map((a) => (a === "@SYSTEM@" ? system : a)),
-      env: { ...process.env, CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1" },
+      // A build or a test suite takes minutes; with the stock 2-minute foreground limit the agent backgrounds it and sleep-polls, which costs turns and looks stuck.
+      env: { ...process.env, CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1", BASH_DEFAULT_TIMEOUT_MS: String(BASH_DEFAULT_TIMEOUT_MS), BASH_MAX_TIMEOUT_MS: String(BASH_MAX_TIMEOUT_MS) },
       cwd: job.cwd ?? "/workspace",
       stdin: prompt,
     };

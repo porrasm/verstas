@@ -10,7 +10,6 @@ import {
   agentFor,
   agentSpecSchema,
   reviewModeSchema,
-  effectivePolicy,
   capsSchema,
   choreIdSchema,
   sessionModeSchema,
@@ -624,7 +623,7 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
         const branch = opts.branches[r.name] ?? r.branch;
         const runBranch = runBranchName(id);
         if (branch !== r.runBranch) {
-          repos.push({ name: r.name, sourcePath: r.sourcePath, branch, runBranch, check: r.check });
+          repos.push({ name: r.name, sourcePath: r.sourcePath, branch, runBranch });
           continue;
         }
         // The source's unapplied commits: bundled inside its container, cloned here from the bundle, which is pure data (Boundary 5).
@@ -642,7 +641,7 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
         await cloneFromBundle(bundle, dest, r.runBranch);
         const baseCommit = await startRunBranch(dest, runBranch);
         await fs.rm(bundle, { force: true });
-        repos.push({ name: r.name, sourcePath: r.sourcePath, branch, runBranch, baseCommit, check: r.check });
+        repos.push({ name: r.name, sourcePath: r.sourcePath, branch, runBranch, baseCommit });
       }
       const settings = environmentSettings(src.session, { requirements: input.requirements }, now());
       const h = await d.hub.get(id);
@@ -737,42 +736,6 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
         return { next: { session: { ...docs.session, repos: [...docs.session.repos, spec], packs, allowlist: [...new Set([...docs.session.allowlist, ...packHosts(packs)])] } } };
       });
       res.status(201).json({ ok: true, repo: spec, packs: found });
-    }),
-  );
-
-  /**
-   * Your overrides of a repository's policy (docs/BOARD.md, "Judging").
-   * Each field: a value locks it against the agents, null hands it back to
-   * them. `check` is a command; `noCheck: true` is "no check at all".
-   */
-  api.put(
-    "/sessions/:id/repos/:name/policy",
-    wrap(async (req, res) => {
-      const body = z
-        .object({
-          check: z.string().max(2000).nullable().optional(),
-          noCheck: z.boolean().nullable().optional(),
-          review: reviewModeSchema.nullable().optional(),
-          alsoCheck: z.array(z.string().min(1).max(64)).max(20).nullable().optional(),
-        })
-        .parse(req.body);
-      const h = await d.hub.get(param(req, "id"));
-      const name = param(req, "name");
-      if (!h.session.repos.some((r) => r.name === name)) throw Object.assign(new Error(`No repository ${name} in this session`), { status: 404 });
-      const names = h.session.repos.map((r) => r.name);
-      const bad = (body.alsoCheck ?? []).filter((a) => a === name || !names.includes(a));
-      if (bad.length) throw Object.assign(new Error(`Also check must name other repositories of this session, not ${bad.join(", ")}`), { status: 400 });
-      const pick = <T,>(v: T | null | undefined, cur: T | undefined): T | undefined => (v === undefined ? cur : v === null ? undefined : v);
-      const repo = await h.mutate((docs) => {
-        const repos = docs.session.repos.map((r) => {
-          if (r.name !== name) return r;
-          const noCheck = body.noCheck === undefined ? r.noCheck : body.noCheck || undefined;
-          const check = noCheck && body.noCheck ? undefined : body.check === undefined ? r.check : body.check?.trim() || undefined;
-          return { ...r, check, noCheck: check ? undefined : noCheck, review: pick(body.review, r.review), alsoCheck: pick(body.alsoCheck, r.alsoCheck) };
-        });
-        return { next: { session: { ...docs.session, repos } }, result: repos.find((r) => r.name === name)! };
-      });
-      res.json({ ok: true, repo, effective: effectivePolicy(repo) });
     }),
   );
 
@@ -1236,6 +1199,43 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
     wrap(async (req, res) => {
       const h = await d.hub.get(param(req, "id"));
       try {
+        const files = await bundleRepos(h);
+        res.json({
+          files,
+          howTo: files.map((f) => `cd <your ${f.repo} checkout> && git fetch "${f.file}" ${f.branch}:${f.branch} && git log --oneline ${f.branch}`),
+        });
+      } catch (e) {
+        res.status((e as { status?: number }).status ?? 500).json({ error: (e as Error).message });
+      }
+    }),
+  );
+
+  /**
+   * Apply one repository's work to the real repository as the feature
+   * branch verstas/<session>: bundle inside the container, fetch on the
+   * host into the work target. Your checked-out branch is never moved.
+   */
+  api.post(
+    "/sessions/:id/apply",
+    wrap(async (req, res) => {
+      const { repo } = z.object({ repo: z.string().min(1) }).parse(req.body);
+      const h = await d.hub.get(param(req, "id"));
+      const spec = h.session.repos.find((r) => r.name === repo);
+      if (!spec) {
+        res.status(404).json({ error: `No repository ${repo} in this session` });
+        return;
+      }
+      try {
+        const [file] = await bundleRepos(h, [repo]);
+        const result = await applyBundle({ targetPath: spec.sourcePath, bundleFile: file!.file, branch: spec.runBranch, baseCommit: spec.baseCommit, sourceBranch: spec.branch });
+        res.json(result);
+      } catch (e) {
+        const status = e instanceof ApplyError ? 400 : ((e as { status?: number }).status ?? 500);
+        res.status(status).json({ error: (e as Error).message });
+      }
+    }),
+  );
+
   /** Branches of a session repository's work target, for the restore dialog. */
   api.get(
     "/sessions/:id/repos/:name/branches",
@@ -1292,43 +1292,6 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
         next: { session: { ...docs.session, repos: docs.session.repos.map((r) => (r.name === name ? { ...r, branch: restored.branch, runBranch: restored.runBranch, baseCommit: restored.baseCommit } : r)) } },
       }));
       res.json({ ok: true, repo: restored });
-    }),
-  );
-
-        const files = await bundleRepos(h);
-        res.json({
-          files,
-          howTo: files.map((f) => `cd <your ${f.repo} checkout> && git fetch "${f.file}" ${f.branch}:${f.branch} && git log --oneline ${f.branch}`),
-        });
-      } catch (e) {
-        res.status((e as { status?: number }).status ?? 500).json({ error: (e as Error).message });
-      }
-    }),
-  );
-
-  /**
-   * Apply one repository's work to the real repository as the feature
-   * branch verstas/<session>: bundle inside the container, fetch on the
-   * host into the work target. Your checked-out branch is never moved.
-   */
-  api.post(
-    "/sessions/:id/apply",
-    wrap(async (req, res) => {
-      const { repo } = z.object({ repo: z.string().min(1) }).parse(req.body);
-      const h = await d.hub.get(param(req, "id"));
-      const spec = h.session.repos.find((r) => r.name === repo);
-      if (!spec) {
-        res.status(404).json({ error: `No repository ${repo} in this session` });
-        return;
-      }
-      try {
-        const [file] = await bundleRepos(h, [repo]);
-        const result = await applyBundle({ targetPath: spec.sourcePath, bundleFile: file!.file, branch: spec.runBranch, baseCommit: spec.baseCommit, sourceBranch: spec.branch });
-        res.json(result);
-      } catch (e) {
-        const status = e instanceof ApplyError ? 400 : ((e as { status?: number }).status ?? 500);
-        res.status(status).json({ error: (e as Error).message });
-      }
     }),
   );
 
