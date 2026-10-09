@@ -274,6 +274,38 @@ export const provisionSession = async (root: string, session: Session): Promise<
   return { repos, clones };
 };
 
+/**
+ * Restore from repo: one repository's clone is replaced by a fresh clone of
+ * its work target, at the recorded branch or the one given, so the box sees
+ * the repository as it is now. The run branch keeps its name and starts
+ * over from the new base; commits the old clone had and were not applied
+ * go with it, as do its ignored files (build output, node_modules). The new
+ * clone is made beside the workspace and swapped in only once it exists, so
+ * a failed clone leaves the session as it was. Host git runs only the
+ * clone, as at initialization (docs/SANDBOX.md Boundary 1); the old clone's
+ * .git is deleted as files, never read. The caller stops the container
+ * first and records the returned spec.
+ */
+export const restoreClone = async (root: string, session: Session, name: string, branch?: string): Promise<Session["repos"][number]> => {
+  const paths = sessionPaths(root, session.id);
+  const spec = session.repos.find((r) => r.name === name);
+  if (!spec) throw new Error(`No repository ${name} in this session`);
+  const dest = path.join(paths.workspace, spec.name);
+  // Beside the workspace, not in it: the container never sees a half-made clone, and the rename stays on one filesystem.
+  const stagingDir = path.join(paths.dir, "restore");
+  const staging = path.join(stagingDir, spec.name);
+  await fs.rm(stagingDir, { recursive: true, force: true });
+  await fs.mkdir(stagingDir, { recursive: true });
+  try {
+    const clone = await cloneWorkTarget(spec.sourcePath, staging, branch ?? spec.branch, session.id);
+    await fs.rm(dest, { recursive: true, force: true });
+    await fs.rename(staging, dest);
+    return { ...spec, branch: clone.branch, runBranch: clone.runBranch, baseCommit: clone.commit };
+  } finally {
+    await fs.rm(stagingDir, { recursive: true, force: true });
+  }
+};
+
 /** Removes the clones; the session is a plan again (the caller removes the sandbox and clears the session fields). */
 export const removeClones = async (root: string, session: Session): Promise<void> => {
   const paths = sessionPaths(root, session.id);

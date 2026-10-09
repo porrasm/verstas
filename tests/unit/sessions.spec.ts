@@ -14,6 +14,7 @@ import {
   makeSessionId,
   provisionSession,
   removeClones,
+  restoreClone,
   sessionPaths,
 } from "../../src/sessions/sessions.js";
 import { entryProblem, extractZip } from "../../src/sessions/workspace.js";
@@ -332,4 +333,51 @@ test("sessions from before initialization existed migrate: cloned at creation, t
   // A session written by this version says so itself.
   expect(sessionSchema.parse(migrateSession({ ...base, initializedAt: null })).initializedAt).toBeNull();
   expect("preflight" in plain.caps).toBe(false);
+});
+
+test("restoreClone replaces the clone with a fresh clone of the work target; a failed clone leaves the old one", async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "verstas-sessions-"));
+  const src = path.join(tmp, "src-repo");
+  await makeSourceRepo(src);
+  const root = path.join(tmp, "sessions");
+  try {
+    const created = await createSession(root, { name: "Restore", repos: [{ target: { name: "nuppi", path: src } }], zips: [], image: "img" });
+    const session = { ...created.session, repos: (await provisionSession(root, created.session)).repos };
+    const clone = path.join(created.paths.workspace, "nuppi");
+    const oldBase = session.repos[0]!.baseCommit;
+    // The agent worked in the box; the real repository moved on by hand.
+    await fs.writeFile(path.join(clone, "agent.txt"), "a\n");
+    await git(clone, "add", ".");
+    await git(clone, "commit", "-q", "-m", "agent work");
+    await fs.writeFile(path.join(clone, "node_modules"), "ignored stuff\n");
+    await fs.writeFile(path.join(src, "README.md"), "hello again\n");
+    await git(src, "add", ".");
+    await git(src, "commit", "-q", "-m", "by hand");
+    const newMain = await git(src, "rev-parse", "main");
+    expect(newMain).not.toBe(oldBase);
+
+    const restored = await restoreClone(root, session, "nuppi");
+    expect(restored).toEqual({ ...session.repos[0], baseCommit: newMain });
+    expect(await fs.readFile(path.join(clone, "README.md"), "utf8")).toBe("hello again\n");
+    await expect(fs.access(path.join(clone, "agent.txt"))).rejects.toThrow();
+    await expect(fs.access(path.join(clone, "node_modules"))).rejects.toThrow();
+    expect(await git(clone, "branch", "--show-current")).toBe(`verstas/${session.id}`);
+    expect(await git(clone, "rev-parse", "HEAD")).toBe(newMain);
+    expect(await git(clone, "remote")).toBe("");
+    expect(await git(clone, "branch", "--list", "feature")).toBe("");
+    await expect(fs.access(path.join(created.paths.dir, "restore"))).rejects.toThrow();
+
+    // Another branch of the work target can be chosen.
+    const onFeature = await restoreClone(root, session, "nuppi", "feature");
+    expect(onFeature.branch).toBe("feature");
+    expect(onFeature.baseCommit).toBe(await git(src, "rev-parse", "feature"));
+    expect(await fs.readFile(path.join(clone, "feature.txt"), "utf8")).toBe("f\n");
+
+    // A work target that is gone: the old clone stays.
+    await expect(restoreClone(root, { ...session, repos: [{ ...session.repos[0]!, sourcePath: path.join(tmp, "gone") }] }, "nuppi")).rejects.toThrow(/not a git work tree/);
+    expect(await fs.readFile(path.join(clone, "feature.txt"), "utf8")).toBe("f\n");
+    await expect(restoreClone(root, session, "other")).rejects.toThrow(/No repository other/);
+  } finally {
+    await fs.rm(tmp, { recursive: true, force: true });
+  }
 });

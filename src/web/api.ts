@@ -41,7 +41,7 @@ import { emptyBoard, addChore, addNote, BoardError, exportBoard, getTicket, impo
 import { codexAuthRefreshedAt, configSchema, loadConfig, loadSecrets, saveConfig, saveSecrets, verstasHome, workTargetSchema, type Config } from "../config.js";
 import { codexAuthAgeDays, configuredDrivers, DRIVERS } from "../harness/drivers.js";
 import type { SessionHub } from "../sessions/hub.js";
-import { createSession, deleteSessionDir, listSessions, makeSessionId, provisionSession, removeClones, repoPick, RESERVED_WORKSPACE_NAMES, sessionPaths, withAgentPacks, writeAllowlist, writeRecipeFiles } from "../sessions/sessions.js";
+import { createSession, deleteSessionDir, listSessions, makeSessionId, provisionSession, removeClones, repoPick, restoreClone, RESERVED_WORKSPACE_NAMES, sessionPaths, withAgentPacks, writeAllowlist, writeRecipeFiles } from "../sessions/sessions.js";
 import { copyEnvironmentFiles, environmentSettings } from "../sessions/from-environment.js";
 import { applyBundle, ApplyError } from "../sessions/apply.js";
 import { importArchive, readArchive, writeArchive } from "../sessions/archive.js";
@@ -1236,6 +1236,65 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
     wrap(async (req, res) => {
       const h = await d.hub.get(param(req, "id"));
       try {
+  /** Branches of a session repository's work target, for the restore dialog. */
+  api.get(
+    "/sessions/:id/repos/:name/branches",
+    wrap(async (req, res) => {
+      const h = await d.hub.get(param(req, "id"));
+      const spec = h.session.repos.find((r) => r.name === param(req, "name"));
+      if (!spec) {
+        res.status(404).json({ error: `No repository ${String(param(req, "name"))} in this session` });
+        return;
+      }
+      try {
+        res.json(await listBranches(spec.sourcePath));
+      } catch (e) {
+        res.status(400).json({ error: `${spec.sourcePath} is not a git work tree any more: ${(e as Error).message.split("\n")[0]}` });
+      }
+    }),
+  );
+
+  /**
+   * Restore from repo: the clone is replaced by a fresh clone of the work
+   * target, at its recorded branch or the one given, when the repository
+   * changed outside the session. The container is stopped first so nothing
+   * holds the old clone; the next start brings it up again (on a Linux host
+   * that chowns the new clone to the agent). The run branch keeps its name
+   * and the base commit moves, so Apply lists only the work done from here
+   * on. Unapplied commits go with the old clone; the page says so and
+   * offers Apply first. See docs/SANDBOX.md Boundary 1.
+   */
+  api.post(
+    "/sessions/:id/repos/:name/restore",
+    wrap(async (req, res) => {
+      const { branch } = z.object({ branch: z.string().min(1).max(200).optional() }).parse(req.body ?? {});
+      const h = await d.hub.get(param(req, "id"));
+      if (notWhileRunning(res, h.id)) return;
+      const name = String(param(req, "name"));
+      const spec = h.session.repos.find((r) => r.name === name);
+      if (!spec) {
+        res.status(404).json({ error: `No repository ${name} in this session` });
+        return;
+      }
+      if (!isInitialized(h.session)) {
+        res.status(409).json({ error: "Nothing to restore: the session is not initialized, and Initialize clones the repositories fresh" });
+        return;
+      }
+      await stopSandbox(d.sandbox, h.id);
+      let restored;
+      try {
+        restored = await restoreClone(d.getConfig().sessionsRoot, h.session, name, branch);
+      } catch (e) {
+        res.status(400).json({ error: (e as Error).message });
+        return;
+      }
+      await h.mutate((docs) => ({
+        next: { session: { ...docs.session, repos: docs.session.repos.map((r) => (r.name === name ? { ...r, branch: restored.branch, runBranch: restored.runBranch, baseCommit: restored.baseCommit } : r)) } },
+      }));
+      res.json({ ok: true, repo: restored });
+    }),
+  );
+
         const files = await bundleRepos(h);
         res.json({
           files,

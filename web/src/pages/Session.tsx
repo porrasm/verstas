@@ -558,7 +558,7 @@ const RunBody = (p: BodyProps) => {
       <aside className="side">
         <InboxPanel inbox={inbox} onRead={(mid) => void p.tryAct("read", () => api("POST", `${base}/messages/${mid}/read`))} onPromote={(iid) => void p.tryAct("promote", () => api("POST", `${base}/ideas/${iid}/promote`))} onOpenTicket={p.openTicket} />
         <ChoresPanel board={board} base={base} tryAct={p.tryAct} onOpenTicket={p.openTicket} />
-        <WorkPanel session={session} base={base} active={active} done={counts.done ?? 0} onExport={p.onExport} />
+        <WorkPanel session={session} base={base} active={active} done={counts.done ?? 0} onExport={p.onExport} onDone={p.refreshRun} />
         <PromptBox session={session} base={base} active={active} onDone={p.refreshRun} />
         <EnvironmentPanel env={env} />
         <SessionSettings session={session} onSave={p.saveSettings} />
@@ -649,7 +649,9 @@ const PlanBody = (p: BodyProps) => {
 };
 // --- taking the work back --------------------------------------------------------
 
-const WorkPanel = ({ session, base, active, done, onExport }: { session: Session; base: string; active: boolean; done: number; onExport: () => void }) => {
+const WorkPanel = ({ session, base, active, done, onExport, onDone }: { session: Session; base: string; active: boolean; done: number; onExport: () => void; onDone: () => Promise<void> }) => {
+  const [restoring, setRestoring] = useState<RepoSpec | null>(null);
+  const [note, setNote] = useState("");
   const [busy, setBusy] = useState("");
   const [result, setResult] = useState<ApplyResult | null>(null);
   const [err, setErr] = useState("");
@@ -676,10 +678,26 @@ const WorkPanel = ({ session, base, active, done, onExport }: { session: Session
       {session.repos.map((r) => (
         <div className="row" key={r.name} style={{ justifyContent: "space-between" }}>
           <span><strong>{r.name}</strong> <span className="muted small mono" title={r.sourcePath}>{r.sourcePath.replace(/^\/Users\/[^/]+/, "~")}</span></span>
-          <button className="sm" onClick={() => apply(r.name)} disabled={Boolean(busy) || active} title={active ? "Pause or stop the run first" : `Create or update ${r.runBranch} in ${r.sourcePath}`}>{busy === r.name ? "Applying…" : "Apply to repo"}</button>
+          <span className="row" style={{ gap: 6 }}>
+            <button className="sm" onClick={() => apply(r.name)} disabled={Boolean(busy) || active} title={active ? "Pause or stop the run first" : `Create or update ${r.runBranch} in ${r.sourcePath}`}>{busy === r.name ? "Applying…" : "Apply to repo"}</button>
+            <button className="quiet sm" onClick={() => setRestoring(r)} disabled={Boolean(busy) || active} title={active ? "Pause or stop the run first" : `Replace the clone with a fresh clone of ${r.sourcePath}`}>Restore from repo…</button>
+          </span>
         </div>
       ))}
+      {note && <div className="banner ok small"><span>{note}</span><button className="quiet sm end" onClick={() => setNote("")}>Dismiss</button></div>}
       <div className="row"><button className="quiet sm" onClick={onExport} disabled={active}>Export bundles instead…</button></div>
+      {restoring && (
+        <RestoreRepo
+          repo={restoring}
+          base={base}
+          onClose={() => setRestoring(null)}
+          onDone={async (text) => {
+            setRestoring(null);
+            setNote(text);
+            await onDone();
+          }}
+        />
+      )}
       {err && <div className="banner warn"><span>{err}</span><button className="quiet sm end" onClick={() => setErr("")}>Dismiss</button></div>}
       {result && (
         <div className="stack" style={{ gap: 6 }}>
@@ -699,6 +717,93 @@ const WorkPanel = ({ session, base, active, done, onExport }: { session: Session
     </section>
   );
 };
+/**
+ * Restore from repo: the clone is replaced by a fresh clone of the work
+ * target as it is now, when the real repository moved on (you merged the
+ * run branch, committed by hand) and the box fell behind. The dialog counts
+ * the run branch's commits since the session started and offers Apply
+ * first, since they go with the old clone, and lets you pick the branch to
+ * clone when the repository's branch changed.
+ */
+const RestoreRepo = ({ repo, base, onClose, onDone }: { repo: RepoSpec; base: string; onClose: () => void; onDone: (text: string) => Promise<void> }) => {
+  const [commits, setCommits] = useState<number | null | undefined>(undefined);
+  const [branches, setBranches] = useState<string[] | null>(null);
+  const [branch, setBranch] = useState(repo.branch);
+  const [applied, setApplied] = useState("");
+  const [working, setWorking] = useState("");
+  const [err, setErr] = useState("");
+  useEffect(() => {
+    api<{ repos: { name: string; commits: number | null }[] }>("GET", `${base}/commits`)
+      .then((r) => setCommits(r.repos.find((x) => x.name === repo.name)?.commits ?? null))
+      .catch(() => setCommits(null));
+    api<{ current: string; branches: string[] }>("GET", `${base}/repos/${encodeURIComponent(repo.name)}/branches`)
+      .then((b) => setBranches(b.branches))
+      .catch((e: Error) => {
+        setBranches([]);
+        setErr(e.message);
+      });
+  }, [base, repo.name]);
+  useEffect(() => {
+    const key = (e: KeyboardEvent) => e.key === "Escape" && !working && onClose();
+    addEventListener("keydown", key);
+    return () => removeEventListener("keydown", key);
+  }, [working, onClose]);
+  const step = async (label: string, fn: () => Promise<void>) => {
+    setWorking(label);
+    setErr("");
+    try {
+      await fn();
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setWorking("");
+    }
+  };
+  const apply = () => step("apply", async () => {
+    const r = await api<ApplyResult>("POST", `${base}/apply`, { repo: repo.name });
+    setApplied(`applied to ${r.branch} in ${r.targetPath}`);
+  });
+  const restore = () => step("restore", async () => {
+    const r = await api<{ repo: RepoSpec }>("POST", `${base}/repos/${encodeURIComponent(repo.name)}/restore`, { branch });
+    await onDone(`${repo.name} restored from ${repo.sourcePath} at ${r.repo.branch} ${r.repo.baseCommit?.slice(0, 10) ?? ""}. The container was stopped; the next run starts it again. Installed dependencies inside the clone are gone; Re-run recipes if setup put them there.`);
+  });
+  const atRisk = commits !== 0 && !applied;
+  return (
+    <div className="overlay" onMouseDown={(e) => e.target === e.currentTarget && !working && onClose()} role="dialog" aria-modal="true" aria-labelledby="restore-title">
+      <div className="dialog">
+        <h3 id="restore-title">Restore {repo.name} from repo</h3>
+        <p className="small" style={{ margin: 0 }}>
+          This deletes the clone in the box and clones <span className="mono">{repo.sourcePath}</span> again as it is now. The run branch <span className="mono">{repo.runBranch}</span> starts over from the new base, so Apply later lists only the work done from here on. Commits on it that you have not applied or exported are lost, and so are ignored files inside the clone (node_modules, build output). The container is stopped and starts again with the next run.
+        </p>
+        <div className="stack tight small">
+          <div>
+            <strong>{repo.name}</strong> <span className="mono muted">{repo.runBranch}</span>:{" "}
+            {commits === undefined ? <span className="muted">counting commits since the session started…</span> : commits === null ? <span className="warn">could not count the commits</span> : commits === 0 ? <span className="muted">no commits since the session started</span> : <b>{commits} commit{commits === 1 ? "" : "s"} since the session started</b>}
+            {applied && <span className="ok"> · {applied}</span>}
+            {commits !== 0 && !applied && <> <button className="sm" onClick={() => void apply()} disabled={Boolean(working)}>{working === "apply" ? "Applying…" : "Apply to repo first"}</button></>}
+          </div>
+          <label className="row" style={{ gap: 8 }}>
+            <span>Branch to clone</span>
+            {branches && branches.length > 0 ? (
+              <select value={branch} onChange={(e) => setBranch(e.target.value)} disabled={Boolean(working)}>
+                {!branches.includes(branch) && <option value={branch}>{branch}</option>}
+                {branches.map((b) => <option key={b} value={b}>{b}</option>)}
+              </select>
+            ) : (
+              <input value={branch} onChange={(e) => setBranch(e.target.value)} disabled={Boolean(working)} style={{ width: 220 }} />
+            )}
+          </label>
+          {err && <div className="banner warn"><span>{err}</span></div>}
+        </div>
+        <div className="row">
+          <button className="warn solid" onClick={() => void restore()} disabled={commits === undefined || Boolean(working) || !branch.trim()}>{working === "restore" ? "Restoring…" : atRisk ? `Restore and lose ${repo.name}'s unsaved work` : `Restore ${repo.name}`}</button>
+          <button className="quiet" onClick={onClose} disabled={Boolean(working)}>Cancel</button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 
 // --- the environment: repositories, attachments, recipes, setup mode, initialization ------
 

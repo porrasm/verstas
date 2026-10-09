@@ -88,6 +88,12 @@ directory a container ever sees.
   skipped and listed in the session log.
 - **Nothing else is copied.** No dotfiles from your home, no SSH agent, no
   npm or pip credentials.
+- **Restore from repo** (the session page's Work panel) replaces one
+  clone with a fresh clone of the work target, made the same way and
+  swapped in once it exists. The old clone is deleted as files; host git
+  never reads its `.git` (Boundary 5). The container is stopped first and
+  the run branch starts over from the new base, so unapplied commits go
+  with the old clone; the dialog counts them and offers Apply first.
 
 ## Boundary 2: the container
 

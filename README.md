@@ -163,6 +163,12 @@ Then, in the web app:
    have checked out. Merge, rebase or cherry-pick from there. Export
    bundles remain for moving work to another machine: one `git fetch` line per
    repository is shown. Bundles are pure data; nothing from the repository
+   **Restore from repo** beside it goes the other way: when the real
+   repository moved on (you merged the run branch, committed by hand), it
+   replaces the clone in the box with a fresh clone of the repository as it
+   is now, at the branch you pick, instead of a new session. Unapplied
+   commits on the run branch and ignored files inside the clone go with
+   the old clone; the dialog counts the commits and offers Apply first.
    runs on your machine.
 10. **Move a session to another machine** with **Export session (.ver)**
    in the session page's menu (stop the run first). The archive holds the
