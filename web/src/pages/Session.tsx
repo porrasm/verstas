@@ -95,7 +95,7 @@ const sessionStatus = (session: Session, run: Run | undefined, active: boolean):
     case "setup":
       return { label: "not started", tone: "quiet" };
     case "finished":
-      return { label: "finished", tone: "good" };
+      return { label: session.mode === "goal" ? (session.goalMet ? "goal met, says the worker" : "finished") : "finished", tone: "good" };
     case "halted":
       return { label: "halted by the agent", tone: "warn" };
     case "waiting":
@@ -287,6 +287,8 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
   const lastActivity = lastEventAt && lastEventAt > (totals?.lastActivityAt ?? "") ? lastEventAt : totals?.lastActivityAt;
   const pausedBanner = !active && run && (run.state === "paused" || run.state === "halted" || run.state === "failed") && session.state !== "finished";
   const initialized = isInitialized(session);
+  /** No board: the goal panel stands where the board would, and the ticket controls stay away. */
+  const goalMode = session.mode === "goal";
   const terminalActive = Boolean(active && run?.terminal);
   /** The setup worker left the box short of ready and nobody accepted it: the one state that needs a decision before anything else. */
   const initNeeds = !initialized && !active && session.readiness?.verdict === "needs" && !session.readiness.confirmedAt;
@@ -330,9 +332,9 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
           <h1>{session.name}</h1>
           <span className={`pill ${status.tone}`}>{active ? <span className="dot run" /> : null}{status.label}</span>
           <div className="actions">
-            {initialized && !active && <button className="pri" onClick={() => runAction("start")} disabled={Boolean(busy)} title="Work through the ready tickets">Start run</button>}
+            {initialized && !active && <button className="pri" onClick={() => runAction("start")} disabled={Boolean(busy)} title={goalMode ? (session.goalMet ? "Start again with the same goal: the worker takes that as not yet and looks for what falls short" : "Work toward the goal; Verstas commits after every round") : "Work through the ready tickets"}>Start run</button>}
             {terminalActive && <ConfirmButton className="pri" label="Start run" confirm="End the terminal and start" onConfirm={() => runAction("start")} disabled={Boolean(busy)} />}
-            {initialized && (!active || terminalActive) && <button onClick={() => setPlanning(true)} disabled={Boolean(busy)} title={terminalActive ? "Planning ends the agent terminal first; its changes are committed" : "Describe what to build; a planner worker turns it into backlog tickets"}>Plan tickets…</button>}
+            {initialized && !goalMode && (!active || terminalActive) && <button onClick={() => setPlanning(true)} disabled={Boolean(busy)} title={terminalActive ? "Planning ends the agent terminal first; its changes are committed" : "Describe what to build; a planner worker turns it into backlog tickets"}>Plan tickets…</button>}
             {initialized && !active && (
               <MoreMenu
                 label="Agent terminal ▾"
@@ -343,9 +345,9 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
                 })}
               />
             )}
-            {active && !terminalActive && <button onClick={() => runAction("pause")} disabled={Boolean(busy)} title="Finish the current ticket, then stop">Pause after ticket</button>}
-            {active && !terminalActive && <button className="warn" onClick={() => runAction("stop")} disabled={Boolean(busy)} title="Stop the worker now; its ticket goes back to ready">Stop now</button>}
-            {initialized && <button onClick={() => setNewTicket(true)} disabled={Boolean(busy)} title="Write a ticket by hand">New ticket</button>}
+            {active && !terminalActive && <button onClick={() => runAction("pause")} disabled={Boolean(busy)} title={goalMode ? "The worker is told to finish its step, update its note and stop; the round is committed" : "Finish the current ticket, then stop"}>{goalMode ? "Pause" : "Pause after ticket"}</button>}
+            {active && !terminalActive && <button className="warn" onClick={() => runAction("stop")} disabled={Boolean(busy)} title={goalMode ? "Stop the worker now; what it changed is committed" : "Stop the worker now; its ticket goes back to ready"}>Stop now</button>}
+            {initialized && !goalMode && <button onClick={() => setNewTicket(true)} disabled={Boolean(busy)} title="Write a ticket by hand">New ticket</button>}
             <MoreMenu
               items={[
                 { label: "Import board…", onClick: () => setImportText("") },
@@ -363,8 +365,9 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
           </div>
         </div>
         <div className="facts">
-          {initialized && <span><b>{done}/{board.tickets.length}</b> done</span>}
-          {initialized && waitingOnYou !== null && <span title="Time tickets spent waiting for your answers, summed over the board: how unattended the loop is">waiting on you <b>{fmtSpan(waitingOnYou)}</b></span>}
+          {initialized && !goalMode && <span><b>{done}/{board.tickets.length}</b> done</span>}
+          {initialized && goalMode && run?.rounds ? <span title="Rounds: one worker from start to exit, then a commit of what it changed"><b>{run.rounds}</b> round{run.rounds === 1 ? "" : "s"}{active ? " this run" : ` in run ${run.id}`}</span> : null}
+          {initialized && !goalMode && waitingOnYou !== null && <span title="Time tickets spent waiting for your answers, summed over the board: how unattended the loop is">waiting on you <b>{fmtSpan(waitingOnYou)}</b></span>}
           {initialized && <span><b>{fmtUsd(totals?.usd ?? 0)}</b> spent{totals && totals.runs > 1 ? ` over ${totals.runs} runs` : ""}{active && run?.cost.usd ? ` · ${fmtUsd(run.cost.usd)} this run` : ""}</span>}
           {run && active && <span>running for <b>{fmtDuration(run.startedAt, undefined, now)}</b></span>}
           {initialized && lastActivity && !active && <span>last activity <b title={fmtDateTime(lastActivity)}>{fmtAgo(lastActivity, now)}</b></span>}
@@ -421,7 +424,7 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
         </section>
       )}
 
-      {!active && (counts.backlog ?? 0) > 0 && (
+      {!active && !goalMode && (counts.backlog ?? 0) > 0 && (
         <div className="banner signal">
           <span><b>{counts.backlog}</b> ticket{counts.backlog === 1 ? "" : "s"} in the backlog wait for your approval. The run only takes ready tickets.</span>
           <button className="pri sm end" onClick={() => tryAct("approving", () => api("POST", `${base}/tickets/approve-all`))} disabled={Boolean(busy)}>Approve all</button>
@@ -581,10 +584,13 @@ const RunBody = (p: BodyProps) => {
   const { session, board, inbox, base, active, run, counts } = p;
   const env = useEnvironment(session, base, active, p.refreshRun);
   const { onRetry, onApprove } = useBoardActions(p);
+  const goalMode = session.mode === "goal";
   return (
     <div className="sess-body">
       <div className="main">
-        {board.tickets.length === 0 ? (
+        {goalMode ? (
+          <GoalPanel session={session} base={base} active={active} run={run} onDone={p.refreshRun} />
+        ) : board.tickets.length === 0 ? (
           <div className="card empty-state">
             <h3>No tickets yet</h3>
             <p>Paste a board, write tickets by hand, or describe what to build and let the planner draft them from the repositories.</p>
@@ -600,7 +606,7 @@ const RunBody = (p: BodyProps) => {
       </div>
       <aside className="side">
         <InboxPanel inbox={inbox} onRead={(mid) => void p.tryAct("read", () => api("POST", `${base}/messages/${mid}/read`))} onPromote={(iid) => void p.tryAct("promote", () => api("POST", `${base}/ideas/${iid}/promote`))} onOpenTicket={p.openTicket} />
-        <ChoresPanel board={board} base={base} tryAct={p.tryAct} onOpenTicket={p.openTicket} />
+        {!goalMode && <ChoresPanel board={board} base={base} tryAct={p.tryAct} onOpenTicket={p.openTicket} />}
         <WorkPanel session={session} base={base} active={active} done={counts.done ?? 0} onExport={p.onExport} onDone={p.refreshRun} />
         <PromptBox session={session} base={base} active={active} onDone={p.refreshRun} />
         <EnvironmentPanel env={env} />
@@ -638,20 +644,24 @@ const PlanBody = (p: BodyProps) => {
               <RepoSection env={env} bare />
             </section>
 
-            <section className="stack tight">
-              <SheetHead title="Board" mark={total ? `${total} ticket${total === 1 ? "" : "s"} · ${ready} ready` : "empty"} tone={ready ? "good" : total ? "info" : "quiet"}>
-                <button className="sm" onClick={p.onImport} disabled={Boolean(p.busy)}>Import board…</button>
-                <button className="sm" onClick={p.onNewTicket} disabled={Boolean(p.busy)}>New ticket</button>
-              </SheetHead>
-              {total === 0 ? (
-                <div className="card empty-state">
-                  <h3>No tickets yet</h3>
-                  <p>Paste a board or write tickets by hand. Or initialize first and let the planner draft them: it reads the repositories, so it needs the box.</p>
-                </div>
-              ) : (
-                <BoardView board={board} inbox={inbox} run={run} active={active} clock={ticketClock(session)} openId={p.ticketId} onOpen={p.openTicket} onRetry={onRetry} onApprove={onApprove} onShowLog={p.setLogTicket} />
-              )}
-            </section>
+            {session.mode === "goal" ? (
+              <GoalPanel session={session} base={base} active={active} run={run} onDone={p.refreshRun} />
+            ) : (
+              <section className="stack tight">
+                <SheetHead title="Board" mark={total ? `${total} ticket${total === 1 ? "" : "s"} · ${ready} ready` : "empty"} tone={ready ? "good" : total ? "info" : "quiet"}>
+                  <button className="sm" onClick={p.onImport} disabled={Boolean(p.busy)}>Import board…</button>
+                  <button className="sm" onClick={p.onNewTicket} disabled={Boolean(p.busy)}>New ticket</button>
+                </SheetHead>
+                {total === 0 ? (
+                  <div className="card empty-state">
+                    <h3>No tickets yet</h3>
+                    <p>Paste a board or write tickets by hand. Or initialize first and let the planner draft them: it reads the repositories, so it needs the box. Working toward a goal instead of a board is a session setting (How tickets are worked, below).</p>
+                  </div>
+                ) : (
+                  <BoardView board={board} inbox={inbox} run={run} active={active} clock={ticketClock(session)} openId={p.ticketId} onOpen={p.openTicket} onRetry={onRetry} onApprove={onApprove} onShowLog={p.setLogTicket} />
+                )}
+              </section>
+            )}
 
             <section className="card stack" style={{ gap: 10 }}>
               <SheetHead title="Environment" mark={worker ? `setup worker · ${session.setupScripts.length} recipe${session.setupScripts.length === 1 ? "" : "s"}` : `setup skipped · ${session.setupScripts.length} recipe${session.setupScripts.length === 1 ? "" : "s"}`} tone="quiet" />
@@ -1421,6 +1431,116 @@ const PlanDialog = ({ session, busy, onCancel, onPlan }: { session: Session; bus
         </div>
       </div>
     </div>
+  );
+};
+
+// --- goal mode ----------------------------------------------------------------
+
+/**
+ * Goal mode's brief, where the board would be: the goal text (editable at
+ * any time; the next round reads it, a running worker is told), the
+ * worker's claim that it is met, its plan and progress note, and the
+ * earlier goals this session worked.
+ */
+const GoalPanel = ({ session, base, active, run, onDone }: { session: Session; base: string; active: boolean; run?: Run; onDone: () => Promise<void> }) => {
+  const [text, setText] = useState(session.goal);
+  const [dirty, setDirty] = useState(false);
+  const [msg, setMsg] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<{ text: string; updatedAt: string | null } | null>(null);
+  const [showNote, setShowNote] = useState(false);
+  const now = useNow();
+  useEffect(() => {
+    if (!dirty) setText(session.goal);
+  }, [session.goal, dirty]);
+  const rounds = run?.rounds ?? 0;
+  useEffect(() => {
+    api<{ text: string; updatedAt: string | null }>("GET", `${base}/state-note`).then(setNote).catch(() => setNote(null));
+  }, [base, rounds, active]);
+  const save = async () => {
+    setBusy(true);
+    setMsg("");
+    try {
+      const r = await api<{ changed: boolean; told?: string }>("PUT", `${base}/goal`, { goal: text });
+      setDirty(false);
+      setMsg(!r.changed ? "Unchanged." : r.told ? `Saved and sent to the running ${r.told}; the next round reads it too.` : active ? "Saved; the next round reads it (the running worker could not take a message)." : "Saved; the next run reads it.");
+      await onDone();
+    } catch (e) {
+      setMsg((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const goals = session.goals ?? [];
+  const since = session.goalSince ?? session.createdAt;
+  const written = Boolean(session.goal.trim());
+  return (
+    <section className="card stack" style={{ gap: 10 }}>
+      <SheetHead title="Goal" mark={session.goalMet ? "met, says the worker" : written ? (active ? "working" : "set") : "not written"} tone={session.goalMet ? "good" : written ? (active ? "sig" : "info") : "warn"} />
+      <p className="lead" style={{ margin: 0 }}>
+        No board. One long-lived worker works toward this text, keeps its plan in <span className="mono">notes/state.md</span>, and Verstas commits after every round until the worker says the goal is met, you pause, or a cap is reached. Edit the goal at any time: a running worker is told, and the next round reads the new text. Start again after a met goal to say "not yet".
+      </p>
+      {session.goalMet && (
+        <div className="banner good" style={{ margin: 0 }}>
+          <div>
+            <strong>The worker says the goal is met</strong> <span className="muted small">{fmtAgo(session.goalMet.at, now)} · run {session.goalMet.runId}</span>
+            <div className="small" style={{ whiteSpace: "pre-wrap", marginTop: 4 }}>{session.goalMet.note}</div>
+          </div>
+        </div>
+      )}
+      <textarea
+        id="goal"
+        value={text}
+        onChange={(e) => {
+          setText(e.target.value);
+          setDirty(true);
+        }}
+        placeholder="A Mario Party clone running in the browser: four players on a board, dice, a dozen minigames, a results screen. Or paste a specification. Say what done looks like."
+        style={{ minHeight: 160 }}
+      />
+      <div className="row">
+        <button className="pri sm" onClick={() => void save()} disabled={busy || !dirty}>Save goal</button>
+        {dirty && (
+          <button
+            className="quiet sm"
+            onClick={() => {
+              setText(session.goal);
+              setDirty(false);
+            }}
+          >
+            Discard
+          </button>
+        )}
+        <span className="muted small">{msg || (written ? `set ${fmtAgo(since, now)}${goals.length ? ` · ${goals.length} earlier goal${goals.length === 1 ? "" : "s"}` : ""}` : isInitialized(session) ? "Write the goal, then Start run." : "Write the goal; Initialize creates the box.")}</span>
+      </div>
+      <div className="small">
+        <span className={`dot ${note?.text ? "good" : ""}`} /> <strong>Plan and progress note</strong>{" "}
+        <span className="muted">{note?.text ? `notes/state.md · ${note.updatedAt ? fmtAgo(note.updatedAt, now) : ""}` : "none yet; the worker writes notes/state.md as it works"}</span>{" "}
+        {note?.text && <button className="quiet sm" onClick={() => setShowNote(!showNote)}>{showNote ? "hide" : "view"}</button>}
+        {showNote && note?.text && <pre className="mono" style={{ whiteSpace: "pre-wrap", maxHeight: 420, overflow: "auto", marginTop: 6 }}>{note.text}</pre>}
+      </div>
+      {goals.length > 0 && (
+        <details>
+          <summary className="muted small">Earlier goals ({goals.length})</summary>
+          {[...goals].reverse().map((g) => (
+            <div key={g.from} className="small" style={{ borderTop: "1px solid var(--line)", paddingTop: 6, marginTop: 6 }}>
+              <div className="muted">{g.outcome} · {fmtDateTime(g.from)} to {fmtDateTime(g.until)}</div>
+              <div style={{ whiteSpace: "pre-wrap" }}>{g.text.slice(0, 800)}</div>
+              {g.note && <div className="muted" style={{ whiteSpace: "pre-wrap", marginTop: 4 }}>{g.note.slice(0, 600)}</div>}
+              <button
+                className="quiet sm"
+                onClick={() => {
+                  setText(g.text);
+                  setDirty(true);
+                }}
+              >
+                Use this again
+              </button>
+            </div>
+          ))}
+        </details>
+      )}
+    </section>
   );
 };
 
@@ -2203,6 +2323,7 @@ const CAP_HELP: Record<string, string> = {
   sweepMaxLines: "A chore sweep's commit may change at most this many lines; over it the sweep is refused",
   sweepMaxFiles: "Files a chore sweep's commit may touch",
   choreSweepAt: "Open chores at which the lead must sweep before its next ticket (0: never forced)",
+  goalRounds: "Rounds (one worker, start to exit, then a commit) per run before it pauses for a look",
 };
 
 /**
@@ -2227,6 +2348,7 @@ const SessionSettings = ({ session, onSave, part = "all" }: { session: Session; 
     sweepMaxLines: String(session.caps.sweepMaxLines ?? 400),
     sweepMaxFiles: String(session.caps.sweepMaxFiles ?? 15),
     choreSweepAt: String(session.caps.choreSweepAt ?? 10),
+    goalRounds: String(session.caps.goalRounds ?? 25),
     choreApproval: session.caps.choreApproval ?? false,
     memory: session.limits.memory,
     cpus: String(session.limits.cpus),
@@ -2256,7 +2378,7 @@ const SessionSettings = ({ session, onSave, part = "all" }: { session: Session; 
         ...(part !== "caps" ? { allowlist: f.allow.split(/\n/).map((s) => s.trim()).filter(Boolean), packs: f.packs } : {}),
         ...(part !== "network"
           ? {
-              caps: { workerMinutes: Number(f.workerMinutes), workerTurns: Number(f.workerTurns), budgetUsd: Number(f.budgetUsd), runTickets: Number(f.runTickets), ticketAttempts: Number(f.ticketAttempts), reviewer: f.reviewer, resumeWorker: f.resumeWorker, leadMinutes: Number(f.leadMinutes), leadTurns: Number(f.leadTurns), sweepMaxLines: Number(f.sweepMaxLines), sweepMaxFiles: Number(f.sweepMaxFiles), choreApproval: f.choreApproval, choreSweepAt: Number(f.choreSweepAt) },
+              caps: { workerMinutes: Number(f.workerMinutes), workerTurns: Number(f.workerTurns), budgetUsd: Number(f.budgetUsd), runTickets: Number(f.runTickets), ticketAttempts: Number(f.ticketAttempts), reviewer: f.reviewer, resumeWorker: f.resumeWorker, leadMinutes: Number(f.leadMinutes), leadTurns: Number(f.leadTurns), sweepMaxLines: Number(f.sweepMaxLines), sweepMaxFiles: Number(f.sweepMaxFiles), choreApproval: f.choreApproval, choreSweepAt: Number(f.choreSweepAt), goalRounds: Number(f.goalRounds) },
               limits: { memory: f.memory, cpus: Number(f.cpus) },
               mode: f.mode,
               // Nothing chosen clears the block: planning agents then size tickets themselves, as before.
@@ -2295,14 +2417,28 @@ const SessionSettings = ({ session, onSave, part = "all" }: { session: Session; 
       {part !== "network" && (
         <label>
           How tickets are worked
-          <span className="help">{f.mode === "lead" ? "One lead agent works the board: it picks the order, claims and submits tickets, and hands over to a fresh lead when its context gets noisy. Every ticket is still judged and committed by Verstas." : "Verstas picks each ready ticket and starts a fresh implementer for it."} Applies to the next run.</span>
-          <select value={f.mode} onChange={(e) => set("mode", e.target.value as "loop" | "lead")}>
+          <span className="help">{f.mode === "lead" ? "One lead agent works the board: it picks the order, claims and submits tickets, and hands over to a fresh lead when its context gets noisy. Every ticket is still judged and committed by Verstas." : f.mode === "goal" ? "No board and no reviewer: one long-lived worker works toward the session's goal text, keeps its plan in notes/state.md, hands over to a fresh worker when its context gets noisy, and Verstas commits after every round until the worker says the goal is met, you pause, or the round cap." : "Verstas picks each ready ticket and starts a fresh implementer for it."} Applies to the next run.</span>
+          <select value={f.mode} onChange={(e) => set("mode", e.target.value as "loop" | "lead" | "goal")}>
             <option value="loop">One worker per ticket</option>
             <option value="lead">A lead works the board</option>
+            <option value="goal">A worker works toward a goal</option>
           </select>
         </label>
       )}
-      {part !== "network" && (
+      {part !== "network" && f.mode === "goal" && (
+        <div className="two">
+          {(["leadMinutes", "leadTurns", "goalRounds", "budgetUsd"] as const).map((k) => (
+            <label key={k}>
+              {{ leadMinutes: "Worker minutes", leadTurns: "Worker turns", goalRounds: "Rounds per run", budgetUsd: "Budget USD per worker" }[k]}
+              <span className="help">{k === "leadMinutes" ? "Wall-clock life of one goal worker; then a fresh one takes over from the note" : k === "leadTurns" ? "Model turns per goal worker; then a fresh one takes over" : CAP_HELP[k]}</span>
+              <input type="number" min={1} value={f[k]} onChange={(e) => set(k, e.target.value)} />
+            </label>
+          ))}
+          <label>Memory <span className="help">Container limit, e.g. 4g</span><input value={f.memory} onChange={(e) => set("memory", e.target.value)} /></label>
+          <label>CPUs<input type="number" step="0.5" min={0.5} value={f.cpus} onChange={(e) => set("cpus", e.target.value)} /></label>
+        </div>
+      )}
+      {part !== "network" && f.mode !== "goal" && (
         <div className="two">
           <label>
             Ticket size

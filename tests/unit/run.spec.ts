@@ -6,7 +6,7 @@ import { createAgentApi, RunTokens } from "../../src/agent-api/agent-api.js";
 import type net from "node:net";
 import { beginSweep, importBoard, emptyBoard, getTicket, replaceTicket, transition } from "../../src/board/board.js";
 import { saveBoard, writeJsonAtomic } from "../../src/board/store.js";
-import { inboxSchema, now, requestSchema, sessionSchema, type VerstasEvent } from "../../src/core/types.js";
+import { inboxSchema, now, requestSchema, reviseGoal, sessionSchema, type VerstasEvent } from "../../src/core/types.js";
 import { describeBlockers, parseSetup, parseVerdict, RunManager, type Shell, type WorkerDone, type WorkerRunner } from "../../src/harness/run.js";
 import { SessionHub } from "../../src/sessions/hub.js";
 import { sessionPaths } from "../../src/sessions/sessions.js";
@@ -23,7 +23,10 @@ const makeSession = async (
     reviewer?: boolean;
     attempts?: number;
     resume?: boolean;
-    mode?: "loop" | "lead";
+    mode?: "loop" | "lead" | "goal";
+    /** Goal mode: the goal text and the round cap. */
+    goal?: string;
+    goalRounds?: number;
     requirements?: string;
     /** false: a plan that still needs Initialize (the default is an initialized session). */
     initialized?: boolean;
@@ -47,8 +50,9 @@ const makeSession = async (
       requirements: opts.requirements ?? "",
       setupMode: opts.setupMode ?? "agentic",
       mode: opts.mode ?? "loop",
+      goal: opts.goal ?? "",
       agents: opts.agents ?? {},
-      caps: { reviewer: opts.reviewer ?? true, ticketAttempts: opts.attempts ?? 2, runTickets: 10, resumeWorker: opts.resume ?? false },
+      caps: { reviewer: opts.reviewer ?? true, ticketAttempts: opts.attempts ?? 2, runTickets: 10, resumeWorker: opts.resume ?? false, ...(opts.goalRounds ? { goalRounds: opts.goalRounds } : {}) },
     }),
   );
   await saveBoard(paths.dir, importBoard(emptyBoard("g"), { tickets: [{ id: "T-1", title: "Schema", state: "ready", repo: "app" }, { id: "T-2", title: "Engine", state: "ready", deps: ["T-1"] }] }).board);
@@ -806,11 +810,14 @@ const leadRun = async (s: Awaited<ReturnType<typeof makeSession>>, lead: LeadScr
   const shell = opts.shell ?? fakeShell();
   const jobs: Job[] = [];
   const prompts: string[] = [];
+  /** What the harness sent the live worker (messages from the user, the pause nudge). */
+  const sent: string[] = [];
   let leads = 0;
   let port = 0;
   const worker: WorkerRunner = {
     async run(job, _onEvent, signal, o) {
       jobs.push(job);
+      o?.attach?.({ driver: job.driver ?? "claude", send: (t) => (sent.push(t), true) });
       const base = { kind: "worker_done" as const, t: now(), ticket: job.ticket, role: job.role, ok: true, stopReason: "success", rateLimited: false, costUsd: 0.1, turns: 3, seconds: 1, text: "", stderr: "" };
       if (job.role === "reviewer") return opts.reviewerRateLimited ? { ...base, ok: false, rateLimited: true, stopReason: "error" } : { ...base, text: opts.verdict?.(job.ticket) ?? "VERDICT: ok" };
       prompts.push(await fs.readFile(onHost(s, job.promptFile), "utf8"));
@@ -825,7 +832,7 @@ const leadRun = async (s: Awaited<ReturnType<typeof makeSession>>, lead: LeadScr
   const mgr: RunManager = new RunManager({ hub: s.hub, tokens, shell: () => shell, worker: () => worker, ensureSandbox: async () => undefined, agentApiUrl: "http://x/agent", rateLimitSleepMs: 20, handoffGraceMs: 50, healSandbox: opts.heal ? () => opts.heal!(mgr) : undefined });
   const server = createAgentApi(s.hub, tokens, mgr).listen(0, "127.0.0.1");
   port = await new Promise<number>((r) => server.on("listening", () => r((server.address() as net.AddressInfo).port)));
-  return { mgr, jobs, prompts, shell, close: () => server.close() };
+  return { mgr, jobs, prompts, shell, sent, close: () => server.close() };
 };
 
 /** What board_submit does: submit, then wait for the verdict. */
@@ -1491,6 +1498,191 @@ test("a message is refused while the run is between workers and for a worker on 
     release();
     await ctl.done;
   } finally {
+    await fs.rm(s.root, { recursive: true, force: true });
+  }
+});
+
+// --- Goal mode ---------------------------------------------------------------
+
+/** A goal-mode session with the notes directory the worker writes into. */
+const goalSession = async (opts: { goal?: string; goalRounds?: number } = {}) => {
+  const s = await makeSession({ mode: "goal", goal: opts.goal ?? "A CLI that greets the user by name", goalRounds: opts.goalRounds });
+  await fs.mkdir(s.paths.notes, { recursive: true });
+  return s;
+};
+
+test("goal mode: every round is committed, the conversation continues, the prompt carries the goal and the note, and goal_done ends the run with the claim kept", async () => {
+  const s = await goalSession();
+  const r = await leadRun(s, async (api, job, n) => {
+    expect(job.role).toBe("goal");
+    if (n === 1) {
+      // No board for this worker: a lead's calls are refused, a ticket worker's too.
+      expect((await api("POST", "/tickets/T-1/claim", {})).status).toBe(403);
+      await fs.writeFile(path.join(s.paths.notes, "state.md"), "# Plan\n- scaffold the CLI (done)\n- greet by name (next)\n");
+      return { text: "Scaffolded the CLI; the greeting is next.\n\nDetails follow." };
+    }
+    expect((await api("POST", "/goal_done", { note: "Greets by name. Verified: `node cli.js Ada` prints Hello, Ada; 3 tests pass." })).status).toBe(200);
+    return { text: "Goal met." };
+  });
+  try {
+    const run = await (await r.mgr.start(s.id)).done;
+    expect(run).toMatchObject({ state: "finished", rounds: 2, ticketsDone: 0 });
+    expect(run.pauseReason).toContain("goal met: Greets by name");
+    expect(r.shell.commits).toEqual(["Goal round 1.1: Scaffolded the CLI; the greeting is next.", "Goal round 1.2: Goal met."]);
+    expect(r.jobs).toHaveLength(2);
+    expect(r.jobs[0]!.caps).toMatchObject({ minutes: 180, turns: 600 });
+    expect(r.jobs[0]!.agentSession).toMatchObject({ resume: false });
+    expect(r.jobs[1]!.agentSession).toEqual({ id: r.jobs[0]!.agentSession!.id, resume: true });
+    expect(r.prompts[0]).toContain("# Work toward the goal");
+    expect(r.prompts[0]).toContain("A CLI that greets the user by name");
+    expect(r.prompts[0]).toContain("you are the first worker on this goal");
+    expect(r.prompts[0]).toContain("### app");
+    expect(r.prompts[1]).toContain("# Continue");
+    expect(r.prompts[1]).toContain("round 2 of this run");
+    expect(r.prompts[1]).toContain("committed what your last round left in app");
+    const sys = await fs.readFile(onHost(s, r.jobs[0]!.systemPromptFile), "utf8");
+    expect(sys).toContain("Role: goal worker");
+    expect(sys).toContain("goal_done");
+    expect(sys).not.toContain("board_create_ticket");
+    const h = await s.hub.get(s.id);
+    expect(h.session.goalMet).toMatchObject({ runId: 1, note: expect.stringContaining("Greets by name") });
+    expect(h.session.state).toBe("finished");
+    // The board was never touched.
+    expect(h.board.tickets.map((t) => t.state)).toEqual(["ready", "ready"]);
+  } finally {
+    r.close();
+    await fs.rm(s.root, { recursive: true, force: true });
+  }
+});
+
+test("goal mode: a handoff writes the note and a fresh worker starts from it; a cap stop starts fresh with the last words; a goal revised between rounds reaches the continue prompt; starting again after a met goal says so", async () => {
+  const s = await goalSession();
+  const r = await leadRun(s, async (api, _job, n) => {
+    if (n === 1) {
+      const res = await api("POST", "/handoff", { note: "Halfway: the parser is done, the greeting tests are next." });
+      expect(res.status).toBe(200);
+      expect(String(res.json.next)).toContain("fresh worker");
+      return { text: "handing off" };
+    }
+    if (n === 2) return { stopReason: "time_cap", text: "ran out while writing the tests" };
+    if (n === 3) {
+      const h = await s.hub.get(s.id);
+      await h.mutate((d) => ({ next: { session: reviseGoal(d.session, "A CLI that greets the user by name, in Finnish", now()) } }));
+      return { text: "tests written" };
+    }
+    if (n === 4) {
+      expect((await api("POST", "/goal_done", { note: "Done in Finnish." })).status).toBe(200);
+      return { text: "met" };
+    }
+    // Run 2, same goal: the worker is told the claim was made before.
+    expect((await api("POST", "/goal_done", { note: "Improved the edge cases; still met." })).status).toBe(200);
+    return { text: "met again" };
+  });
+  try {
+    const run = await (await r.mgr.start(s.id)).done;
+    expect(run).toMatchObject({ state: "finished", rounds: 4 });
+    const ids = r.jobs.map((j) => j.agentSession!);
+    expect(ids[1]!.resume).toBe(false);
+    expect(ids[1]!.id).not.toBe(ids[0]!.id);
+    expect(ids[2]!.resume).toBe(false);
+    expect(ids[2]!.id).not.toBe(ids[1]!.id);
+    expect(ids[3]).toEqual({ id: ids[2]!.id, resume: true });
+    expect(await fs.readFile(path.join(s.paths.notes, "state.md"), "utf8")).toContain("Halfway: the parser is done");
+    expect(r.prompts[1]).toContain("# Work toward the goal");
+    expect(r.prompts[1]).toContain("Halfway: the parser is done");
+    expect(r.prompts[2]).toContain("stopped at a cap");
+    expect(r.prompts[2]).toContain("ran out while writing the tests");
+    expect(r.prompts[3]).toContain("# Continue");
+    expect(r.prompts[3]).toContain("The goal was revised");
+    expect(r.prompts[3]).toContain("in Finnish");
+    let h = await s.hub.get(s.id);
+    expect(h.session.goals).toHaveLength(1);
+    expect(h.session.goals[0]).toMatchObject({ text: "A CLI that greets the user by name", outcome: "revised" });
+    expect(h.session.goalMet?.note).toBe("Done in Finnish.");
+
+    const again = await (await r.mgr.start(s.id)).done;
+    expect(again).toMatchObject({ state: "finished", rounds: 1 });
+    expect(r.prompts[4]).toContain("said this goal was met");
+    expect(r.prompts[4]).toContain("Done in Finnish.");
+    h = await s.hub.get(s.id);
+    expect(h.session.goalMet).toMatchObject({ runId: 2, note: "Improved the edge cases; still met." });
+  } finally {
+    r.close();
+    await fs.rm(s.root, { recursive: true, force: true });
+  }
+});
+
+test("goal mode: two rounds with no commit and no change to the note pause the run; the round cap pauses it; an empty goal does not start", async () => {
+  const quiet = fakeShell();
+  const exec = quiet.exec.bind(quiet);
+  quiet.exec = async (cmd, o) => (cmd.join(" ") === "git diff --cached --quiet" ? { code: 0, stdout: "", stderr: "" } : exec(cmd, o));
+  const s = await goalSession();
+  const r = await leadRun(s, async () => ({ text: "Still reading the code." }), { shell: quiet });
+  try {
+    const run = await (await r.mgr.start(s.id)).done;
+    expect(run).toMatchObject({ state: "paused", pauseReason: "the worker ended twice without a commit or a change to notes/state.md", rounds: 2 });
+    expect(r.shell.commits).toEqual([]);
+  } finally {
+    r.close();
+    await fs.rm(s.root, { recursive: true, force: true });
+  }
+
+  const capped = await goalSession({ goalRounds: 1 });
+  const r2 = await leadRun(capped, async () => ({ text: "one step" }));
+  try {
+    const run = await (await r2.mgr.start(capped.id)).done;
+    expect(run.state).toBe("paused");
+    expect(run.pauseReason).toContain("1 round this run, the session's cap");
+    expect(r2.shell.commits).toEqual(["Goal round 1.1: one step"]);
+  } finally {
+    r2.close();
+    await fs.rm(capped.root, { recursive: true, force: true });
+  }
+
+  const empty = await goalSession({ goal: "" });
+  const r3 = await leadRun(empty, async () => ({}));
+  try {
+    await expect(r3.mgr.start(empty.id)).rejects.toThrow("Write the goal first");
+    expect(r3.jobs).toHaveLength(0);
+  } finally {
+    r3.close();
+    await fs.rm(empty.root, { recursive: true, force: true });
+  }
+});
+
+test("goal mode: a request pauses the run on the inbox with the round committed; the next run's prompt carries the outcome; pause tells the running worker and ends after its round", async () => {
+  const s = await goalSession();
+  let mgr: RunManager;
+  const r = await leadRun(s, async (api, _job, n) => {
+    if (n === 1) {
+      const req = await api("POST", "/requests", { summary: "Which language should the greeting default to?", actions: [{ kind: "question", text: "Language?", options: ["English", "Finnish"] }] });
+      expect(req.status).toBe(201);
+      expect(String(req.json.next)).toContain("notes/state.md");
+      return {};
+    }
+    mgr.pauseAfterTicket(s.id);
+    return { text: "Finnish it is; the greeting is in." };
+  });
+  mgr = r.mgr;
+  try {
+    const first = await (await r.mgr.start(s.id)).done;
+    expect(first).toMatchObject({ state: "paused", pauseReason: "requests", rounds: 1 });
+    expect(r.shell.commits).toEqual(["Goal round 1.1: work in progress"]);
+    let h = await s.hub.get(s.id);
+    expect(h.session.state).toBe("waiting");
+    const rid = h.inbox.requests[0]!.id;
+    await h.mutate((d) => ({ next: { inbox: { ...d.inbox, requests: d.inbox.requests.map((x) => (x.id === rid ? { ...x, state: "resolved" as const, answer: "Finnish", decidedAt: now(), actions: x.actions.map((a) => ({ ...a, state: "approved" as const, outcome: "Finnish" })) } : x)) } } }));
+
+    const second = await (await r.mgr.start(s.id)).done;
+    expect(second).toMatchObject({ state: "paused", pauseReason: "user", rounds: 1 });
+    expect(r.prompts[1]).toContain("Requests the user decided");
+    expect(r.prompts[1]).toContain("Answer: Finnish");
+    expect(r.sent).toEqual([expect.stringContaining("asked the run to pause")]);
+    expect(r.shell.commits).toEqual(["Goal round 1.1: work in progress", "Goal round 2.1: Finnish it is; the greeting is in."]);
+    h = await s.hub.get(s.id);
+    expect(h.session.state).toBe("paused");
+  } finally {
+    r.close();
     await fs.rm(s.root, { recursive: true, force: true });
   }
 });

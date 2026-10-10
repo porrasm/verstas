@@ -117,6 +117,12 @@ test("claim, submit and handoff are shown to a lead only", async () => {
   expect(lead).toContain("board_report");
 });
 
+test("the goal worker gets no board tools: budget, handoff, goal_done and the ways to reach the user; nobody else gets goal_done", async () => {
+  const { visibleTools } = await import("../../src/worker/mcp-server.js");
+  expect(visibleTools("goal").map((t) => t.name).sort()).toEqual(["budget", "goal_done", "halt", "handoff", "idea", "message", "request"]);
+  for (const role of ["lead", "implementer", "reviewer", "planner", "setup", "prompt", "terminal"]) expect(visibleTools(role).map((t) => t.name)).not.toContain("goal_done");
+});
+
 test("board_submit submits, waits for the verdict, and returns the harness's notes since the submit", async () => {
   test.setTimeout(20_000);
   let state = "in_progress";

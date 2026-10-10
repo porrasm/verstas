@@ -203,7 +203,7 @@ export const validateRepos = (tickets: readonly Pick<Ticket, "id" | "repos" | "s
  * that works the board, or the agent in your terminal (you are typing to
  * it, so it plans like the planner and holds no ticket).
  */
-export type AgentRole = "worker" | "planner" | "lead" | "terminal";
+export type AgentRole = "worker" | "planner" | "lead" | "terminal" | "goal";
 
 export const AGENT_TICKET_KINDS: readonly TicketKind[] = ["bug", "followup", "chore"];
 
@@ -343,7 +343,9 @@ export const importBoard = (
         continue;
       }
     }
-    const existing = inc.id ? tickets.find((t) => t.id === inc.id) : undefined;
+    // An empty or foreign id (a generator's "J-1") is no id: the ticket is appended with the next free T-n.
+    const incId = inc.id?.trim() || undefined;
+    const existing = incId ? tickets.find((t) => t.id === incId) : undefined;
     if (existing) {
       const canSetState = existing.state === "backlog" || existing.state === "ready";
       const next: Ticket = {
@@ -370,8 +372,8 @@ export const importBoard = (
       tickets = tickets.map((t) => (t.id === next.id ? next : t));
       updated.push(next.id);
     } else {
-      const id = inc.id && !tickets.some((t) => t.id === inc.id) && TICKET_ID_PATTERN.test(inc.id)
-        ? inc.id
+      const id = incId && !tickets.some((t) => t.id === incId) && TICKET_ID_PATTERN.test(incId)
+        ? incId
         : nextTicketId({ ...board, tickets }, assigned);
       assigned.push(id);
       const t: Ticket = {

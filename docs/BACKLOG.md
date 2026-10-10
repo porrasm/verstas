@@ -391,6 +391,23 @@ What to build, and the traps the first version fell into:
 - Docs: docs/BOARD.md Judging; the reviewer prompt; the setup prompt step
   3; tests in tests/unit/judging.spec.ts and run.spec.ts.
 
+## V-17 · `svc stop` orphans the service it started  (S)
+
+**Status: open, found 2026-10-09** in the floralin library-gen test session.
+
+`/usr/local/bin/svc` (in the box image, outside `/workspace`) `launch()` stores `$!` of the
+`( ... setsid bash -c ... & )` subshell, but the service runs in its own setsid group under a
+different pid. `svc stop` / `svc restart` therefore kill only svc's subshell and leave the real
+process running. Repro inside a box: `svc start t1 -- sleep 1000; svc stop t1` leaves `sleep 1000`
+running. Effect seen: floralin's `check.sh` restarts `floralin-api`, the old `dotnet run` server
+kept port 5170 with a stale build and the checks tested the wrong binary. The worker's workaround
+was a wrapper script (`/workspace/notes/svc/floralin-api.sh`) that exits with its parent.
+
+Fix: record the pid of the setsid'd process (write it from inside the `bash -c` with `echo $$ >
+pidfile` before `exec`, or use `setsid --fork` and read the child's pid), and have `stop` kill the
+process group (`kill -- -$pgid`) so children go too. Test: the repro above plus a restart that
+rebinds the same port. Docs: SANDBOX.md's service section.
+
 ## Loop manager, Phase 2 (needs design before it starts)
 
 From the Loop Manager design. Not started; each item wants a short design
@@ -445,6 +462,22 @@ project needs it, with its resource cost accepted then.
 ---
 
 ## Done
+
+- 2026-10-09 · Goal mode, a third value of "How tickets are worked" (the
+  board modes are unchanged). No board, no tickets, no reviewer: one
+  long-lived worker (role `goal`, the lead's caps and handoff) works
+  toward the session's goal text in rounds; the harness commits whatever
+  each round left in the repositories, continues the conversation or
+  starts a fresh worker from `notes/state.md`, and ends the run on
+  `goal_done` (the assessment is kept on the session), a pause (a running
+  Claude Code worker is told to finish its step), an open request, two
+  idle rounds, or the `goalRounds` cap. The goal is edited at any time
+  (`PUT /sessions/:id/goal`): the next round reads it, a live worker is
+  messaged, and the old text goes to the session's goal history, so a
+  session is reused goal after goal. Open: the first overnight runs; a
+  summary of each round for the page (now: the commit message and the
+  state note); whether a periodic reviewer pass over the goal branch is
+  worth its cost.
 
 - 2026-10-05 · Lead mode, behind a per-session setting ("How tickets are
   worked"; the default is unchanged). One long-lived lead claims and

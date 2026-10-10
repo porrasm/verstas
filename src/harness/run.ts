@@ -10,7 +10,7 @@ import type { SessionHandle, SessionHub } from "../sessions/hub.js";
 import type { AgentRunHooks, RunToken, RunTokens } from "../agent-api/agent-api.js";
 import { withAgentPacks, workspaceSizeMb } from "../sessions/sessions.js";
 import { allowlistFor } from "../network/packs.js";
-import { implementerPrompt, leadContinuePrompt, leadPrompt, mcpConfig, readLeadRules, notesIndexMd, plannerPrompt, reviewerPrompt, setupPrompt, sweepReviewerPrompt, systemMd, terminalMd, userPrompt, verstasMd, withContext, workspaceClaudeMd } from "./prompts.js";
+import { goalContinuePrompt, goalPrompt, implementerPrompt, leadContinuePrompt, leadPrompt, mcpConfig, readGoalRules, readLeadRules, notesIndexMd, plannerPrompt, reviewerPrompt, setupPrompt, sweepReviewerPrompt, systemMd, terminalMd, userPrompt, verstasMd, withContext, workspaceClaudeMd, type GoalPromptOptions } from "./prompts.js";
 import { driverInfo, missingCredentialError } from "./drivers.js";
 import { LiveTerminal, type TerminalRunner } from "./terminal.js";
 import type { Job } from "../worker/worker.js";
@@ -92,6 +92,8 @@ type LeadContext = {
   /** Judging and parking, one at a time, in the order the lead asked. */
   queue: Promise<void>;
   handoff?: string;
+  /** Goal mode: the worker's assessment that the goal is met (the goal_done hook). */
+  goalDone?: string;
   rateLimited: boolean;
   halted: boolean;
   /** Stops the current lead only (a handoff it does not follow), not the run. */
@@ -120,12 +122,16 @@ export type RunControl = {
 };
 
 const WORKSPACE_FILES = ".verstas";
+/** What a goal worker is told when you press pause while it runs. */
+const PAUSE_NUDGE = "The user asked the run to pause. Finish the step you are in (do not start another), make sure its tests pass, bring notes/state.md up to date, then reply with one line and stop. The harness commits what you leave.";
+/** Commits per repository in a goal worker's prompt. */
+const GOAL_LOG_LINES = 15;
 /** The setup worker's floor on the worker caps: it waits on installs and on every repository's check, so it needs time more than turns. */
 const SETUP_MIN_MINUTES = 60;
 const SETUP_MIN_TURNS = 120;
 
 /** What a worker of this role may do through the agent API (src/agent-api/agent-api.ts). */
-const tokenRole = (role: Job["role"]): "worker" | "planner" | "lead" => (role === "planner" ? "planner" : role === "lead" ? "lead" : "worker");
+const tokenRole = (role: Job["role"]): "worker" | "planner" | "lead" | "goal" => (role === "planner" ? "planner" : role === "lead" ? "lead" : role === "goal" ? "goal" : "worker");
 
 export class RunManager implements AgentRunHooks {
   private active = new Map<string, RunControl>();
@@ -154,7 +160,7 @@ export class RunManager implements AgentRunHooks {
     const w = this.workers.get(sessionId);
     if (!w) return { ok: false, error: "No worker is running right now (the run is between workers); try again in a moment" };
     if (w.driver !== "claude") return { ok: false, error: `The ${w.role} runs on ${w.driver}, which cannot take a message mid-run` };
-    const to = `${w.role}${w.ticket ? ` on ${w.ticket}` : ""}`;
+    const to = `${w.role === "goal" ? "goal worker" : w.role}${w.ticket ? ` on ${w.ticket}` : ""}`;
     if (!w.send(text.trim())) return { ok: false, error: `The ${to} just ended; the next worker will not see this` };
     await w.log({ kind: "status", t: (this.deps.now ?? now)(), ticket: w.ticket, text: `message from the user to the ${to}: ${text.trim().slice(0, 500)}` });
     return { ok: true, to };
@@ -193,6 +199,9 @@ export class RunManager implements AgentRunHooks {
     if (opts.prompt !== undefined && !opts.prompt.trim()) throw new Error("The prompt is empty");
     if (opts.plan !== undefined && !opts.plan.trim()) throw new Error("Say what to plan");
     if (!opts.init && !isInitialized(h.session)) throw new Error("This session is not initialized: press Initialize on the session page first.");
+    // A goal-mode work run has nothing to work toward without the text.
+    const worksTheGoal = h.session.mode === "goal" && ((opts.init && opts.start) || (!opts.init && opts.plan === undefined && !opts.brief && !opts.setup && opts.prompt === undefined && !opts.terminal));
+    if (worksTheGoal && !h.session.goal.trim()) throw new Error("Write the goal first: this session works toward a goal, and it is empty.");
     if (opts.terminal) {
       if (!this.deps.terminal) throw new Error("Agent terminals need the Docker sandbox");
       if (opts.terminal.driver === "cursor") throw new Error("Agent terminals run Claude Code or Codex");
@@ -254,6 +263,9 @@ export class RunManager implements AgentRunHooks {
     const c = this.active.get(sessionId);
     if (!c) return false;
     c.pauseAfterTicket();
+    // A goal worker has no board call to learn of the pause from (a lead hears it at its next claim), so it is told now, when it can take a message.
+    const w = this.workers.get(sessionId);
+    if (w?.role === "goal" && w.driver === "claude" && w.send(PAUSE_NUDGE)) void w.log({ kind: "status", t: (this.deps.now ?? now)(), text: "pause: the goal worker was asked to finish its step, update its note and stop" }).catch(() => undefined);
     return true;
   }
 
@@ -370,6 +382,15 @@ export class RunManager implements AgentRunHooks {
         }
       })
       .catch(() => undefined);
+  }
+
+  /** Goal mode: the worker says the goal is met. The round ends (after a grace period, by force) and the goal loop records the claim. */
+  goalDone(r: RunToken, note: string): void {
+    const c = this.leadFor(r);
+    if (!c) return;
+    c.goalDone = note;
+    const worker = c.leadAbort;
+    setTimeout(() => worker?.abort(), this.deps.handoffGraceMs ?? 120_000).unref();
   }
 
   /** End this lead; the loop starts a fresh one with the note. */
@@ -606,6 +627,10 @@ export class RunManager implements AgentRunHooks {
       const mode = h.session.mode;
       if (proceed && mode === "lead") {
         await this.leadLoop(h, run, ctl, log, saveRun, setSessionState);
+        proceed = false;
+      }
+      if (proceed && mode === "goal") {
+        await this.goalLoop(h, run, ctl, log, saveRun, setSessionState);
         proceed = false;
       }
       // With caps.resumeWorker, the implementers of this run share one agent conversation.
@@ -856,6 +881,208 @@ export class RunManager implements AgentRunHooks {
         if (sweepInFlight(h.board)) await h.mutate((docs) => ({ next: { board: releaseSweep(docs.board, "The lead's run ended during this sweep; the chores are open again and the changes stay in the working tree") } })).catch(() => undefined);
       }
     }
+  }
+
+  /**
+   * Goal mode: keep one worker working toward the session's goal. There is
+   * no board: the worker keeps its plan in notes/state.md, the harness
+   * commits whatever a round (one worker, start to exit) left in the
+   * repositories, then starts the next round, which continues the
+   * conversation, or starts a fresh worker from the note after a handoff or
+   * a cap. The run ends when the worker says the goal is met (goal_done,
+   * kept on the session), when you pause, when a request waits on you, when
+   * two rounds in a row change nothing, or at the session's round cap. The
+   * goal text is read again every round, so an edit lands in the next one.
+   */
+  private async goalLoop(
+    h: SessionHandle,
+    run: Run,
+    ctl: { isPause: () => boolean; isStop: () => boolean; signal: AbortSignal },
+    log: (e: VerstasEvent) => Promise<void>,
+    saveRun: () => Promise<void>,
+    setSessionState: (state: Session["state"]) => Promise<unknown>,
+  ): Promise<void> {
+    const d = this.deps;
+    const clock = d.now ?? now;
+    const status = (text: string) => log({ kind: "status", t: clock(), text });
+    const firstLine = (text: string) => (text.trim().split("\n").find((l) => l.trim()) ?? "").trim();
+    const ctx: LeadContext = { runId: run.id, h, run, log, signal: ctl.signal, isPause: ctl.isPause, queue: Promise.resolve(), rateLimited: false, halted: false };
+    this.leads.set(h.id, ctx);
+    let convoId: string | undefined;
+    /** A worker stopped at a cap before it could update its note: its last words go into the next fresh prompt. */
+    let lastWords: string | undefined;
+    let round = 0;
+    let idle = 0;
+    let lastCommitted: string[] = [];
+    /** The goal the previous round was given; a different text now means it was revised meanwhile. */
+    let lastGoal: string | undefined;
+    let lastDenialCheck = clock();
+    // A continuing conversation hears only outcomes decided since its last round; a fresh worker, which remembers nothing, gets the recent ones.
+    const answersSeen = new Set(h.inbox.requests.filter((r) => r.state !== "open").map((r) => r.id));
+    const newAnswers = (): string[] => {
+      const fresh = h.inbox.requests.filter((r) => r.state !== "open" && !answersSeen.has(r.id));
+      for (const r of fresh) answersSeen.add(r.id);
+      return fresh.map(requestOutcome);
+    };
+    const recentAnswers = (): string[] => h.inbox.requests.filter((r) => r.state !== "open" && !r.ticketId).slice(-5).map(requestOutcome);
+    try {
+      while (!ctl.isStop()) {
+        if (ctl.isPause()) {
+          run.state = "paused";
+          run.pauseReason = "user";
+          break;
+        }
+        const sizeMb = await workspaceSizeMb(h.paths).catch(() => 0);
+        if (sizeMb > h.session.limits.workspaceMb) {
+          run.state = "paused";
+          run.pauseReason = `workspace is ${sizeMb} MB, over the ${h.session.limits.workspaceMb} MB limit`;
+          break;
+        }
+        if (h.inbox.requests.some((r) => r.state === "open")) {
+          run.state = "paused";
+          run.pauseReason = "requests";
+          await status("the worker needs you; waiting for your answers in the inbox");
+          break;
+        }
+        if (round >= h.session.caps.goalRounds) {
+          run.state = "paused";
+          run.pauseReason = `${round} round${round === 1 ? "" : "s"} this run, the session's cap; look at the work, then start again`;
+          await status(run.pauseReason);
+          break;
+        }
+        const goal = h.session.goal.trim();
+        if (!goal) {
+          run.state = "paused";
+          run.pauseReason = "the goal is empty; write one and start again";
+          await status(run.pauseReason);
+          break;
+        }
+        if (d.healSandbox) {
+          const healed = await d.healSandbox(h.id).catch((e: Error) => [`heal failed: ${e.message}`]);
+          for (const line of healed) await status(line);
+        }
+
+        round++;
+        run.rounds = round;
+        const agent = agentFor(h.session, "goal");
+        const resume = Boolean(convoId) && agent.driver === "claude";
+        const agentSession = agent.driver === "claude" ? (resume ? { id: convoId!, resume: true } : { id: randomUUID(), resume: false }) : undefined;
+        const revised = lastGoal !== undefined && lastGoal !== goal;
+        const sinceLastRound = newAnswers();
+        const freshPrompt = async () => this.withNotes(h, goalPrompt(await this.goalPromptOptions(h, round, goal, lastWords, recentAnswers())));
+        const promptText = resume ? goalContinuePrompt({ round, committed: lastCommitted, goal: revised ? goal : undefined, goalChangedAt: h.session.goalSince, answers: sinceLastRound }) : await freshPrompt();
+        lastGoal = goal;
+        const workerAbort = new AbortController();
+        const onStop = () => workerAbort.abort();
+        ctl.signal.addEventListener("abort", onStop, { once: true });
+        if (ctl.signal.aborted) break;
+        ctx.leadAbort = workerAbort;
+        ctx.handoff = undefined;
+        ctx.goalDone = undefined;
+        const noteBefore = await this.readNote(h, "state.md", 16_000);
+        const requestsBefore = h.inbox.requests.length;
+        await status(resume ? `round ${round}: the worker continues its conversation` : round === 1 && !lastWords ? `round ${round}: a worker starts toward the goal` : `round ${round}: a fresh worker starts from the note`);
+        const w = await this.runJob(h, run, { role: "goal", agentSession, promptText, freshPrompt }, log, workerAbort.signal);
+        ctl.signal.removeEventListener("abort", onStop);
+        addCost(run, w.costUsd);
+
+        // Whatever the round left in the repositories is committed, finished or not: git is the record, and the next worker's starting point.
+        const summary = firstLine(w.text) || "work in progress";
+        const { committed, leaked } = await this.commitAll(h, `Goal round ${run.id}.${round}: ${summary.slice(0, 72)}`);
+        if (leaked.length) await log({ kind: "error", t: clock(), text: `An agent credential appears in the changes to ${leaked.join(", ")}; nothing was committed there. Remove it from the files.` });
+        lastCommitted = committed;
+        await saveRun();
+        await status(`round ${round} ended (${w.stopReason}): ${committed.length ? `committed ${committed.join(", ")}` : "nothing to commit"}`);
+        if (ctl.isStop()) break;
+
+        const halt = h.inbox.requests.find((r) => r.state === "open" && r.halt);
+        if (halt) {
+          run.state = "halted";
+          await status(`halted by the worker: ${halt.halt!.reason.slice(0, 300)}`);
+          break;
+        }
+        if (w.rateLimited) {
+          run.state = "paused";
+          run.pauseReason = "rate_limit";
+          const sleep = d.rateLimitSleepMs ?? 60 * 60_000;
+          run.resumeAt = new Date(Date.now() + sleep).toISOString();
+          await log({ kind: "run", t: clock(), state: "paused", reason: `rate limited; sleeping until ${run.resumeAt}` });
+          await saveRun();
+          await setSessionState("paused");
+          await waitOrAbort(sleep, ctl.signal);
+          if (ctl.isStop()) break;
+          run.state = "running";
+          run.pauseReason = undefined;
+          run.resumeAt = undefined;
+          await setSessionState("running");
+          if (w.agentSession && w.turns > 0) convoId = w.agentSession;
+          continue;
+        }
+        // Set by the goal_done hook while the worker ran (read through a cast: the assignment above narrowed the field).
+        const claimed = ctx.goalDone as string | undefined;
+        if (claimed) {
+          const note = claimed.trim().slice(0, 8000);
+          const at = clock();
+          await h.mutate((docs) => ({ next: { session: { ...docs.session, goalMet: { at, runId: run.id, note } } } }));
+          run.state = "finished";
+          run.pauseReason = `goal met: ${firstLine(note).slice(0, 200)}`;
+          await status(`the worker says the goal is met: ${note.slice(0, 300)}`);
+          break;
+        }
+
+        const noteAfter = await this.readNote(h, "state.md", 16_000);
+        const handedOff = ctx.handoff as string | undefined;
+        if (handedOff) {
+          await fs.writeFile(path.join(h.paths.notes, "state.md"), `# Handoff note\n\nWritten by the worker at ${clock()}, for the next worker.\n\n${handedOff.trim()}\n`);
+          lastWords = undefined;
+          convoId = undefined;
+          await status(`the worker handed off: ${firstLine(handedOff).slice(0, 160)}`);
+        } else if (w.stopReason === "time_cap" || w.stopReason === "turn_cap" || workerAbort.signal.aborted) {
+          lastWords = `(stopped at ${w.stopReason}) ${w.text.trim().slice(0, 3000) || "(no last message)"}`;
+          convoId = undefined;
+          await status(`the worker stopped at ${w.stopReason}; a fresh worker takes over from the note`);
+        } else {
+          lastWords = undefined;
+          convoId = w.agentSession && w.turns > 0 ? w.agentSession : undefined;
+        }
+
+        const moved = committed.length > 0 || Boolean(handedOff) || noteAfter !== noteBefore || h.inbox.requests.length !== requestsBefore;
+        idle = moved ? 0 : idle + 1;
+        if (idle >= 2) {
+          run.state = "paused";
+          run.pauseReason = "the worker ended twice without a commit or a change to notes/state.md";
+          await status(`${run.pauseReason}; its last message: ${w.text.trim().slice(0, 300)}`);
+          break;
+        }
+        if (d.proxyDenials) {
+          const denials = await d.proxyDenials(h.id, lastDenialCheck).catch(() => []);
+          lastDenialCheck = clock();
+          for (const den of denials) await log({ kind: "denied_network", t: clock(), host: den.host, port: den.port });
+        }
+      }
+    } finally {
+      this.leads.delete(h.id);
+    }
+  }
+
+  /** What a fresh goal worker is told besides the goal: the note it inherits, what changed since the note was written, and the recent commits. */
+  private async goalPromptOptions(h: SessionHandle, round: number, goal: string, lastWords: string | undefined, answers: readonly string[]): Promise<GoalPromptOptions> {
+    const sh = this.deps.shell(h.id);
+    const history: { repo: string; log: string }[] = [];
+    for (const repo of h.session.repos) {
+      const r = await sh.exec(["git", "log", "--oneline", "-n", String(GOAL_LOG_LINES)], { workdir: `/workspace/${repo.name}`, timeoutMs: 30_000 }).catch(() => null);
+      history.push({ repo: repo.name, log: r?.code === 0 ? r.stdout : "" });
+    }
+    const s = h.session;
+    const stateNote = await this.readNote(h, "state.md", 16_000);
+    // The note was written for an earlier goal when it predates the current text (or does not exist yet and an earlier goal ended).
+    const last = s.goals.at(-1);
+    let goalChange: GoalPromptOptions["goalChange"];
+    if (last && s.goalSince) {
+      const noteAt = await fs.stat(path.join(h.paths.notes, "state.md")).then((st) => st.mtime.toISOString()).catch(() => null);
+      if (!noteAt || noteAt < s.goalSince) goalChange = { kind: last.outcome === "met" ? "next" : "revised", at: last.until, previous: last.text, note: last.note };
+    }
+    return { goal, round, stateNote, lastWords, goalChange, metBefore: s.goalMet ? { at: s.goalMet.at, note: s.goalMet.note } : undefined, history, answers };
   }
 
   /**
@@ -1147,7 +1374,7 @@ export class RunManager implements AgentRunHooks {
     const dir = path.join(h.paths.workspace, rel);
     await fs.mkdir(dir, { recursive: true });
     await fs.writeFile(path.join(dir, "prompt.md"), job.promptText);
-    await fs.writeFile(path.join(dir, "system.md"), systemMd(job.role, job.role === "lead" ? await readLeadRules() : undefined, h.session.planning));
+    await fs.writeFile(path.join(dir, "system.md"), systemMd(job.role, job.role === "lead" ? await readLeadRules() : job.role === "goal" ? await readGoalRules() : undefined, h.session.planning));
     // The reviewer may be a different agent than the worker (session.agents), and a ticket may name its own; everything else about the job is the same.
     const agent = job.agent ?? agentFor(h.session, job.role);
     const spec: Job = {
@@ -1157,7 +1384,8 @@ export class RunManager implements AgentRunHooks {
       promptFile: `/workspace/${rel}/prompt.md`,
       systemPromptFile: `/workspace/${rel}/system.md`,
       caps:
-        job.role === "lead"
+        // The goal worker lives as long as a lead: it spans the whole goal, not one ticket.
+        job.role === "lead" || job.role === "goal"
           ? { minutes: h.session.caps.leadMinutes, turns: h.session.caps.leadTurns, budgetUsd: h.session.caps.budgetUsd }
           : job.role === "setup"
             ? // Setup installs toolchains and runs every repository's check once; most of its time is waiting on those, not model turns.
@@ -1358,6 +1586,11 @@ export class RunManager implements AgentRunHooks {
    * commits of one change across repositories can be found together.
    */
   private async commitInContainer(h: SessionHandle, message: string, ticketId?: string): Promise<string[]> {
+    return (await this.commitAll(h, message, ticketId)).leaked;
+  }
+
+  /** Every repository with staged changes is committed with the message, or none when a secret is in any of them: the committed names and the leaking ones. */
+  private async commitAll(h: SessionHandle, message: string, ticketId?: string): Promise<{ committed: string[]; leaked: string[] }> {
     const sh = this.deps.shell(h.id);
     const secrets = ((await this.deps.secrets?.().catch(() => [])) ?? []).filter((x) => x.length >= 16);
     const leaked: string[] = [];
@@ -1376,11 +1609,11 @@ export class RunManager implements AgentRunHooks {
     }
     if (leaked.length) {
       for (const name of staged) await sh.exec(["git", "reset", "-q"], { workdir: `/workspace/${name}`, timeoutMs: 60_000 });
-      return leaked;
+      return { committed: [], leaked };
     }
     const trailers = ticketId ? ["--trailer", `Verstas-Ticket: ${ticketId}`, ...(staged.length > 1 ? ["--trailer", `Verstas-Repos: ${staged.join(", ")}`] : [])] : [];
     for (const name of staged) await sh.exec(["git", "-c", "core.hooksPath=/dev/null", "commit", "-q", "--no-verify", ...trailers, "-m", message], { workdir: `/workspace/${name}`, timeoutMs: 60_000 });
-    return leaked;
+    return { committed: staged, leaked };
   }
 }
 

@@ -27,6 +27,7 @@ import {
   ticketImportSchema,
   ticketKindSchema,
   ticketSizeSchema,
+  reviseGoal,
   ticketStateSchema,
   type AgentRequest,
   type RequestAction,
@@ -946,6 +947,34 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
     }),
   );
 
+  /**
+   * The goal (goal mode's brief; the Plan tickets suggestion elsewhere).
+   * Saved at any time: the next round reads it fresh, the goal it replaces
+   * goes to the session's history, and a goal worker running now is told
+   * in its conversation so a small correction steers it instead of
+   * stopping it.
+   */
+  api.put(
+    "/sessions/:id/goal",
+    wrap(async (req, res) => {
+      const { goal } = z.object({ goal: z.string().max(20_000) }).parse(req.body ?? {});
+      const id = param(req, "id");
+      const h = await d.hub.get(id);
+      const before = h.session.goal.trim();
+      await h.mutate((docs) => {
+        const next = reviseGoal(docs.session, goal, now());
+        return next === docs.session ? {} : { next: { session: next } };
+      });
+      const changed = h.session.goal.trim() !== before;
+      let told: string | undefined;
+      if (changed && h.session.mode === "goal" && d.runs.status(id)) {
+        const r = await d.runs.message(id, `The goal was revised. It now reads:\n\n${h.session.goal.trim()}\n\nReconcile notes/state.md with it before you continue; earlier work may have aimed at the old text.`);
+        told = r.ok ? r.to : undefined;
+      }
+      res.json({ ok: true, changed, told });
+    }),
+  );
+
   /** A message to the worker running now (src/harness/run.ts, `message`): it lands in the agent's conversation, not on the board. */
   api.post(
     "/sessions/:id/run/message",
@@ -1057,6 +1086,18 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
       const text = await fs.readFile(file, "utf8").catch(() => "");
       const st = text ? await fs.stat(file) : null;
       res.json({ text, updatedAt: st?.mtime.toISOString() ?? null, words: text ? text.split(/\s+/).filter(Boolean).length : 0 });
+    }),
+  );
+
+  /** The goal worker's plan and progress note (notes/state.md; a lead's handoff note in lead mode), with its age. */
+  api.get(
+    "/sessions/:id/state-note",
+    wrap(async (req, res) => {
+      const h = await d.hub.get(param(req, "id"));
+      const file = path.join(h.paths.notes, "state.md");
+      const text = await fs.readFile(file, "utf8").catch(() => "");
+      const st = text ? await fs.stat(file) : null;
+      res.json({ text, updatedAt: st?.mtime.toISOString() ?? null });
     }),
   );
 

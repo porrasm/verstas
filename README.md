@@ -140,6 +140,29 @@ Then, in the web app:
    a `budget` tool showing its turns, minutes and context size. To change
    the lead's rules without a rebuild, write them to
    `~/.verstas/prompts/lead.md`; the next lead reads it.
+   **A worker works toward a goal** (goal mode): no board, no tickets, no
+   reviewer. You write a goal on the session page, one line or a whole
+   specification ("a Mario Party clone running in the browser"), and one
+   long-lived worker works toward it in rounds. A round is one worker from
+   start to exit; after every round Verstas commits whatever changed in
+   each repository, finished or not, so git is the record and the review.
+   The worker keeps its plan and progress in `notes/state.md` (shown on
+   the page) and the next round continues its conversation, or starts a
+   fresh worker from that note after a `handoff` or a cap, as a lead does.
+   The run ends when the worker calls `goal_done` with its assessment
+   (shown on the page; the session reads "goal met, says the worker"),
+   when you press Pause (a running Claude Code worker is told to finish
+   its step, update its note and stop), when the worker files a request,
+   when two rounds in a row change nothing, or at the session's round cap
+   (`goalRounds`, default 25). Edit the goal at any time: the next round
+   reads it, a worker running now is told in its conversation, and the
+   goal it replaces goes to the session's goal history with how it ended.
+   Starting again after a met goal means "not yet": the worker is told
+   what it claimed and looks for what falls short. A session in goal mode
+   is a workshop you keep: set the next goal and start, on the same box
+   and clones; when the real repository moved meanwhile, Restore from repo
+   brings a fresh clone first. The worker's rules can be replaced with
+   `~/.verstas/prompts/goal.md`. The board modes are unchanged by it.
    **Chores** (both modes keep the list, a lead works it): small fixes
    that are not worth a ticket. Reviewers and workers file them instead of
    follow-up tickets; a lead sweeps a batch when the board runs dry, when

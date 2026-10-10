@@ -7,7 +7,7 @@
  */
 import type { VerstasEvent } from "../core/types.js";
 
-export type StreamContext = { ticket?: string; role?: "implementer" | "reviewer" | "planner" | "setup" | "prompt" | "lead"; now?: () => string; maxLen?: number; /** Shown in the start line by drivers whose stream does not name the model. */ model?: string };
+export type StreamContext = { ticket?: string; role?: "implementer" | "reviewer" | "planner" | "setup" | "prompt" | "lead" | "goal"; now?: () => string; maxLen?: number; /** Shown in the start line by drivers whose stream does not name the model. */ model?: string };
 
 export type Translated = {
   events: VerstasEvent[];

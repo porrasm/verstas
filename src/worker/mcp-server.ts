@@ -176,6 +176,14 @@ export const TOOLS: Tool[] = [
     call: (a) => api("POST", `/handoff`, { note: a.note }),
   },
   {
+    name: "goal_done",
+    roles: ["goal"],
+    description:
+      "Say that the goal is met, with your assessment: what exists now, how you verified each part of the goal (commands run, what they showed), and what you knowingly left out. The run ends after this round and the user reads the assessment; if they start the run again without changing the goal, that means not yet. Call it only when every part of the goal holds and the checks pass; being out of ideas is a handoff, not a goal_done. Then stop.",
+    inputSchema: obj({ note: str("Your assessment", 8000) }, ["note"]),
+    call: (a) => api("POST", `/goal_done`, { note: a.note }),
+  },
+  {
     name: "board_list_tickets",
     description: "List the board's tickets (id, title, state, kind, size, priority, deps, expected repos, and `agent` when the ticket runs on its own agent instead of the session's worker). Optionally filter by state.",
     inputSchema: obj({ state: { type: "string", enum: ["backlog", "ready", "in_progress", "review", "waiting", "blocked", "done"] } }, []),
@@ -412,9 +420,14 @@ const forPlanning = (t: Tool, role: string): Tool => {
   };
 };
 
-/** The tools for this worker's role: a lead also drives the board; the agent in your terminal plans and asks you. */
+/** The goal worker has no board: it keeps its plan in notes/state.md, so it gets only what reaches the user and the harness. */
+const FOR_GOAL = new Set(["budget", "handoff", "goal_done", "request", "halt", "message", "idea"]);
+
+/** The tools for this worker's role: a lead also drives the board; the agent in your terminal plans and asks you; the goal worker has no board at all. */
 export const visibleTools = (role = process.env.VERSTAS_ROLE ?? ""): Tool[] =>
-  TOOLS.filter((t) => (!t.leadOnly || role === "lead") && (!t.terminalOnly || role === "terminal") && (!t.roles || t.roles.includes(role)) && !(role === "terminal" && NOT_FOR_TERMINAL.has(t.name))).map((t) => (t.name === "board_create_ticket" && (role === "planner" || role === "terminal") ? forPlanning(t, role) : t));
+  role === "goal"
+    ? TOOLS.filter((t) => FOR_GOAL.has(t.name))
+    : TOOLS.filter((t) => (!t.leadOnly || role === "lead") && (!t.terminalOnly || role === "terminal") && (!t.roles || t.roles.includes(role)) && !(role === "terminal" && NOT_FOR_TERMINAL.has(t.name))).map((t) => (t.name === "board_create_ticket" && (role === "planner" || role === "terminal") ? forPlanning(t, role) : t));
 
 export const handle = async (msg: Rpc): Promise<void> => {
   const { id, method, params = {} } = msg;

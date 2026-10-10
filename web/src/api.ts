@@ -43,7 +43,7 @@ export const normalizeReviewMode = (m: ReviewMode): "full" | "none" => (m === "f
 
 /** How a ticket's time was spent, in seconds. Mirrors ticketTiming in src/core/types.ts. */
 export type TicketTiming = { working: number; judging: number; waitingOnYou: number; requeued: number; agent: number; total: number };
-export const ticketTiming = (t: Ticket, mode: "loop" | "lead", now = Date.now()): TicketTiming | null => {
+export const ticketTiming = (t: Ticket, mode: "loop" | "lead" | "goal", now = Date.now()): TicketTiming | null => {
   if (!t.firstClaimAt || !t.stateSince) return null;
   const since = new Date(t.stateSince).getTime();
   const timeIn: Partial<Record<string, number>> = { ...t.timeIn };
@@ -85,8 +85,14 @@ export type Inbox = {
 export type Session = {
   id: string;
   name: string;
-  /** Legacy, or a draft's goal: the first suggestion in the Plan tickets box. Not part of the setup. */
+  /** Goal mode: what the worker works toward, read fresh every round. Elsewhere a draft's goal, the first suggestion in the Plan tickets box. */
   goal: string;
+  /** When the current goal text was set; absent when never revised. */
+  goalSince?: string;
+  /** The goal worker's last claim that the goal is met; cleared when the goal changes. */
+  goalMet?: { at: string; runId: number; note: string };
+  /** Earlier goals, oldest first. */
+  goals?: GoalRecord[];
   createdAt: string;
   /** When the environment came to exist; null while the session is a plan. */
   initializedAt: string | null;
@@ -98,9 +104,9 @@ export type Session = {
   attachments: { name: string; dir: string; bytes: number; skipped: string[]; description?: string }[];
   allowlist: string[];
   packs: string[];
-  caps: { workerMinutes: number; workerTurns: number; runTickets: number; budgetUsd: number; ticketAttempts: number; reviewer: boolean; resumeWorker?: boolean; leadMinutes?: number; leadTurns?: number; sweepMaxLines?: number; sweepMaxFiles?: number; choreApproval?: boolean; choreSweepAt?: number };
-  /** loop: a fresh implementer per ticket. lead: one long-lived agent works the board. */
-  mode?: "loop" | "lead";
+  caps: { workerMinutes: number; workerTurns: number; runTickets: number; budgetUsd: number; ticketAttempts: number; reviewer: boolean; resumeWorker?: boolean; leadMinutes?: number; leadTurns?: number; sweepMaxLines?: number; sweepMaxFiles?: number; choreApproval?: boolean; choreSweepAt?: number; goalRounds?: number };
+  /** loop: a fresh implementer per ticket. lead: one long-lived agent works the board. goal: no board; one long-lived worker works toward the goal text. */
+  mode?: "loop" | "lead" | "goal";
   /** The ticket size planning agents aim for; absent, they choose. */
   planning?: { ticketSize?: "S" | "M" | "L"; guidance?: string };
   limits: { memory: string; cpus: number; pids: number; workspaceMb: number };
@@ -127,7 +133,9 @@ export type Readiness = { verdict: "ready" | "needs"; at: string; summary: strin
 export const isInitialized = (s: { initializedAt: string | null }): boolean => Boolean(s.initializedAt);
 export type NetworkPack = { name: string; title: string; hosts: string[]; /** Set on the packs that follow an agent choice instead of being ticked. */ agent?: DriverName };
 export type SetupScript = { name: string; description: string; hosts: string[]; note: string; script: string; runAs: "root" | "agent"; env: string };
-export type Run = { id: number; state: string; startedAt: string; endedAt?: string; currentTicket?: string; ticketsDone: number; cost: { usd?: number }; pauseReason?: string; resumeAt?: string; /** Set on an agent terminal's run. */ terminal?: { driver: DriverName } };
+export type Run = { id: number; state: string; startedAt: string; endedAt?: string; currentTicket?: string; ticketsDone: number; /** Goal mode: worker lives this run has started. */ rounds?: number; cost: { usd?: number }; pauseReason?: string; resumeAt?: string; /** Set on an agent terminal's run. */ terminal?: { driver: DriverName } };
+/** One earlier goal of a goal-mode session. Mirrors goalRecordSchema in src/core/types.ts. */
+export type GoalRecord = { text: string; from: string; until: string; outcome: "met" | "revised" | "abandoned"; note?: string };
 export type VEvent = { kind: string; t: string; ticket?: string; [k: string]: unknown };
 export type Totals = { usd: number; runs: number; lastActivityAt: string };
 export type SessionSummary = { session: Session; counts: Record<string, number>; run?: Run; openRequests: number; ideas: number; totals?: Totals; /** The session container, as Docker sees it. */ sandbox?: "running" | "stopped" | "absent"; error?: string };

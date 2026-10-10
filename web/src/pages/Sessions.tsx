@@ -12,7 +12,7 @@ const stateOf = (s: SessionSummary): { label: string; tone: string; dot: string 
   if (!s.session.initializedAt) return s.session.readiness?.verdict === "needs" ? { label: "initialization needs you", tone: "warn", dot: "bad" } : { label: "not initialized", tone: "quiet", dot: "" };
   switch (s.session.state) {
     case "finished":
-      return { label: "finished", tone: "good", dot: "good" };
+      return s.session.mode === "goal" ? { label: s.session.goalMet ? "goal met" : "finished", tone: "good", dot: "good" } : { label: "finished", tone: "good", dot: "good" };
     case "created":
       return { label: "not started", tone: "quiet", dot: "" };
     case "halted":
@@ -180,7 +180,12 @@ export const SessionsPage = ({ status }: { status: Status | null }) => {
                       {s.error ? <div className="err small">{s.error}</div> : null}
                     </td>
                     <td className="prog">
-                      {total === 0 ? (
+                      {s.session.mode === "goal" ? (
+                        <div className="small" title={s.session.goal}>
+                          <span className="muted">goal:</span> {s.session.goal.trim() ? s.session.goal.trim().split("\n")[0]!.slice(0, 90) : <span className="muted">not written yet</span>}
+                          {s.run?.rounds ? <div className="muted">{s.run.rounds} round{s.run.rounds === 1 ? "" : "s"} in run {s.run.id}</div> : null}
+                        </div>
+                      ) : total === 0 ? (
                         <span className="muted small">empty board</span>
                       ) : (
                         <>

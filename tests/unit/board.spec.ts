@@ -40,6 +40,21 @@ test("import assigns ids, defaults and validates against the schema", () => {
   expect(a.priority).toBe(100);
 });
 
+test("import gives a fresh id to a ticket with an empty or foreign id, so generated boards paste into an existing session", () => {
+  const first = importBoard(emptyBoard(), { tickets: [{ title: "Existing", state: "ready" }] });
+  // A generator's own ids (J-1) and empty ids are not Verstas ids: both get the next free T-n and nothing is updated.
+  const r = importBoard(first.board, { tickets: [{ id: "J-1", title: "Author rowan" }, { id: "", title: "Author spruce" }, { id: "  ", title: "Author bracken" }] });
+  expect(r.created).toEqual(["T-2", "T-3", "T-4"]);
+  expect(r.updated).toEqual([]);
+  expect(r.board.tickets.map((t) => t.id)).toEqual(["T-1", "T-2", "T-3", "T-4"]);
+  // A known T-n still updates in place.
+  const again = importBoard(r.board, { tickets: [{ id: "T-2", title: "Author rowan (revised)" }] });
+  expect(again.updated).toEqual(["T-2"]);
+  expect(again.board.tickets.find((t) => t.id === "T-2")!.title).toBe("Author rowan (revised)");
+  // The paste path accepts the same board text.
+  expect(() => parseBoardPaste(JSON.stringify({ verstas: 1, tickets: [{ id: "J-1", title: "x" }] }))).not.toThrow();
+});
+
 test("import merges by id and only changes state when the ticket is not in flight", () => {
   let b = seeded();
   b = transition(b, "T-1", "in_progress");

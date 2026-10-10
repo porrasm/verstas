@@ -50,8 +50,10 @@ export type RunToken = {
 export type AgentRunHooks = {
   /** The lead submitted the ticket it holds; the run judges it (reviewer, commit, the move out of review). */
   submitted(run: RunToken, ticketId: string): void;
-  /** The lead asked to end its worker and hand over to a fresh one with this note. */
+  /** The lead (or the goal worker) asked to end its worker and hand over to a fresh one with this note. */
   handoff(run: RunToken, note: string): void;
+  /** The goal worker says the goal is met, with its assessment; the run ends after this round and the claim is kept on the session. */
+  goalDone?(run: RunToken, note: string): void;
   /** Why the lead may not claim now (the run is pausing, the ticket cap is reached), or undefined. */
   claimRefusal?(run: RunToken): string | undefined;
   /** The lead filed a request or a halt on the ticket it holds; the run parks the ticket so the lead can move on. */
@@ -356,7 +358,9 @@ export const createAgentApi = (hub: SessionHub, tokens: RunTokens, hooks?: Agent
         next:
           req.run.role === "lead"
             ? "The ticket parks until the user has decided every action; claiming it again later gives you the outcomes. Leave it and claim another ticket."
-            : "Stop working on this ticket now and reply with a short status. The ticket resumes when the user has decided every action; the next worker gets the outcomes.",
+            : req.run.role === "goal"
+              ? "Write where you stand into notes/state.md, then stop and reply with a short status. The run pauses until the user has decided every action; the next round starts with the outcomes in the inbox."
+              : "Stop working on this ticket now and reply with a short status. The ticket resumes when the user has decided every action; the next worker gets the outcomes.",
       });
       if (req.run.role === "lead" && req.run.currentTicket) hooks?.requested?.(req.run, req.run.currentTicket);
     }),
@@ -617,10 +621,33 @@ export const createAgentApi = (hub: SessionHub, tokens: RunTokens, hooks?: Agent
   r.post(
     "/handoff",
     wrap(async (req, res) => {
-      if (!leadOnly(req, res)) return;
+      // The goal worker hands off like a lead; it is the other long-lived role.
+      if (req.run.role !== "goal" && !leadOnly(req, res)) return;
+      if (req.run.role === "goal" && !hooks) {
+        res.status(409).json({ error: "No run is attached to this API; nothing can hand over" });
+        return;
+      }
       const { note } = z.object({ note: z.string().min(1).max(20_000) }).parse(req.body);
       hooks!.handoff(req.run, note);
-      res.json({ ok: true, next: "Stop now: end your turn with one line. A fresh lead starts with your note and the board." });
+      res.json({ ok: true, next: req.run.role === "goal" ? "Stop now: end your turn with one line. A fresh worker starts with your note (now notes/state.md), the notes directory and the goal." : "Stop now: end your turn with one line. A fresh lead starts with your note and the board." });
+    }),
+  );
+
+  /** Goal mode only: the worker's claim that the goal is met. Recorded by the run; nothing on the board changes (there is none). */
+  r.post(
+    "/goal_done",
+    wrap(async (req, res) => {
+      if (req.run.role !== "goal") {
+        res.status(403).json({ error: "Only the goal worker of a goal-mode session says the goal is met" });
+        return;
+      }
+      if (!hooks?.goalDone) {
+        res.status(409).json({ error: "No run is attached to this API; nothing can record the goal as met" });
+        return;
+      }
+      const { note } = z.object({ note: z.string().min(1).max(8000) }).parse(req.body);
+      hooks.goalDone(req.run, note);
+      res.json({ ok: true, next: "Stop now: end your turn with one line. The run ends after this round and the user reads your assessment." });
     }),
   );
 

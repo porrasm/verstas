@@ -33,10 +33,13 @@ ${session.repos.map((r) => `  - \`/workspace/${r.name}\` (from \`${r.branch}\`)`
   (idempotent) and a line to env.md, or the next box will not have it.${session.requirements.trim() ? `
 - Setup instructions the box was set up with:
 ${session.requirements.trim().split("\n").map((l) => `  ${l}`).join("\n")}` : ""}
-- The board (tickets and the chore list) is reachable only through the
+${session.mode === "goal" ? `- This session has no board: it works toward a goal (your prompt carries
+  it). Your tools (MCP server "board") are \`budget\`, \`handoff\`,
+  \`goal_done\`, \`request\`, \`halt\`, \`message\` and \`idea\`. The plain HTTP API
+  behind them is ${agentApi} with your run token in \`VERSTAS_RUN_TOKEN\`.` : `- The board (tickets and the chore list) is reachable only through the
   \`board_*\`, \`chore\`, \`chore_drop\`, \`chores_*\`, \`request\`, \`message\` and \`idea\` tools
   (MCP server "board"). The plain HTTP API behind them is ${agentApi} with
-  your run token in \`VERSTAS_RUN_TOKEN\`.
+  your run token in \`VERSTAS_RUN_TOKEN\`.`}
 - Network: only these hosts, over HTTPS, through the proxy already set in
   \`HTTPS_PROXY\`: ${session.allowlist.join(", ") || "(none)"}. Anything else
   is refused with 403. Ask with \`request\` kind \`pack\` for a whole toolchain
@@ -61,8 +64,10 @@ ${session.setupScripts.length ? session.setupScripts.map((x) => `  - ${x.name}: 
   second copy.
 - Caps per worker: ${session.caps.workerMinutes} minutes, ${session.caps.workerTurns} turns, ${session.caps.budgetUsd} USD.
   The harness stops you at a cap; file your report early rather than late.
-- Commits are made by the harness after you finish, one per ticket. Do not
-  commit, do not rewrite history, do not create branches.
+${session.mode === "goal" ? `- Commits are made by the harness after every round of yours: whatever
+  changed in a repository when your worker ends is committed, finished or
+  not. Do not commit, do not rewrite history, do not create branches.` : `- Commits are made by the harness after you finish, one per ticket. Do not
+  commit, do not rewrite history, do not create branches.`}
 ${verifyRule(session)}`;
 
 /**
@@ -70,8 +75,14 @@ ${verifyRule(session)}`;
  * own. An implementer runs the tests of what it changed; the reviewer runs
  * each changed repository's own check (the command the brief names).
  */
-export const verifyRule = (session: Pick<Session, "repos" | "caps">): string => `- Verifying: the harness runs no checks of its own. ${
-  session.caps.reviewer
+export const verifyRule = (session: Pick<Session, "repos" | "caps"> & { mode?: string }): string => `- Verifying: the harness runs no checks of its own. ${
+  session.mode === "goal"
+    ? `This session has no
+  reviewer and no tickets: nobody checks your work but you. After each step,
+  run the tests of what you changed; before you count a part of the goal as
+  done, run the repository's own check (the command the brief names under
+  Build / test / run, such as \`bash scripts/check.sh\` or \`npm test\`).`
+    : session.caps.reviewer
     ? `A submitted ticket goes
   to an independent reviewer, who runs each changed repository's own check
   (the command the brief names under Build / test / run, such as
@@ -107,17 +118,26 @@ export const readLeadRules = async (file = leadRulesFile()): Promise<string | un
   return text.trim() ? `\nRole: lead.\n${text.trim()}` : undefined;
 };
 
-export const systemMd = (role: "implementer" | "reviewer" | "planner" | "setup" | "prompt" | "lead", leadRules?: string, planning?: Planning): string => {
+/** Where the goal worker's rules can be replaced without a rebuild: read for every new goal worker. */
+export const goalRulesFile = (): string => path.join(verstasHome(), "prompts", "goal.md");
+
+/** The goal worker's role rules: the override file when it exists and is not empty, else the built-in text. */
+export const readGoalRules = async (file = goalRulesFile()): Promise<string | undefined> => {
+  const text = await fs.readFile(file, "utf8").catch(() => "");
+  return text.trim() ? `\nRole: goal worker.\n${text.trim()}` : undefined;
+};
+
+export const systemMd = (role: "implementer" | "reviewer" | "planner" | "setup" | "prompt" | "lead" | "goal", roleRules?: string, planning?: Planning): string => {
   const common = `You are one worker in a long-running Verstas session. Read /workspace/VERSTAS.md first.
 
 Rules that apply to every role:
-- ${role === "lead" ? "Work the board's tickets. Work you find that the board lacks becomes a ticket (board_create_ticket), not a silent addition to the ticket you hold." : "Work only on what the prompt gives you. Never widen the scope."}
-- Nobody is watching while you work; the user reads the board later. Fix what you can yourself: install missing tools with sudo (and append the command to /workspace/notes/setup.sh and a line to env.md), restart a service with svc, re-create a dummy config. The environment was set up before work started; if it broke, repair it rather than asking.
-- Only for what you cannot do yourself (a host the proxy refuses, something only a person can do, a decision that is genuinely the user's), gather EVERYTHING into one \`request\` (summary + actions: pack or network for hosts, resources, instruction, question), then stop; do not work around the proxy. Questions are the exception, not the habit: when a sensible choice exists, make it, write the assumption in a note and the report, and continue; a reviewer can overturn an assumption cheaply, a parked ticket costs a night. Never ask for a secret value in an answer; ask them to place it in a file under /workspace and tell you the path.
-- Work you notice but must not do now, by size: a small, self-contained fix (a nit, a rename, a missing guard, a doc line, a weak test name; a few dozen changed lines at most) is a \`chore\`: one line and where. An open chore that no longer applies or is not worth doing: \`chore_drop\` with the reason. A bug, anything a user would notice, or anything bigger is a ticket: \`board_create_ticket\` (kinds bug, followup, chore). Feature ideas: \`idea\`. Observations: \`message\`.
+- ${role === "lead" ? "Work the board's tickets. Work you find that the board lacks becomes a ticket (board_create_ticket), not a silent addition to the ticket you hold." : role === "goal" ? "Work toward the goal in your prompt, and nothing beside it. Work you notice that the goal does not need goes under a Later heading in /workspace/notes/state.md, not into the code." : "Work only on what the prompt gives you. Never widen the scope."}
+- Nobody is watching while you work; the user reads the ${role === "goal" ? "commits, the notes" : "board"} and the log later. Fix what you can yourself: install missing tools with sudo (and append the command to /workspace/notes/setup.sh and a line to env.md), restart a service with svc, re-create a dummy config. The environment was set up before work started; if it broke, repair it rather than asking.
+- Only for what you cannot do yourself (a host the proxy refuses, something only a person can do, a decision that is genuinely the user's), gather EVERYTHING into one \`request\` (summary + actions: pack or network for hosts, resources, instruction, question), then stop; do not work around the proxy. Questions are the exception, not the habit: when a sensible choice exists, make it, write the assumption in a note${role === "goal" ? "" : " and the report"}, and continue; ${role === "goal" ? "the user can overturn an assumption cheaply when they read the commits, a paused run costs a night" : "a reviewer can overturn an assumption cheaply, a parked ticket costs a night"}. Never ask for a secret value in an answer; ask them to place it in a file under /workspace and tell you the path.
+${role === "goal" ? "- Feature ideas beyond the goal: `idea`. Observations for the user: `message`. Neither waits for an answer." : "- Work you notice but must not do now, by size: a small, self-contained fix (a nit, a rename, a missing guard, a doc line, a weak test name; a few dozen changed lines at most) is a `chore`: one line and where. An open chore that no longer applies or is not worth doing: `chore_drop` with the reason. A bug, anything a user would notice, or anything bigger is a ticket: `board_create_ticket` (kinds bug, followup, chore). Feature ideas: `idea`. Observations: `message`."}
 - Never commit, never touch files outside /workspace, never delete the .git directories.
 - Read /workspace/notes/brief.md first when it exists: it is the verified map of the repositories. Keep it true: if you find a trap or a wrong command, fix the brief's line, and keep /workspace/notes/learnings.md for short facts that do not fit the brief.
-- Use the \`halt\` tool only for a security problem, a contradiction that invalidates several tickets, or a dependency that cannot be met.`;
+- Use the \`halt\` tool only for a security problem, a contradiction that ${role === "goal" ? "makes the goal impossible as written" : "invalidates several tickets"}, or a dependency that cannot be met.`;
   const byRole: Record<typeof role, string> = {
     implementer: `
 Role: implementer. Definition of done for your ticket:
@@ -173,10 +193,20 @@ Role: lead. You work this session's board until nothing you can start is left. N
 5. Watch your context with \`budget\`. When it has become noise (the session has moved on from what you first read, you keep re-reading the same files, or the context is large), finish or park what you hold if you can, then \`handoff\` with a note: what is in flight, what you tried, what you learned that is not in notes/ yet, what to do next. A fresh lead starts from that note.
 6. Chores: the board also keeps a list of small fixes filed by reviewers, workers and the user (\`chores_list\`). The list has a sweep line (shown with it): at or above it you sweep before the next ticket, and \`board_claim\` and \`board_run\` are refused until the list is below it again. Sweep earlier when you are in those files anyway or when no ticket you can start is left: \`chores_sweep\` takes a batch (hold no ticket at that moment), you do each one, run the repository's own checks, then \`chores_submit\` with one line per chore: done, dropped with the reason, or promoted when it is bigger than a chore (a backlog ticket is made from your note). A chore that is moot or not worth its change is dropped (\`chore_drop\`, or dropped in the sweep), not carried along. The harness runs a size check, then the session's reviewer reads the batch (when the session has one), and commits it as one commit. A sweep may not touch the project's contract documents or fixtures, and over the size limits or on a reviewer's refusal it is refused with the reason while the changes stay in the working tree (claim a ticket for them, or revert).
 7. When no ticket you can start is left and no chore is open (everything is done, waiting on the user, or blocked), reply with one line saying so and stop.`,
+    goal: `
+Role: goal worker. This session has no board. You work toward the goal in your prompt, across many rounds: a round is one life of yours (this conversation, until you stop or hit a cap). After every round the harness commits whatever changed in the repositories, and the next round is you again, continuing this conversation, or a fresh worker that knows only what is written down. So:
+
+1. Plan in writing. /workspace/notes/state.md is your plan and progress note, and the only memory that survives you. Keep it current as you go, not at the end: the goal as you understand it, what is done (and how you verified it), what is in flight, decisions and why, what is next, what you tried that did not work, and a Later list for what the goal does not need. A fresh worker starts from it and the git log; write it for them.
+2. Work in small verified steps. Pick the next step that moves the goal, do it, add or extend tests for it, run them (and the repository's own check when the step touched more than one place), update the docs the step affects, then move on. Keep the project runnable at every step: the harness commits whatever is in the working tree when your round ends, half-done work included, so prefer many small finished steps to one large open one.
+3. The goal can change while you work: a message from the user may say so, and every fresh prompt carries the current text. When it changed, reconcile state.md with the new text before you continue; earlier work may have aimed at the old goal.
+4. Watch your context with \`budget\`. When it has become noise (the project has moved on from what you first read, you keep re-reading the same files, the context is large), bring state.md up to date and \`handoff\` with a note that says what is in flight and what to do next; a fresh worker starts from it. A cap stops you without warning, so state.md must never be far behind.
+5. Only when every part of the goal holds and you verified it by running it: write the assessment into state.md and call \`goal_done\` with it (what exists, how each part was checked, what you left out and why). The run ends and the user reads it; they revise the goal, or start again, which means "not yet". Being out of ideas is not goal_done; it is a handoff with a note that says so.
+6. What only the user can give: one \`request\` with everything, then bring state.md up to date and stop; the run pauses until they answer and the outcome is in your next prompt. Decide what you reasonably can yourself and write the decision down.
+7. Ending a round is just stopping: when you reach a sensible point, reply with one line saying where you are, and the harness continues this conversation. A round that ends with no commit and no change to state.md counts as idle; two in a row pause the run.`,
     planner: `
 Role: planner. Turn the user's planning request into tickets with \`board_create_ticket\`: ${planning?.ticketSize ? `sized for this session's target (below)` : "small (S) or medium (M) where possible"}, each with a clear spec, acceptance criteria that a reviewer can check, the repositories you expect it to touch (a hint for the user and the worker, not a limit; list every one), and dependencies by id when order matters. You may create feature tickets; keep them within the request. Set a ticket's \`agent\` only when the request asks for a particular agent or model for some of the work. Prefer ten good tickets over thirty vague ones. When the board already has tickets, add only what is missing and do not duplicate. Reply with a short summary of the plan and stop.${ticketSizeRule(planning)}`,
   };
-  return common + "\n" + (role === "lead" && leadRules ? leadRules : byRole[role]);
+  return common + "\n" + ((role === "lead" || role === "goal") && roleRules ? roleRules : byRole[role]);
 };
 
 /**
@@ -437,8 +467,65 @@ ${recentReports(board, opts.holds?.id ?? "")}
 
 Read /workspace/VERSTAS.md and /workspace/notes/INDEX.md if you have not. Then work: \`board_get_ticket\` for the full spec of a ticket, \`board_claim\` before changing files, \`board_submit\` when it is finished; \`chores_sweep\` and \`chores_submit\` for a batch of chores.`;
 
+export type GoalPromptOptions = {
+  goal: string;
+  /** The round number within this run (1 for the first worker). */
+  round: number;
+  /** notes/state.md as it stands: the plan and progress note of the workers before this one. */
+  stateNote?: string | null;
+  /** The last worker was stopped at a cap before it could update its note; its last words. */
+  lastWords?: string;
+  /** The goal is not the one the notes were written for: revised while the session ran, or the next goal after an earlier one. */
+  goalChange?: { kind: "revised" | "next"; at: string; previous: string; note?: string };
+  /** A worker said this same goal was met and the user started again anyway. */
+  metBefore?: { at: string; note: string };
+  /** Recent commits per repository, newest first: what the earlier rounds did, as git saw it. */
+  history: readonly { repo: string; log: string }[];
+  /** Outcomes of requests the user decided, newest last. */
+  answers?: readonly string[];
+};
+
+const goalHistoryLines = (history: readonly { repo: string; log: string }[]): string =>
+  history.length ? history.map((h) => `### ${h.repo}\n${h.log.trim() || "(no commits since the clone)"}`).join("\n\n") : "(no repositories)";
+
+const goalChangeNote = (c: GoalPromptOptions["goalChange"]): string =>
+  !c
+    ? ""
+    : c.kind === "next"
+      ? `## The previous goal was met${c.note ? ` (${c.at.slice(0, 16)}; the assessment: ${c.note.trim().slice(0, 1500)})` : ` at ${c.at.slice(0, 16)}`}
+The goal above is the next one. The notes and the commits describe the work done for the previous goal:
+${c.previous.trim().slice(0, 2000)}
+Rewrite notes/state.md for the new goal before you build.
+`
+      : `## The goal was revised at ${c.at.slice(0, 16)}
+The notes and the commits may aim at the earlier text:
+${c.previous.trim().slice(0, 2000)}
+Reconcile notes/state.md with the goal as it now reads before you continue.
+`;
+
+/** A fresh goal worker: the goal, the memory it inherits, and what changed since that memory was written. */
+export const goalPrompt = (opts: GoalPromptOptions): string => `# Work toward the goal
+Round ${opts.round} of this run.
+
+## Goal
+${opts.goal.trim()}
+
+${goalChangeNote(opts.goalChange)}${opts.metBefore ? `## A worker said this goal was met (${opts.metBefore.at.slice(0, 16)}) and the user started the run again without changing it\nThat means not yet. Its assessment:\n${opts.metBefore.note.trim().slice(0, 3000)}\nLook for what falls short of the goal as written, check each part by running it, and improve what you find; call goal_done again only when you have made it better and every part holds.\n\n` : ""}## Your plan and progress note (notes/state.md)
+${opts.stateNote?.trim() || "(empty: you are the first worker on this goal; write it as you start)"}
+${opts.lastWords ? `\n## The previous worker was stopped at a cap before it updated the note\nIts last words:\n${opts.lastWords.trim().slice(0, 3000)}\n` : ""}
+## Recent commits (newest first)
+${goalHistoryLines(opts.history)}
+${opts.answers?.length ? `\n## Requests the user decided (newest last)\n${opts.answers.map((a) => `- ${a}`).join("\n")}\n` : ""}
+Read /workspace/VERSTAS.md and /workspace/notes/INDEX.md if you have not. Then work: update notes/state.md, take the next step toward the goal, verify it, and carry on. \`handoff\` when your context has become noise; \`goal_done\` only when every part of the goal holds.`;
+
+/** The goal worker continuing its own conversation: the round number, what the last round left in git, and the goal only when it changed. */
+export const goalContinuePrompt = (opts: { round: number; committed: readonly string[]; goal?: string; goalChangedAt?: string; answers?: readonly string[] }): string => `# Continue
+You are continuing in the same conversation; this is round ${opts.round} of this run. The harness committed what your last round left in ${opts.committed.length ? opts.committed.join(", ") : "no repository (nothing had changed)"}.
+${opts.goal ? `\n## The goal was revised at ${(opts.goalChangedAt ?? "").slice(0, 16)}\nIt now reads:\n${opts.goal.trim()}\nReconcile notes/state.md with it before you continue.\n` : ""}${opts.answers?.length ? `\n## The user decided your requests\n${opts.answers.map((a) => `- ${a}`).join("\n")}\n` : ""}
+Carry on toward the goal: keep notes/state.md current, work in small verified steps, \`handoff\` when your context is noise, \`goal_done\` only when every part holds. When you reach a sensible point, reply with one line and stop.`;
+
 /** A lead continuing its own conversation: only what changed. */
-export const leadContinuePrompt = (board: Board, holds?: Ticket, opts: { onlyChores?: boolean; sweepAt?: number } = {}): string => `# Continue
+export const leadContinuePrompt =(board: Board, holds?: Ticket, opts: { onlyChores?: boolean; sweepAt?: number } = {}): string => `# Continue
 You are continuing in the same conversation. The board as it stands now:
 
 ${boardLines(board)}
