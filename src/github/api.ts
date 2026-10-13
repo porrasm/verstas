@@ -101,7 +101,15 @@ export const githubApi = (token: string | undefined, base = "https://api.github.
         const r = repoSchema.parse(await call(`/repos/${github}`));
         return { github: r.full_name, defaultBranch: r.default_branch, private: r.private, canPush: r.permissions?.push ?? null };
       } catch (e) {
-        if (e instanceof GithubError && e.status === 404) throw new GithubError(`${github} was not found, or the token cannot see it`, 404);
+        if (e instanceof GithubError && e.status === 404) {
+          const owner = github.split("/")[0];
+          throw new GithubError(
+            token
+              ? `${github} was not found, or the token cannot see it. GitHub answers 404 for both. Check that the token's resource owner is ${owner} (a token owned by your account cannot see an organization's repositories), that ${owner} approved it if it is an organization that requires approval, and that ${github} is among its repositories.`
+              : `${github} was not found, or the token cannot see it: no GitHub token is saved. Press Save token first (Test uses the token typed in the field, adding a repository uses the saved one).`,
+            404,
+          );
+        }
         throw e;
       }
     },
