@@ -66,7 +66,9 @@ The driver must:
    Optionally, read **messages from the user** on stdin, one JSON line
    `{"kind":"message","text":"…"}` each, and hand them to the agent as
    user messages; a driver that cannot is simply never sent one (the
-   harness refuses the message with a reason).
+   harness refuses the message with a reason). A line with
+   `"from":"verstas"` is the harness speaking (a goal run's progress
+   check, a pause) and is prefixed "Message from Verstas:" instead.
 5. Keep the agent alive while one of its background commands runs. The
    built-in Claude driver uses streaming input for this: a turn that ends
    with a command still running is not the end of the session, the agent

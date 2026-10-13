@@ -49,8 +49,8 @@ const doneLine = (job: Job, t0: number, fields: Partial<Extract<VerstasEvent, { 
     ...fields,
   });
 
-/** A message from the user for the running agent, one JSON line on the worker's stdin (the harness writes it). */
-export type WorkerMessage = { kind: "message"; text: string };
+/** A message for the running agent, one JSON line on the worker's stdin (the harness writes it): from the user, or from Verstas itself (a progress check, a pause). */
+export type WorkerMessage = { kind: "message"; text: string; from?: "user" | "verstas" };
 
 /** How long after the last background command ended the worker waits for the agent to be re-invoked before it closes the session. */
 const REINVOKE_GRACE_MS = 15_000;
@@ -154,10 +154,10 @@ export const runJob = async (job: Job, io: { /** Where messages from the user ar
       }
       if (m.kind !== "message" || typeof m.text !== "string" || !m.text.trim()) return;
       if (!stdinOpen) {
-        status("a message from the user arrived after the agent's last turn; not delivered");
+        status(`a message from ${m.from === "verstas" ? "Verstas" : "the user"} arrived after the agent's last turn; not delivered`);
         return;
       }
-      child.stdin.write(driver.message!(`Message from the user: ${m.text.trim()}`));
+      child.stdin.write(driver.message!(`${m.from === "verstas" ? "Message from Verstas" : "Message from the user"}: ${m.text.trim()}`));
       clearTimeout(reinvokeTimer);
       turnOpen = true;
     });

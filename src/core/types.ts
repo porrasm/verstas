@@ -527,6 +527,13 @@ export const capsSchema = z.object({
    * is bounded by this, the per-worker caps and the budget, nothing else.
    */
   goalRounds: z.number().int().min(1).max(1000).default(25),
+  /**
+   * Goal mode: every this many minutes of a run, the running worker is
+   * asked for a short progress update, which it posts as a `message` to
+   * the inbox (Claude Code workers only; the others cannot be reached
+   * mid-run). 0 turns the check off.
+   */
+  progressMinutes: z.number().int().min(0).max(1440).default(30),
 });
 export type Caps = z.infer<typeof capsSchema>;
 

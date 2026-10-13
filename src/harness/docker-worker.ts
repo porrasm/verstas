@@ -92,9 +92,9 @@ const runWorkerExec = async (
   child.stdin?.on("error", () => undefined);
   opts.attach?.({
     driver: driver.name,
-    send: (text) => {
+    send: (text, from) => {
       if (!child.stdin || child.stdin.destroyed || child.exitCode !== null) return false;
-      child.stdin.write(JSON.stringify({ kind: "message", text }) + "\n");
+      child.stdin.write(JSON.stringify({ kind: "message", text, ...(from && from !== "user" ? { from } : {}) }) + "\n");
       return true;
     },
   });

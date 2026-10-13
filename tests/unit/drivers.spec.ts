@@ -311,6 +311,8 @@ echo '${assistant("FINISHED")}'
 echo '${result("the suite passed", 0.2)}'
 read -r second
 printf '%s' "$second" > received.txt
+read -r third
+printf '%s' "$third" > received2.txt
 echo '${assistant("got it")}'
 echo '${result("HELLO", 0.3)}'
 cat >/dev/null
@@ -321,7 +323,7 @@ cat >/dev/null
   const input = new PassThrough();
   // The message arrives while the first turn's background command still runs (the only time one can land: once a
   // turn ends with nothing pending the session is closed); it is written to the agent as a user message.
-  setTimeout(() => input.write(JSON.stringify({ kind: "message", text: "why so slow?" }) + "\n"), 100);
+  setTimeout(() => input.write(JSON.stringify({ kind: "message", text: "why so slow?" }) + "\n" + JSON.stringify({ kind: "message", text: "Progress check.", from: "verstas" }) + "\n"), 100);
   try {
     const { code, events } = await captureRun(job, { input });
     expect(code).toBe(0);
@@ -330,6 +332,8 @@ cat >/dev/null
     expect(texts[1]).toBe("FINISHED");
     expect(texts[2]).toBe("got it");
     expect(JSON.parse(await fs.readFile(path.join(dir, "received.txt"), "utf8"))).toMatchObject({ type: "user", message: { role: "user", content: "Message from the user: why so slow?" } });
+    // A line from the harness itself is prefixed as such, so the agent does not take a progress check for a question from the user.
+    expect(JSON.parse(await fs.readFile(path.join(dir, "received2.txt"), "utf8"))).toMatchObject({ type: "user", message: { role: "user", content: "Message from Verstas: Progress check." } });
     const statuses = events.filter((e) => e.kind === "status").map((e) => String(e.text));
     expect(statuses).toContain("turn ended with 1 background command running; the agent is re-invoked when one finishes");
     expect(statuses).toContain("background command completed: the suite");

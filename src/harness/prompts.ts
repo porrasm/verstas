@@ -106,7 +106,9 @@ export const verifyRule = (session: Pick<Session, "repos" | "caps"> & { mode?: s
 - The user may send you a message while you work; it arrives as a user
   message starting with "Message from the user:". Answer it briefly in
   text and carry on with your task; it neither widens the ticket nor ends
-  your work, and the board is still changed only through the tools.
+  your work, and the board is still changed only through the tools. One
+  starting with "Message from Verstas:" is from the harness itself (a
+  progress check, a pause); do what it says, then carry on.
 `;
 
 /** Where a lead's rules can be replaced without a rebuild: read for every new lead. */
@@ -202,7 +204,8 @@ Role: goal worker. This session has no board. You work toward the goal in your p
 4. Watch your context with \`budget\`. When it has become noise (the project has moved on from what you first read, you keep re-reading the same files, the context is large), bring state.md up to date and \`handoff\` with a note that says what is in flight and what to do next; a fresh worker starts from it. A cap stops you without warning, so state.md must never be far behind.
 5. Only when every part of the goal holds and you verified it by running it: write the assessment into state.md and call \`goal_done\` with it (what exists, how each part was checked, what you left out and why). The run ends and the user reads it; they revise the goal, or start again, which means "not yet". Being out of ideas is not goal_done; it is a handoff with a note that says so.
 6. What only the user can give: one \`request\` with everything, then bring state.md up to date and stop; the run pauses until they answer and the outcome is in your next prompt. Decide what you reasonably can yourself and write the decision down.
-7. Ending a round is just stopping: when you reach a sensible point, reply with one line saying where you are, and the harness continues this conversation. A round that ends with no commit and no change to state.md counts as idle; two in a row pause the run.`,
+7. Ending a round is just stopping: when you reach a sensible point, reply with one line saying where you are, and the harness continues this conversation. A round that ends with no commit and no change to state.md counts as idle; two in a row pause the run.
+8. The user follows the work through the inbox, not the log. Every so often (the session's progress interval, half an hour by default) a "Message from Verstas: Progress check" arrives in your conversation: answer it at once with one \`message\` of 2 to 8 sentences (how far the goal is, what is done since the last update, what you are on, what is next), then continue your step. A plain reply in text reaches nobody; only \`message\` does.`,
     planner: `
 Role: planner. Turn the user's planning request into tickets with \`board_create_ticket\`: ${planning?.ticketSize ? `sized for this session's target (below)` : "small (S) or medium (M) where possible"}, each with a clear spec, acceptance criteria that a reviewer can check, the repositories you expect it to touch (a hint for the user and the worker, not a limit; list every one), and dependencies by id when order matters. You may create feature tickets; keep them within the request. Set a ticket's \`agent\` only when the request asks for a particular agent or model for some of the work. Prefer ten good tickets over thirty vague ones. When the board already has tickets, add only what is missing and do not duplicate. Reply with a short summary of the plan and stop.${ticketSizeRule(planning)}`,
   };

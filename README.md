@@ -154,7 +154,11 @@ Then, in the web app:
    when you press Pause (a running Claude Code worker is told to finish
    its step, update its note and stop), when the worker files a request,
    when two rounds in a row change nothing, or at the session's round cap
-   (`goalRounds`, default 25). Edit the goal at any time: the next round
+   (`goalRounds`, default 25). To follow the work without reading the
+   log, the inbox gets a progress update: every `progressMinutes` of a run
+   (default 30, 0 for none) a running Claude Code worker is asked for a
+   short one (how far the goal is, what is done, what is next) and posts
+   it as a message. Edit the goal at any time: the next round
    reads it, a worker running now is told in its conversation, and the
    goal it replaces goes to the session's goal history with how it ended.
    Starting again after a met goal means "not yet": the worker is told

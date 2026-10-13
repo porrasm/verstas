@@ -2324,6 +2324,7 @@ const CAP_HELP: Record<string, string> = {
   sweepMaxFiles: "Files a chore sweep's commit may touch",
   choreSweepAt: "Open chores at which the lead must sweep before its next ticket (0: never forced)",
   goalRounds: "Rounds (one worker, start to exit, then a commit) per run before it pauses for a look",
+  progressMinutes: "Every this many minutes the worker posts a short progress update to the inbox (Claude Code workers only; 0: never)",
 };
 
 /**
@@ -2349,6 +2350,7 @@ const SessionSettings = ({ session, onSave, part = "all" }: { session: Session; 
     sweepMaxFiles: String(session.caps.sweepMaxFiles ?? 15),
     choreSweepAt: String(session.caps.choreSweepAt ?? 10),
     goalRounds: String(session.caps.goalRounds ?? 25),
+    progressMinutes: String(session.caps.progressMinutes ?? 30),
     choreApproval: session.caps.choreApproval ?? false,
     memory: session.limits.memory,
     cpus: String(session.limits.cpus),
@@ -2378,7 +2380,7 @@ const SessionSettings = ({ session, onSave, part = "all" }: { session: Session; 
         ...(part !== "caps" ? { allowlist: f.allow.split(/\n/).map((s) => s.trim()).filter(Boolean), packs: f.packs } : {}),
         ...(part !== "network"
           ? {
-              caps: { workerMinutes: Number(f.workerMinutes), workerTurns: Number(f.workerTurns), budgetUsd: Number(f.budgetUsd), runTickets: Number(f.runTickets), ticketAttempts: Number(f.ticketAttempts), reviewer: f.reviewer, resumeWorker: f.resumeWorker, leadMinutes: Number(f.leadMinutes), leadTurns: Number(f.leadTurns), sweepMaxLines: Number(f.sweepMaxLines), sweepMaxFiles: Number(f.sweepMaxFiles), choreApproval: f.choreApproval, choreSweepAt: Number(f.choreSweepAt), goalRounds: Number(f.goalRounds) },
+              caps: { workerMinutes: Number(f.workerMinutes), workerTurns: Number(f.workerTurns), budgetUsd: Number(f.budgetUsd), runTickets: Number(f.runTickets), ticketAttempts: Number(f.ticketAttempts), reviewer: f.reviewer, resumeWorker: f.resumeWorker, leadMinutes: Number(f.leadMinutes), leadTurns: Number(f.leadTurns), sweepMaxLines: Number(f.sweepMaxLines), sweepMaxFiles: Number(f.sweepMaxFiles), choreApproval: f.choreApproval, choreSweepAt: Number(f.choreSweepAt), goalRounds: Number(f.goalRounds), progressMinutes: Number(f.progressMinutes) },
               limits: { memory: f.memory, cpus: Number(f.cpus) },
               mode: f.mode,
               // Nothing chosen clears the block: planning agents then size tickets themselves, as before.
@@ -2427,11 +2429,11 @@ const SessionSettings = ({ session, onSave, part = "all" }: { session: Session; 
       )}
       {part !== "network" && f.mode === "goal" && (
         <div className="two">
-          {(["leadMinutes", "leadTurns", "goalRounds", "budgetUsd"] as const).map((k) => (
+          {(["leadMinutes", "leadTurns", "goalRounds", "budgetUsd", "progressMinutes"] as const).map((k) => (
             <label key={k}>
-              {{ leadMinutes: "Worker minutes", leadTurns: "Worker turns", goalRounds: "Rounds per run", budgetUsd: "Budget USD per worker" }[k]}
+              {{ leadMinutes: "Worker minutes", leadTurns: "Worker turns", goalRounds: "Rounds per run", budgetUsd: "Budget USD per worker", progressMinutes: "Progress update every (min)" }[k]}
               <span className="help">{k === "leadMinutes" ? "Wall-clock life of one goal worker; then a fresh one takes over from the note" : k === "leadTurns" ? "Model turns per goal worker; then a fresh one takes over" : CAP_HELP[k]}</span>
-              <input type="number" min={1} value={f[k]} onChange={(e) => set(k, e.target.value)} />
+              <input type="number" min={k === "progressMinutes" ? 0 : 1} value={f[k]} onChange={(e) => set(k, e.target.value)} />
             </label>
           ))}
           <label>Memory <span className="help">Container limit, e.g. 4g</span><input value={f.memory} onChange={(e) => set("memory", e.target.value)} /></label>

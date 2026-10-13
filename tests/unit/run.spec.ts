@@ -27,6 +27,8 @@ const makeSession = async (
     /** Goal mode: the goal text and the round cap. */
     goal?: string;
     goalRounds?: number;
+    /** Goal mode: minutes between progress checks (the default is 30; 0 is off). */
+    progressMinutes?: number;
     requirements?: string;
     /** false: a plan that still needs Initialize (the default is an initialized session). */
     initialized?: boolean;
@@ -52,7 +54,7 @@ const makeSession = async (
       mode: opts.mode ?? "loop",
       goal: opts.goal ?? "",
       agents: opts.agents ?? {},
-      caps: { reviewer: opts.reviewer ?? true, ticketAttempts: opts.attempts ?? 2, runTickets: 10, resumeWorker: opts.resume ?? false, ...(opts.goalRounds ? { goalRounds: opts.goalRounds } : {}) },
+      caps: { reviewer: opts.reviewer ?? true, ticketAttempts: opts.attempts ?? 2, runTickets: 10, resumeWorker: opts.resume ?? false, ...(opts.goalRounds ? { goalRounds: opts.goalRounds } : {}), ...(opts.progressMinutes !== undefined ? { progressMinutes: opts.progressMinutes } : {}) },
     }),
   );
   await saveBoard(paths.dir, importBoard(emptyBoard("g"), { tickets: [{ id: "T-1", title: "Schema", state: "ready", repo: "app" }, { id: "T-2", title: "Engine", state: "ready", deps: ["T-1"] }] }).board);
@@ -805,7 +807,7 @@ type LeadScript = (api: Api, job: Job, n: number, signal: AbortSignal) => Promis
  * server inside the box would call it. The reviewer is scripted; the lead
  * script gets an API client bound to that lead's own run token.
  */
-const leadRun = async (s: Awaited<ReturnType<typeof makeSession>>, lead: LeadScript, opts: { verdict?: (ticket: string | undefined) => string; reviewerRateLimited?: boolean; heal?: (mgr: RunManager) => Promise<string[]>; shell?: ReturnType<typeof fakeShell> } = {}) => {
+const leadRun = async (s: Awaited<ReturnType<typeof makeSession>>, lead: LeadScript, opts: { verdict?: (ticket: string | undefined) => string; reviewerRateLimited?: boolean; heal?: (mgr: RunManager) => Promise<string[]>; shell?: ReturnType<typeof fakeShell>; /** How long a minute of progressMinutes is (ms). */ progressMinuteMs?: number } = {}) => {
   const tokens = new RunTokens();
   const shell = opts.shell ?? fakeShell();
   const jobs: Job[] = [];
@@ -829,7 +831,7 @@ const leadRun = async (s: Awaited<ReturnType<typeof makeSession>>, lead: LeadScr
       return { ...base, stopReason: signal.aborted ? "aborted" : "success", ...out };
     },
   };
-  const mgr: RunManager = new RunManager({ hub: s.hub, tokens, shell: () => shell, worker: () => worker, ensureSandbox: async () => undefined, agentApiUrl: "http://x/agent", rateLimitSleepMs: 20, handoffGraceMs: 50, healSandbox: opts.heal ? () => opts.heal!(mgr) : undefined });
+  const mgr: RunManager = new RunManager({ hub: s.hub, tokens, shell: () => shell, worker: () => worker, ensureSandbox: async () => undefined, agentApiUrl: "http://x/agent", rateLimitSleepMs: 20, handoffGraceMs: 50, progressMinuteMs: opts.progressMinuteMs, healSandbox: opts.heal ? () => opts.heal!(mgr) : undefined });
   const server = createAgentApi(s.hub, tokens, mgr).listen(0, "127.0.0.1");
   port = await new Promise<number>((r) => server.on("listening", () => r((server.address() as net.AddressInfo).port)));
   return { mgr, jobs, prompts, shell, sent, close: () => server.close() };
@@ -1505,8 +1507,8 @@ test("a message is refused while the run is between workers and for a worker on 
 // --- Goal mode ---------------------------------------------------------------
 
 /** A goal-mode session with the notes directory the worker writes into. */
-const goalSession = async (opts: { goal?: string; goalRounds?: number } = {}) => {
-  const s = await makeSession({ mode: "goal", goal: opts.goal ?? "A CLI that greets the user by name", goalRounds: opts.goalRounds });
+const goalSession = async (opts: { goal?: string; goalRounds?: number; progressMinutes?: number } = {}) => {
+  const s = await makeSession({ mode: "goal", goal: opts.goal ?? "A CLI that greets the user by name", goalRounds: opts.goalRounds, progressMinutes: opts.progressMinutes });
   await fs.mkdir(s.paths.notes, { recursive: true });
   return s;
 };
@@ -1684,5 +1686,61 @@ test("goal mode: a request pauses the run on the inbox with the round committed;
   } finally {
     r.close();
     await fs.rm(s.root, { recursive: true, force: true });
+  }
+});
+
+test("goal mode: every progressMinutes the running worker is asked for a progress update, which it posts to the inbox; 0 turns the check off", async () => {
+  const s = await goalSession({ progressMinutes: 1 });
+  let asked = 0;
+  const r = await leadRun(
+    s,
+    async (api, _job, n) => {
+      if (n === 1) {
+        // The worker lives through a few intervals: the first check comes one interval after the run started, the next one interval after it.
+        const t0 = Date.now();
+        while (r.sent.length < 2 && Date.now() - t0 < 2000) await new Promise((res) => setTimeout(res, 5));
+        asked = r.sent.length;
+        expect((await api("POST", "/messages", { text: "Well under way. The CLI parses its arguments and greets; the name flag is next." })).status).toBe(201);
+        await fs.writeFile(path.join(s.paths.notes, "state.md"), "# Plan\n- greet by name (in flight)\n");
+        return { text: "The name flag is in flight." };
+      }
+      expect((await api("POST", "/goal_done", { note: "Greets by name." })).status).toBe(200);
+      return { text: "Goal met." };
+    },
+    { progressMinuteMs: 30 },
+  );
+  try {
+    const run = await (await r.mgr.start(s.id)).done;
+    expect(run.state).toBe("finished");
+    expect(asked).toBeGreaterThanOrEqual(2);
+    expect(r.sent[0]).toContain("Progress check");
+    expect(r.sent[0]).toContain("`message`");
+    const h = await s.hub.get(s.id);
+    expect(h.inbox.messages.map((m) => m.text)).toEqual(["Well under way. The CLI parses its arguments and greets; the name flag is next."]);
+    const events = (await fs.readFile(path.join(s.paths.runs, "1", "events.jsonl"), "utf8")).split("\n").filter(Boolean).map((l) => JSON.parse(l) as VerstasEvent);
+    // Every check sent was logged (the worker may have been asked once more between its sample and its end).
+    expect(events.filter((e) => e.kind === "status" && e.text.startsWith("progress check: the goal worker was asked")).length).toBe(r.sent.length);
+  } finally {
+    r.close();
+    await fs.rm(s.root, { recursive: true, force: true });
+  }
+
+  // Off: a worker that lives through many intervals is never asked.
+  const off = await goalSession({ progressMinutes: 0 });
+  const r2 = await leadRun(
+    off,
+    async (api) => {
+      await new Promise((res) => setTimeout(res, 150));
+      expect((await api("POST", "/goal_done", { note: "Done." })).status).toBe(200);
+      return { text: "Goal met." };
+    },
+    { progressMinuteMs: 10 },
+  );
+  try {
+    expect((await (await r2.mgr.start(off.id)).done).state).toBe("finished");
+    expect(r2.sent).toEqual([]);
+  } finally {
+    r2.close();
+    await fs.rm(off.root, { recursive: true, force: true });
   }
 });

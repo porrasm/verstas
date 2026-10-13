@@ -104,7 +104,7 @@ export type Session = {
   attachments: { name: string; dir: string; bytes: number; skipped: string[]; description?: string }[];
   allowlist: string[];
   packs: string[];
-  caps: { workerMinutes: number; workerTurns: number; runTickets: number; budgetUsd: number; ticketAttempts: number; reviewer: boolean; resumeWorker?: boolean; leadMinutes?: number; leadTurns?: number; sweepMaxLines?: number; sweepMaxFiles?: number; choreApproval?: boolean; choreSweepAt?: number; goalRounds?: number };
+  caps: { workerMinutes: number; workerTurns: number; runTickets: number; budgetUsd: number; ticketAttempts: number; reviewer: boolean; resumeWorker?: boolean; leadMinutes?: number; leadTurns?: number; sweepMaxLines?: number; sweepMaxFiles?: number; choreApproval?: boolean; choreSweepAt?: number; goalRounds?: number; progressMinutes?: number };
   /** loop: a fresh implementer per ticket. lead: one long-lived agent works the board. goal: no board; one long-lived worker works toward the goal text. */
   mode?: "loop" | "lead" | "goal";
   /** The ticket size planning agents aim for; absent, they choose. */

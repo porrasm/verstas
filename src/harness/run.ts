@@ -37,8 +37,8 @@ export interface Shell {
 /** A running worker, as far as the harness can reach it: a message from the user down its stdin. */
 export type WorkerHandle = {
   driver: DriverName;
-  /** Writes the message; false when the worker is gone. */
-  send(text: string): boolean;
+  /** Writes the message (from the user unless said otherwise); false when the worker is gone. */
+  send(text: string, from?: "user" | "verstas"): boolean;
 };
 
 export interface WorkerRunner {
@@ -79,6 +79,8 @@ export type RunDeps = {
   rateLimitSleepMs?: number;
   /** How long a lead that asked to hand off may take to stop before it is stopped (ms). */
   handoffGraceMs?: number;
+  /** For tests: how long one minute of `caps.progressMinutes` is (ms). */
+  progressMinuteMs?: number;
 };
 
 /** What the hooks a lead calls through the agent API share with the run that started it. */
@@ -124,6 +126,8 @@ export type RunControl = {
 const WORKSPACE_FILES = ".verstas";
 /** What a goal worker is told when you press pause while it runs. */
 const PAUSE_NUDGE = "The user asked the run to pause. Finish the step you are in (do not start another), make sure its tests pass, bring notes/state.md up to date, then reply with one line and stop. The harness commits what you leave.";
+/** What a goal worker is told every `caps.progressMinutes`: the user wants to know where the work stands. */
+const PROGRESS_NUDGE = "Progress check. Post a short update for the user with the `message` tool, 2 to 8 sentences: first how far the goal is (just started, well under way, nearly complete, or stuck and why), then what is done since your last update, what you are on now, and what comes next. Then carry on with your step; this changes nothing about the goal and does not end your round.";
 /** Commits per repository in a goal worker's prompt. */
 const GOAL_LOG_LINES = 15;
 /** The setup worker's floor on the worker caps: it waits on installs and on every repository's check, so it needs time more than turns. */
@@ -265,7 +269,7 @@ export class RunManager implements AgentRunHooks {
     c.pauseAfterTicket();
     // A goal worker has no board call to learn of the pause from (a lead hears it at its next claim), so it is told now, when it can take a message.
     const w = this.workers.get(sessionId);
-    if (w?.role === "goal" && w.driver === "claude" && w.send(PAUSE_NUDGE)) void w.log({ kind: "status", t: (this.deps.now ?? now)(), text: "pause: the goal worker was asked to finish its step, update its note and stop" }).catch(() => undefined);
+    if (w?.role === "goal" && w.driver === "claude" && w.send(PAUSE_NUDGE, "verstas")) void w.log({ kind: "status", t: (this.deps.now ?? now)(), text: "pause: the goal worker was asked to finish its step, update its note and stop" }).catch(() => undefined);
     return true;
   }
 
@@ -925,6 +929,7 @@ export class RunManager implements AgentRunHooks {
       return fresh.map(requestOutcome);
     };
     const recentAnswers = (): string[] => h.inbox.requests.filter((r) => r.state !== "open" && !r.ticketId).slice(-5).map(requestOutcome);
+    const progressTimer = this.progressChecks(h, ctl.signal, log);
     try {
       while (!ctl.isStop()) {
         if (ctl.isPause()) {
@@ -1061,8 +1066,37 @@ export class RunManager implements AgentRunHooks {
         }
       }
     } finally {
+      clearInterval(progressTimer);
       this.leads.delete(h.id);
     }
+  }
+
+  /**
+   * The progress checks of a goal run: every `caps.progressMinutes` of the
+   * run, the worker running then is asked for a short update, which it
+   * posts as a `message` to the inbox. A check that falls between workers,
+   * or on a driver that cannot take a message, goes to the next worker
+   * that can; a worker is not asked twice within one interval. Nothing is
+   * enforced: the worker's rules tell it to answer. The returned timer is
+   * cleared when the run ends.
+   */
+  private progressChecks(h: SessionHandle, signal: AbortSignal, log: (e: VerstasEvent) => Promise<void>): ReturnType<typeof setInterval> | undefined {
+    const minutes = h.session.caps.progressMinutes;
+    if (!minutes) return undefined;
+    const minuteMs = this.deps.progressMinuteMs ?? 60_000;
+    const interval = minutes * minuteMs;
+    let due = Date.now() + interval;
+    const tick = () => {
+      if (signal.aborted || Date.now() < due) return;
+      const w = this.workers.get(h.id);
+      if (!w || w.role !== "goal" || w.driver !== "claude") return;
+      if (!w.send(PROGRESS_NUDGE, "verstas")) return;
+      due = Date.now() + interval;
+      void log({ kind: "status", t: (this.deps.now ?? now)(), text: `progress check: the goal worker was asked for a short update (every ${minutes} min, to the inbox)` }).catch(() => undefined);
+    };
+    const timer = setInterval(tick, Math.min(minuteMs, interval));
+    timer.unref?.();
+    return timer;
   }
 
   /** What a fresh goal worker is told besides the goal: the note it inherits, what changed since the note was written, and the recent commits. */
