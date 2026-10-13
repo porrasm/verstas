@@ -1,7 +1,10 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   api,
+  repoChange,
   repoOrigin,
+  type ReposState,
+  type RepoState,
   type RemoteSettings,
   copyText,
   type ApplyResult,
@@ -144,6 +147,7 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
   const now = useNow();
 
   const base = `/sessions/${encodeURIComponent(id)}`;
+  const repoState = useRepoState(base, session, active, board?.tickets.filter((t) => t.state === "done").length ?? 0);
   const applyDetail = (d: SessionDetail) => {
     setSession(d.session);
     setBoard(d.board);
@@ -324,6 +328,7 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
     onPlan: () => setPlanning(true),
     onInit: init,
     saveSettings,
+    repoState,
   };
 
   return (
@@ -374,7 +379,7 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
           {initialized && lastActivity && !active && <span>last activity <b title={fmtDateTime(lastActivity)}>{fmtAgo(lastActivity, now)}</b></span>}
           <span>created <b title={fmtDateTime(session.createdAt)}>{fmtAgo(session.createdAt, now)}</b></span>
           {initialized && <span className={sb.tone === "good" ? "ok" : ""}>{sb.text}</span>}
-          {initialized && <span>{session.repos.length ? <>repos <span className="mono">{session.repos.map((r) => r.name).join(", ")}</span></> : "no repositories"}</span>}
+          {initialized && (session.repos.length ? <RepoChips state={repoState.state} names={session.repos.map((r) => r.name)} /> : <span>no repositories</span>)}
           {dir && <SessionDir dir={dir} />}
           {initialized && <AgentOptionsButton compact agents={session.agents ?? {}} legacyModel={session.model} reviewerOn={session.caps.reviewer} title="Applies to the next worker that starts; a running worker keeps its agent" onChange={(agents) => tryAct("agents", () => api("PUT", `${base}/caps`, { agents }))} />}
           <NotifyToggle />
@@ -511,6 +516,7 @@ type BodyProps = {
   onPlan: () => void;
   onInit: (start: boolean) => void;
   saveSettings: (patch: SettingsPatch) => Promise<void>;
+  repoState: RepoStateHandle;
 };
 
 const useBoardActions = (p: BodyProps) => ({
@@ -608,7 +614,7 @@ const RunBody = (p: BodyProps) => {
       <aside className="side">
         <InboxPanel inbox={inbox} onRead={(mid) => void p.tryAct("read", () => api("POST", `${base}/messages/${mid}/read`))} onPromote={(iid) => void p.tryAct("promote", () => api("POST", `${base}/ideas/${iid}/promote`))} onOpenTicket={p.openTicket} />
         {!goalMode && <ChoresPanel board={board} base={base} tryAct={p.tryAct} onOpenTicket={p.openTicket} />}
-        <WorkPanel session={session} base={base} active={active} done={counts.done ?? 0} onExport={p.onExport} onDone={p.refreshRun} />
+        <WorkPanel session={session} base={base} active={active} done={counts.done ?? 0} repoState={p.repoState} onExport={p.onExport} onDone={async () => { await p.refreshRun(); await p.repoState.refresh(); }} />
         <PromptBox session={session} base={base} active={active} onDone={p.refreshRun} />
         <EnvironmentPanel env={env} />
         <SessionSettings session={session} onSave={p.saveSettings} />
@@ -703,7 +709,102 @@ const PlanBody = (p: BodyProps) => {
 };
 // --- taking the work back --------------------------------------------------------
 
-const WorkPanel = ({ session, base, active, done, onExport, onDone }: { session: Session; base: string; active: boolean; done: number; onExport: () => void; onDone: () => Promise<void> }) => {
+type RepoStateHandle = { state: ReposState | null; loading: boolean; error: string; refresh: (start?: boolean) => Promise<void> };
+
+/**
+ * Each repository's state (src/sessions/repo-state.ts): read when the page
+ * opens, when a ticket is done or the base moves, and every 20 s while a
+ * run is active. A stopped container gives the last reading; refreshing
+ * with `start` brings the container up to read it now.
+ */
+const useRepoState = (base: string, session: Session | null, active: boolean, done: number): RepoStateHandle => {
+  const [state, setState] = useState<ReposState | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const initialized = session ? isInitialized(session) : false;
+  const key = session ? session.repos.map((r) => `${r.name}:${r.branch}:${r.baseCommit ?? ""}`).join(",") : "";
+  const refresh = async (start = false) => {
+    if (!initialized) return;
+    setLoading(true);
+    try {
+      setState(await api<ReposState>("GET", `${base}/repos/state${start ? "?start=1" : ""}`));
+      setError("");
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  };
+  useEffect(() => {
+    void refresh();
+    if (!active) return;
+    const t = setInterval(() => void refresh(), 20_000);
+    return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [base, initialized, key, active, done]);
+  return { state, loading, error, refresh };
+};
+
+/** The header's repositories: which got commits this session, at a glance. */
+const RepoChips = ({ state, names }: { state: ReposState | null; names: string[] }) => (
+  <span className="row" style={{ gap: 6, display: "inline-flex", flexWrap: "wrap" }}>
+    {names.map((n) => {
+      const r = state?.repos.find((x) => x.name === n);
+      const ch = r ? repoChange(r) : null;
+      return (
+        <span key={n} className={`chip mono${ch?.changed ? " on" : ""}`} style={ch && !ch.changed ? { opacity: 0.55 } : undefined} title={r?.box ? `as of ${fmtDateTime(r.box.at)}` : undefined}>
+          {n}{ch ? ` · ${ch.text}` : ""}
+        </span>
+      );
+    })}
+  </span>
+);
+
+/** One repository in the Work panel: where its base is, what the clone added, whether GitHub moved on. */
+const RepoStatus = ({ r, live }: { r: RepoState; live: boolean }) => {
+  const [open, setOpen] = useState(false);
+  const ch = repoChange(r);
+  const now = Date.now();
+  const tip = r.remote?.tip;
+  const base = r.box?.base ?? (r.baseCommit ? { sha: r.baseCommit, subject: "", date: "" } : null);
+  const upToDate = tip && base && tip.sha === base.sha;
+  const commits = r.box?.commits ?? [];
+  return (
+    <div className="small stack" style={{ gap: 2 }}>
+      <div>
+        <span className="muted">base</span> <span className="mono">{r.branch} @ {base ? base.sha.slice(0, 7) : "?"}</span>
+        {base?.subject ? <span className="muted"> “{base.subject}”</span> : null}
+      </div>
+      {r.github && (
+        <div className={r.remoteError ? "err" : upToDate ? "ok" : "warn"}>
+          {r.remoteError
+            ? r.remoteError
+            : !tip
+              ? `GitHub has no branch ${r.branch}`
+              : upToDate
+                ? `Up to date with ${r.branch} on GitHub`
+                : `${r.branch} on GitHub moved on${r.remote?.behind ? ` by ${r.remote.behind} commit${r.remote.behind === 1 ? "" : "s"}` : ""}: ${tip.sha.slice(0, 7)} “${tip.subject}”`}
+          {r.remote?.fetchedAt && !r.remoteError ? <span className="muted"> · checked {fmtAgo(r.remote.fetchedAt, now)}</span> : null}
+        </div>
+      )}
+      <div>
+        <span className={ch.changed ? "" : "muted"}>{ch.changed ? <b>{ch.text}</b> : r.box ? "No changes this session" : "Not read yet"}</span>
+        {r.box && !live ? <span className="muted"> · as of {fmtAgo(r.box.at, now)}</span> : null}
+        {commits.length > 0 && <button className="quiet sm" style={{ marginLeft: 6 }} onClick={() => setOpen((o) => !o)}>{open ? "hide log" : "show log"}</button>}
+      </div>
+      {open && commits.length > 0 && (
+        <ul className="mono" style={{ margin: "2px 0 0", paddingLeft: 18 }}>
+          {commits.map((c) => (
+            <li key={c.sha} title={fmtDateTime(c.date)}><span className="muted">{c.sha.slice(0, 7)}</span> {c.subject}</li>
+          ))}
+          {r.box && r.box.ahead !== null && r.box.ahead > commits.length ? <li className="muted">… {r.box.ahead - commits.length} more</li> : null}
+        </ul>
+      )}
+    </div>
+  );
+};
+
+const WorkPanel = ({ session, base, active, done, repoState, onExport, onDone }: { session: Session; base: string; active: boolean; done: number; repoState: RepoStateHandle; onExport: () => void; onDone: () => Promise<void> }) => {
   const [busy, setBusy] = useState("");
   const [restoring, setRestoring] = useState<RepoSpec | null>(null);
   const [note, setNote] = useState("");
@@ -729,16 +830,27 @@ const WorkPanel = ({ session, base, active, done, onExport, onDone }: { session:
         <span className="muted small">{done} ticket{done === 1 ? "" : "s"} committed</span>
       </div>
       {session.repos.some((r) => r.sourcePath && !r.github) && <p className="lead">Apply puts a repository's commits on the branch <span className="mono">{session.repos[0]?.runBranch}</span> in your real checkout. Your current branch is not touched; merge or cherry-pick when you are ready.</p>}
-      {session.repos.map((r) => (
-        <div className="row" key={r.name} style={{ justifyContent: "space-between" }}>
-          <span><strong>{r.name}</strong> <span className="muted small mono" title={r.github ?? r.sourcePath}>{repoOrigin(r)}</span> <span className="muted small mono">· {r.branch}</span></span>
-          <span className="row" style={{ gap: 6 }}>
-            {r.sourcePath && !r.github && <button className="sm" onClick={() => apply(r.name)} disabled={Boolean(busy) || active} title={active ? "Pause or stop the run first" : `Create or update ${r.runBranch} in ${r.sourcePath}`}>{busy === r.name ? "Applying…" : "Apply to repo"}</button>}
-            {r.github && <button className="quiet sm" onClick={() => setRestoring(r)} disabled={Boolean(busy) || active} title={active ? "Pause or stop the run first" : `Replace the clone with a fresh clone of ${r.github} from GitHub`}>Reclone…</button>}
-          </span>
-        </div>
-      ))}
-      <div className="row"><button className="quiet sm" onClick={onExport} disabled={active}>Export bundles instead…</button></div>
+      {session.repos.map((r) => {
+        const st = repoState.state?.repos.find((x) => x.name === r.name);
+        return (
+          <div className="stack" key={r.name} style={{ gap: 4, paddingTop: 6, borderTop: "1px solid var(--line, rgba(127,127,127,.2))" }}>
+            <div className="row" style={{ justifyContent: "space-between" }}>
+              <span><strong>{r.name}</strong> {r.github ? <a className="muted small mono" href={`https://github.com/${r.github}`} target="_blank" rel="noreferrer">{r.github}</a> : <span className="muted small mono" title={r.sourcePath}>{repoOrigin(r)}</span>}</span>
+              <span className="row" style={{ gap: 6 }}>
+                {r.sourcePath && !r.github && <button className="sm" onClick={() => apply(r.name)} disabled={Boolean(busy) || active} title={active ? "Pause or stop the run first" : `Create or update ${r.runBranch} in ${r.sourcePath}`}>{busy === r.name ? "Applying…" : "Apply to repo"}</button>}
+                {r.github && <button className="quiet sm" onClick={() => setRestoring(r)} disabled={Boolean(busy) || active} title={active ? "Pause or stop the run first" : `Replace the clone with a fresh clone of ${r.github} from GitHub`}>Reclone…</button>}
+              </span>
+            </div>
+            {st && <RepoStatus r={st} live={Boolean(repoState.state?.live)} />}
+          </div>
+        );
+      })}
+      <div className="row small">
+        {repoState.state && !repoState.state.live && <span className="muted">The container is stopped; this is the last reading.</span>}
+        <button className="quiet sm" onClick={() => void repoState.refresh(!repoState.state?.live)} disabled={repoState.loading || (active && !repoState.state?.live)} title={repoState.state?.live ? "Read the clones and GitHub again" : "Start the container and read the clones now"}>{repoState.loading ? "Reading…" : repoState.state?.live ? "Refresh" : "Read now"}</button>
+        {repoState.error && <span className="err">{repoState.error}</span>}
+      </div>
+      <div className="row"><button className="quiet sm" onClick={onExport} disabled={active}>Export bundles…</button></div>
       {note && <div className="banner ok small"><span>{note}</span><button className="quiet sm end" onClick={() => setNote("")}>Dismiss</button></div>}
       {err && <div className="banner warn"><span>{err}</span><button className="quiet sm end" onClick={() => setErr("")}>Dismiss</button></div>}
       {restoring && (

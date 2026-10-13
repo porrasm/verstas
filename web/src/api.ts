@@ -349,3 +349,28 @@ export type RepoSpec = {
 
 /** Where a session repository came from, for display: owner/name, or the old local path with the home directory shortened. */
 export const repoOrigin = (r: { github?: string; sourcePath?: string }): string => r.github ?? r.sourcePath?.replace(/^\/Users\/[^/]+|^\/home\/[^/]+/, "~") ?? "";
+
+export type CommitLine = { sha: string; date: string; subject: string };
+/** One session repository's state: the clone's side (read in the container, or the last reading) and GitHub's. */
+export type RepoState = {
+  name: string;
+  github?: string;
+  branch: string;
+  runBranch: string;
+  baseCommit?: string;
+  box: { at: string; head: string; ahead: number | null; dirty: number; commits: CommitLine[]; base: CommitLine | null } | null;
+  remote: { tip: CommitLine | null; behind: number | null; fetchedAt: string | null } | null;
+  remoteError: string | null;
+};
+export type ReposState = { live: boolean; repos: RepoState[] };
+
+/** "3 commits", "no changes", "2 uncommitted"…: what a repository's clone holds that GitHub does not. */
+export const repoChange = (r: RepoState): { text: string; changed: boolean } => {
+  const b = r.box;
+  if (!b) return { text: "not read yet", changed: false };
+  const parts: string[] = [];
+  if (b.ahead === null) parts.push(`${b.commits.length}+ commits`);
+  else if (b.ahead > 0) parts.push(`${b.ahead} commit${b.ahead === 1 ? "" : "s"}`);
+  if (b.dirty > 0) parts.push(`${b.dirty} uncommitted`);
+  return parts.length ? { text: parts.join(", "), changed: true } : { text: "no changes", changed: false };
+};

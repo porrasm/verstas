@@ -131,3 +131,71 @@ test("the GitHub API client sends the token to the API origin and reports what i
   expect(seen.every((s) => s.url.startsWith("https://api.example/") && s.auth === "Bearer tok")).toBe(true);
   expect(await githubApi(undefined, "https://api.example", fake).whoami()).toBeNull();
 });
+
+test("a clone's state is read with git in the clone: commits since the base, uncommitted files, the base itself", async () => {
+  const { readBoxRepoState, loadRepoStateCache, saveRepoStateCache } = await import("../../src/sessions/repo-state.js");
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "verstas-state-"));
+  try {
+    const clone = path.join(tmp, "workspace", "app");
+    await makeUpstream(clone);
+    await git(clone, "checkout", "-q", "-b", "verstas/s");
+    const base = await git(clone, "rev-parse", "HEAD");
+    // The container's shell, played by a local one with /workspace mapped to the temp directory.
+    const sh = {
+      exec: async (cmd: readonly string[], opts: { workdir?: string } = {}) => {
+        const cwd = (opts.workdir ?? "/workspace").replace(/^\/workspace/, path.join(tmp, "workspace"));
+        return execFileP(cmd[0]!, cmd.slice(1), { cwd }).then((r) => ({ code: 0, stdout: r.stdout, stderr: r.stderr }), (e) => ({ code: 1, stdout: "", stderr: String(e) }));
+      },
+    };
+    const repo = { name: "app", github: "acme/app", branch: "main", runBranch: "verstas/s", baseCommit: base };
+
+    const none = await readBoxRepoState(sh, repo);
+    expect(none).toMatchObject({ head: base, ahead: 0, dirty: 0, commits: [], base: { sha: base, subject: "init" } });
+
+    await fs.writeFile(path.join(clone, "a.txt"), "a\n");
+    await git(clone, "add", ".");
+    await git(clone, "commit", "-q", "-m", "T-1: first");
+    await fs.writeFile(path.join(clone, "b.txt"), "uncommitted\n");
+    const some = await readBoxRepoState(sh, repo);
+    expect(some?.ahead).toBe(1);
+    expect(some?.dirty).toBe(1);
+    expect(some?.commits.map((c) => c.subject)).toEqual(["T-1: first"]);
+
+    // No base recorded (an older session): the latest commits, no count.
+    const old = await readBoxRepoState(sh, { ...repo, baseCommit: undefined });
+    expect(old?.ahead).toBeNull();
+    expect(old?.commits[0]?.subject).toBe("T-1: first");
+    // No clone: nothing to say.
+    expect(await readBoxRepoState(sh, { ...repo, name: "missing" })).toBeNull();
+
+    await saveRepoStateCache(tmp, { app: some! });
+    expect((await loadRepoStateCache(tmp)).app?.ahead).toBe(1);
+    expect(await loadRepoStateCache(path.join(tmp, "nope"))).toEqual({});
+  } finally {
+    await fs.rm(tmp, { recursive: true, force: true });
+  }
+});
+
+test("the mirror says how far GitHub moved past a base", async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "verstas-github-"));
+  try {
+    const upstream = path.join(tmp, "upstream");
+    await makeUpstream(upstream);
+    const base = await git(upstream, "rev-parse", "main");
+    const mirrors = new Mirrors({ home: path.join(tmp, "home"), token: async () => undefined, remote: () => upstream });
+    await mirrors.fetch("acme/app");
+    expect(await mirrors.countSince("acme/app", base, "main")).toBe(0);
+    for (const n of [1, 2]) {
+      await fs.writeFile(path.join(upstream, `${n}.txt`), "x\n");
+      await git(upstream, "add", ".");
+      await git(upstream, "commit", "-q", "-m", `merged ${n}`);
+    }
+    await mirrors.fetch("acme/app");
+    expect(await mirrors.countSince("acme/app", base, "main")).toBe(2);
+    expect((await mirrors.tip("acme/app", "main"))?.subject).toBe("merged 2");
+    expect(await mirrors.tip("acme/app", "gone")).toBeNull();
+    expect(await mirrors.countSince("acme/app", "not-a-sha", "main")).toBeNull();
+  } finally {
+    await fs.rm(tmp, { recursive: true, force: true });
+  }
+});

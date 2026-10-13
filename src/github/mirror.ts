@@ -160,6 +160,20 @@ export class Mirrors {
       });
   }
 
+  /** A branch's newest commit; null when the mirror has no such branch. */
+  async tip(github: string, branch: string): Promise<{ sha: string; date: string; subject: string } | null> {
+    if (!(await this.hasBranch(github, branch))) return null;
+    const [c] = await this.log(github, branch, 1);
+    return c ? { sha: c.sha, date: c.date, subject: c.subject } : null;
+  }
+
+  /** Commits on the branch that `from` lacks (how far GitHub moved past a base); null when the mirror does not know `from`. */
+  async countSince(github: string, from: string, branch: string): Promise<number | null> {
+    if (!/^[0-9a-f]{40}$/.test(from) || !isBranchName(branch)) return null;
+    const out = await this.git(github, ["rev-list", "--count", `${from}..refs/heads/${branch}`]).catch(() => null);
+    return out !== null && /^\d+$/.test(out) ? Number(out) : null;
+  }
+
   /** The packs a branch's manifests imply, read from the mirror's objects (no checkout exists). */
   async packs(github: string, branch: string): Promise<PackName[]> {
     if (!isBranchName(branch)) return [];

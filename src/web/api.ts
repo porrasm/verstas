@@ -46,6 +46,7 @@ import { GithubError, githubApi, parseGithubRepo } from "../github/api.js";
 import type { Mirrors } from "../github/mirror.js";
 import { copyEnvironmentFiles, environmentSettings } from "../sessions/from-environment.js";
 import { applyBundle, ApplyError } from "../sessions/apply.js";
+import { loadRepoStateCache, readBoxRepoState, saveRepoStateCache } from "../sessions/repo-state.js";
 import { importArchive, readArchive, writeArchive } from "../sessions/archive.js";
 import type { SessionHandle } from "../sessions/hub.js";
 import { copyHomeVolume, copySnapshot, listSandboxes, replacementOf, removeSandbox, sandboxStatus, snapshotSandbox, stopAllSandboxes, stopSandbox, type SandboxConfig } from "../sandbox/lifecycle.js";
@@ -1347,6 +1348,61 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
     }),
   );
 
+  /**
+   * What state each repository is in, for the Work panel and the header:
+   * the clone's commits since its base, uncommitted files, and how far
+   * GitHub's branch moved past the base. The clone is read inside the
+   * container when it runs (or with ?start=1, which brings it up); when it
+   * is stopped, the last reading is served with its time.
+   */
+  api.get(
+    "/sessions/:id/repos/state",
+    wrap(async (req, res) => {
+      const h = await d.hub.get(param(req, "id"));
+      const cache = await loadRepoStateCache(h.paths.dir);
+      let live = false;
+      if (isInitialized(h.session) && h.session.repos.length) {
+        let running = (await sandboxStatus(d.sandbox, h.id).catch(() => null))?.container === "running";
+        if (!running && req.query.start === "1" && !d.runs.status(h.id)) {
+          await ensureSessionSandbox(d.runConfig, h.session, path.join(h.paths.dir, "sandbox.env"), false);
+          running = true;
+        }
+        if (running) {
+          const sh = dockerShell(d.sandbox, h.id);
+          for (const r of h.session.repos) {
+            const st = await readBoxRepoState(sh, r).catch(() => null);
+            if (st) cache[r.name] = st;
+          }
+          await saveRepoStateCache(h.paths.dir, cache);
+          live = true;
+        }
+      }
+      const repos = await Promise.all(
+        h.session.repos.map(async (r) => {
+          let remote: { tip: { sha: string; date: string; subject: string } | null; behind: number | null; fetchedAt: string | null } | null = null;
+          let remoteError: string | null = null;
+          if (r.github) {
+            try {
+              await d.mirrors.fresh(r.github);
+              remote = {
+                tip: await d.mirrors.tip(r.github, r.branch),
+                behind: r.baseCommit ? await d.mirrors.countSince(r.github, r.baseCommit, r.branch) : null,
+                fetchedAt: (await d.mirrors.status(r.github)).fetchedAt,
+              };
+            } catch (e) {
+              remoteError = (e as Error).message;
+            }
+          }
+          // A reading from before the base moved (a Reclone) describes a clone that is gone.
+          const cached = cache[r.name];
+          const box = cached && (!r.baseCommit || !cached.base || cached.base.sha === r.baseCommit) ? cached : null;
+          return { name: r.name, github: r.github, branch: r.branch, runBranch: r.runBranch, baseCommit: r.baseCommit, box, remote, remoteError };
+        }),
+      );
+      res.json({ live, repos });
+    }),
+  );
+
   api.post(
     "/sessions/:id/export",
     wrap(async (req, res) => {
@@ -1452,6 +1508,10 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
       await h.mutate((docs) => ({
         next: { session: { ...docs.session, repos: docs.session.repos.map((r) => (r.name === name ? { ...r, branch: restored.branch, runBranch: restored.runBranch, baseCommit: restored.baseCommit } : r)) } },
       }));
+      // The last reading described the old clone.
+      const cache = await loadRepoStateCache(h.paths.dir);
+      delete cache[name];
+      await saveRepoStateCache(h.paths.dir, cache);
       res.json({ ok: true, repo: restored });
     }),
   );
