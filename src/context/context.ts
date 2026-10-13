@@ -177,7 +177,7 @@ const draftGuide = (repos: readonly string[]): string[] => [
   "Work in small steps and read the problems every tool returns:",
   "",
   "1. `draft_create` with a name and the goal. The goal becomes the person's first planning request (the planner drafts tickets from it); write the tickets yourself when you can, since workers read tickets, not the goal.",
-  "2. `draft_set_repositories` with work targets from `list_repositories`. The ticket `repo` field is the directory name (the target name unless you rename it).",
+  "2. `draft_set_repositories` with repositories from `list_repositories`. The ticket `repo` field is the directory name (the target name unless you rename it).",
   "3. `draft_update` with `requirements`: instructions for the setup worker, one verifiable line per need (\"Chromium for Playwright launches\", \"Postgres 17 reachable on 5432\"), on top of what it works out from the repositories and the board. It runs at initialization, before any ticket, so tickets do not install toolchains.",
   "4. `draft_set_network` for the toolchains the repositories download from, and `draft_set_recipes` for library recipes that already set up part of the box.",
   "5. `draft_add_tickets` a few at a time, in dependency order. Give each ticket a spec that names files and commands, and acceptance criteria a reviewer can check by running something.",

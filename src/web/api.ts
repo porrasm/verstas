@@ -41,7 +41,9 @@ import { emptyBoard, addChore, addNote, BoardError, exportBoard, getTicket, impo
 import { codexAuthRefreshedAt, configSchema, loadConfig, loadSecrets, saveConfig, saveSecrets, verstasHome, workTargetSchema, type Config } from "../config.js";
 import { codexAuthAgeDays, configuredDrivers, DRIVERS } from "../harness/drivers.js";
 import type { SessionHub } from "../sessions/hub.js";
-import { createSession, deleteSessionDir, listSessions, makeSessionId, provisionSession, removeClones, repoPick, restoreClone, RESERVED_WORKSPACE_NAMES, sessionPaths, withAgentPacks, writeAllowlist, writeRecipeFiles } from "../sessions/sessions.js";
+import { createSession, deleteSessionDir, listSessions, makeSessionId, provisionSession, removeClones, repoPick, restoreClone, RESERVED_WORKSPACE_NAMES, sessionPaths, withAgentPacks, writeAllowlist, writeRecipeFiles, type CloneSource } from "../sessions/sessions.js";
+import { GithubError, githubApi, parseGithubRepo } from "../github/api.js";
+import type { Mirrors } from "../github/mirror.js";
 import { copyEnvironmentFiles, environmentSettings } from "../sessions/from-environment.js";
 import { applyBundle, ApplyError } from "../sessions/apply.js";
 import { importArchive, readArchive, writeArchive } from "../sessions/archive.js";
@@ -52,11 +54,11 @@ import type { RunManager } from "../harness/run.js";
 import { dockerShell, ensureSessionSandbox, runSetup, type RunManagerConfig } from "../harness/docker-worker.js";
 import { deleteScript, getScript, hostsFromScript, listScripts, saveScript, setupScriptSchema } from "../scripts/library.js";
 import { buildContext, probeImage } from "../context/context.js";
-import { allowlistFor, detectPacksInRepo, NETWORK_PACKS, packHosts } from "../network/packs.js";
+import { allowlistFor, NETWORK_PACKS, packHosts } from "../network/packs.js";
 import { allRuns, lastRun, runTotals } from "../sessions/runs.js";
 import { RemoteClient } from "../remote/client.js";
 import { isLoopback } from "../remote/http.js";
-import { cloneFromBundle, extractZip, listBranches, runBranchName, startRunBranch } from "../sessions/workspace.js";
+import { cloneFromBundle, extractZip, runBranchName, startRunBranch } from "../sessions/workspace.js";
 import { DraftError, draftBoardText, validateDraft, type Draft } from "../drafts/draft.js";
 import type { DraftStore } from "../drafts/store.js";
 import type { McpSetup } from "../drafts/setup.js";
@@ -90,6 +92,10 @@ export type UiApiDeps = {
   drafts: DraftStore;
   /** How to connect an assistant to the draft MCP endpoint, with real paths. */
   mcpSetup: () => Promise<McpSetup>;
+  /** The host's mirrors of the GitHub repositories (src/github/mirror.ts). */
+  mirrors: Mirrors;
+  /** The GitHub API; tests replace it. */
+  github?: (token: string | undefined) => ReturnType<typeof githubApi>;
 };
 
 const wrap =
@@ -324,27 +330,98 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
     }),
   );
 
-  api.post(
-    "/work-targets",
-    wrap(async (req, res) => {
-      const t = workTargetSchema.parse(req.body);
-      const abs = path.resolve(expandHome(t.path));
-      const inside = await execFileP("git", ["-C", abs, "rev-parse", "--is-inside-work-tree"]).then((r) => r.stdout.trim()).catch(() => "false");
-      if (inside !== "true") {
-        res.status(400).json({ error: `${abs} is not a git work tree` });
-        return;
-      }
-      const cfg = d.getConfig();
-      if (cfg.workTargets.some((w) => w.name === t.name)) {
-        res.status(409).json({ error: `A work target named ${t.name} exists` });
-        return;
-      }
-      const next = { ...cfg, workTargets: [...cfg.workTargets, { name: t.name, path: abs }] };
-      await d.setConfig(next);
-      res.status(201).json(next.workTargets);
+  // --- GitHub: the token and the repositories (src/github) --------------------------
+
+  const gh = async () => (d.github ?? githubApi)((await loadSecrets()).githubToken);
+
+  /** Where a session repository's clone comes from: its mirror, fetched now. */
+  const cloneSource: CloneSource = async (r) => {
+    if (r.github) return d.mirrors.fresh(r.github);
+    throw Object.assign(new Error(`${r.name} came from a local checkout${r.sourcePath ? ` (${r.sourcePath})` : ""}; sessions now clone GitHub repositories only. Export its bundle to keep the work.`), { status: 409 });
+  };
+
+  const githubView = async () => ({ hasToken: Boolean((await loadSecrets()).githubToken) });
+
+  api.get(
+    "/github",
+    wrap(async (_req, res) => {
+      res.json(await githubView());
     }),
   );
 
+  /** Saves the token; an empty one removes it. It is never sent back. */
+  api.put(
+    "/github",
+    wrap(async (req, res) => {
+      const { token } = z.object({ token: z.string().trim().max(500) }).parse(req.body);
+      await saveSecrets({ ...(await loadSecrets()), githubToken: token || undefined });
+      res.json(await githubView());
+    }),
+  );
+
+  /** Who the token (the one given, or the saved one) is, and whether each repository is reachable with it. */
+  api.post(
+    "/github/test",
+    wrap(async (req, res) => {
+      const { token } = z.object({ token: z.string().trim().max(500).optional() }).parse(req.body ?? {});
+      const client = (d.github ?? githubApi)(token || (await loadSecrets()).githubToken);
+      try {
+        const me = await client.whoami();
+        const repos = await Promise.all(
+          d.getConfig().workTargets.map(async (w) => {
+            try {
+              const r = await client.repo(w.github);
+              return { name: w.name, github: w.github, ok: true, canPush: r.canPush };
+            } catch (e) {
+              return { name: w.name, github: w.github, ok: false, error: (e as Error).message };
+            }
+          }),
+        );
+        res.json({ ok: true, login: me?.login ?? null, repos });
+      } catch (e) {
+        res.json({ ok: false, error: (e as Error).message });
+      }
+    }),
+  );
+
+  const targetView = async (w: Config["workTargets"][number]) => ({ ...w, mirror: await d.mirrors.status(w.github) });
+
+  api.get(
+    "/work-targets",
+    wrap(async (_req, res) => {
+      res.json(await Promise.all(d.getConfig().workTargets.map(targetView)));
+    }),
+  );
+
+  /**
+   * Adds a GitHub repository by "owner/name" or its URL. GitHub is asked for
+   * its default branch (which also proves the token can see it), and the
+   * first mirror fetch starts in the background: a large repository takes
+   * a while once, and the list shows when it is done.
+   */
+  api.post(
+    "/work-targets",
+    wrap(async (req, res) => {
+      const body = z.object({ repo: z.string().min(1).max(300), name: z.string().optional() }).parse(req.body);
+      const parsed = parseGithubRepo(body.repo);
+      if (!parsed) throw Object.assign(new Error(`Not a GitHub repository: ${body.repo}. Use owner/name or its github.com URL.`), { status: 400 });
+      let info;
+      try {
+        info = await (await gh()).repo(parsed);
+      } catch (e) {
+        throw Object.assign(new Error((e as Error).message), { status: e instanceof GithubError && e.status < 500 ? 400 : 502 });
+      }
+      const t = workTargetSchema.parse({ name: body.name?.trim() || info.github.split("/")[1], github: info.github, defaultBranch: info.defaultBranch });
+      const cfg = d.getConfig();
+      if (cfg.workTargets.some((w) => w.name === t.name)) throw Object.assign(new Error(`A repository named ${t.name} exists; give this one another name`), { status: 409 });
+      if (cfg.workTargets.some((w) => w.github.toLowerCase() === t.github.toLowerCase())) throw Object.assign(new Error(`${t.github} is added already`), { status: 409 });
+      await d.setConfig({ ...cfg, workTargets: [...cfg.workTargets, t] });
+      d.mirrors.fetch(t.github).catch((e: Error) => console.warn(`[github] ${e.message}`));
+      res.status(201).json(await targetView(t));
+    }),
+  );
+
+  /** Removes the repository from the list; existing sessions keep their clones, and the mirror stays for them. */
   api.delete(
     "/work-targets/:name",
     wrap(async (req, res) => {
@@ -354,29 +431,44 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
     }),
   );
 
-  /** Branches of a work target, for the new-session form. */
-  api.get(
-    "/work-targets/:name/branches",
+  const targetNamed = (name: string) => {
+    const t = d.getConfig().workTargets.find((w) => w.name === name);
+    if (!t) throw Object.assign(new Error("No such repository"), { status: 404 });
+    return t;
+  };
+
+  /** Fetch from GitHub now. */
+  api.post(
+    "/work-targets/:name/fetch",
     wrap(async (req, res) => {
-      const t = d.getConfig().workTargets.find((w) => w.name === param(req, "name"));
-      if (!t) {
-        res.status(404).json({ error: "No such work target" });
-        return;
+      const t = targetNamed(param(req, "name"));
+      try {
+        await d.mirrors.fetch(t.github);
+      } catch (e) {
+        throw Object.assign(new Error((e as Error).message), { status: 502 });
       }
-      res.json(await listBranches(t.path));
+      res.json(await targetView(t));
     }),
   );
 
-  /** Packs a work target's manifests imply, for the new-session form. */
+  /** Branches on GitHub (from the mirror, fetched if stale), newest first; `current` is the default branch. For the session page's repository picker. */
+  api.get(
+    "/work-targets/:name/branches",
+    wrap(async (req, res) => {
+      const t = targetNamed(param(req, "name"));
+      await d.mirrors.fresh(t.github);
+      res.json({ current: t.defaultBranch, branches: await d.mirrors.branches(t.github) });
+    }),
+  );
+
+  /** Packs a branch's manifests imply (the default branch when none is given). */
   api.get(
     "/work-targets/:name/packs",
     wrap(async (req, res) => {
-      const t = d.getConfig().workTargets.find((w) => w.name === param(req, "name"));
-      if (!t) {
-        res.status(404).json({ error: "No such work target" });
-        return;
-      }
-      res.json({ packs: await detectPacksInRepo(t.path).catch(() => []) });
+      const t = targetNamed(param(req, "name"));
+      const branch = typeof req.query.branch === "string" && req.query.branch ? req.query.branch : t.defaultBranch;
+      await d.mirrors.fresh(t.github).catch(() => undefined);
+      res.json({ packs: await d.mirrors.packs(t.github, branch).catch(() => []) });
     }),
   );
 
@@ -624,7 +716,7 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
         const branch = opts.branches[r.name] ?? r.branch;
         const runBranch = runBranchName(id);
         if (branch !== r.runBranch) {
-          repos.push({ name: r.name, sourcePath: r.sourcePath, branch, runBranch });
+          repos.push({ name: r.name, github: r.github, sourcePath: r.sourcePath, branch, runBranch });
           continue;
         }
         // The source's unapplied commits: bundled inside its container, cloned here from the bundle, which is pure data (Boundary 5).
@@ -642,7 +734,7 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
         await cloneFromBundle(bundle, dest, r.runBranch);
         const baseCommit = await startRunBranch(dest, runBranch);
         await fs.rm(bundle, { force: true });
-        repos.push({ name: r.name, sourcePath: r.sourcePath, branch, runBranch, baseCommit });
+        repos.push({ name: r.name, github: r.github, sourcePath: r.sourcePath, branch, runBranch, baseCommit });
       }
       const settings = environmentSettings(src.session, { requirements: input.requirements }, now());
       const h = await d.hub.get(id);
@@ -650,7 +742,7 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
       await writeRecipeFiles(dst, settings.setupScripts);
       await writeAllowlist(dst, settings.allowlist);
       if (pasted) await h.mutate((docs) => ({ next: { board: importBoard(docs.board, pasted, { by: "user", defaultState: "ready" }).board } }));
-      const { repos: provisioned, clones } = await provisionSession(cfg.sessionsRoot, h.session);
+      const { repos: provisioned, clones } = await provisionSession(cfg.sessionsRoot, h.session, cloneSource);
       await h.mutate((docs) => ({ next: { session: { ...docs.session, repos: provisioned } } }));
       const ctl = await d.runs.start(id, { init: true, start: false });
       res.status(201).json({ session: h.session, run: ctl.run, clones, copied: { ...files, snapshot: Boolean(snapshot), readiness: settings.environmentFrom!.readinessCarried } });
@@ -678,7 +770,7 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
       }
       const repos = input.repos.map((r) => {
         const target = cfg.workTargets.find((w) => w.name === r.target);
-        if (!target) throw new Error(`Unknown work target ${r.target}`);
+        if (!target) throw new Error(`Unknown repository ${r.target}`);
         return { target, branch: r.branch, name: r.name };
       });
       const zips = input.uploads.map((u) => ({ name: u.name, file: path.join(uploadsDir, `${u.id}.zip`) }));
@@ -725,13 +817,19 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
       const h = await d.hub.get(param(req, "id"));
       if (onlyBeforeInit(res, h, "Repositories")) return;
       const target = d.getConfig().workTargets.find((w) => w.name === pick.target);
-      if (!target) throw Object.assign(new Error(`Unknown work target ${pick.target}`), { status: 404 });
+      if (!target) throw Object.assign(new Error(`Unknown repository ${pick.target}`), { status: 404 });
       const name = pick.name ?? target.name;
       if (RESERVED_WORKSPACE_NAMES.includes(name)) throw Object.assign(new Error(`"${name}" is reserved in the workspace`), { status: 409 });
       if (h.session.repos.some((r) => r.name === name)) throw Object.assign(new Error(`This session already has a repository named ${name}`), { status: 409 });
       const spec = await repoPick(h.id, { target, branch: pick.branch, name: pick.name });
+      try {
+        await d.mirrors.fresh(target.github);
+      } catch (e) {
+        throw Object.assign(new Error((e as Error).message), { status: 502 });
+      }
+      if (!(await d.mirrors.hasBranch(target.github, spec.branch))) throw Object.assign(new Error(`${target.github} has no branch ${spec.branch}`), { status: 400 });
       // The packs the repository's manifests imply join the allowlist, as the New session form did.
-      const found = await detectPacksInRepo(target.path).catch(() => [] as string[]);
+      const found = await d.mirrors.packs(target.github, spec.branch).catch(() => [] as string[]);
       await h.mutate((docs) => {
         const packs = withAgentPacks([...new Set([...docs.session.packs, ...found])], docs.session);
         return { next: { session: { ...docs.session, repos: [...docs.session.repos, spec], packs, allowlist: [...new Set([...docs.session.allowlist, ...packHosts(packs)])] } } };
@@ -828,7 +926,7 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
         res.status(409).json({ error: "This session is initialized already" });
         return;
       }
-      const { repos, clones } = await provisionSession(d.getConfig().sessionsRoot, h.session);
+      const { repos, clones } = await provisionSession(d.getConfig().sessionsRoot, h.session, cloneSource);
       await h.mutate((docs) => ({ next: { session: { ...docs.session, repos } } }));
       let ctl;
       try {
@@ -1280,6 +1378,10 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
         res.status(404).json({ error: `No repository ${repo} in this session` });
         return;
       }
+      if (!spec.sourcePath) {
+        res.status(400).json({ error: `${repo} is a GitHub repository; Apply works only for sessions cloned from a local checkout. Use Export to download its bundle.` });
+        return;
+      }
       try {
         const [file] = await bundleRepos(h, [repo]);
         const result = await applyBundle({ targetPath: spec.sourcePath, bundleFile: file!.file, branch: spec.runBranch, baseCommit: spec.baseCommit, sourceBranch: spec.branch });
@@ -1291,7 +1393,7 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
     }),
   );
 
-  /** Branches of a session repository's work target, for the restore dialog. */
+  /** Branches of a session repository on GitHub (from the mirror), for the Reclone dialog. */
   api.get(
     "/sessions/:id/repos/:name/branches",
     wrap(async (req, res) => {
@@ -1301,23 +1403,27 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
         res.status(404).json({ error: `No repository ${String(param(req, "name"))} in this session` });
         return;
       }
+      if (!spec.github) {
+        res.status(409).json({ error: `${spec.name} came from a local checkout; sessions now clone GitHub repositories only` });
+        return;
+      }
       try {
-        res.json(await listBranches(spec.sourcePath));
+        await d.mirrors.fresh(spec.github);
+        res.json({ current: spec.branch, branches: await d.mirrors.branches(spec.github) });
       } catch (e) {
-        res.status(400).json({ error: `${spec.sourcePath} is not a git work tree any more: ${(e as Error).message.split("\n")[0]}` });
+        res.status(502).json({ error: (e as Error).message });
       }
     }),
   );
 
   /**
-   * Restore from repo: the clone is replaced by a fresh clone of the work
-   * target, at its recorded branch or the one given, when the repository
-   * changed outside the session. The container is stopped first so nothing
-   * holds the old clone; the next start brings it up again (on a Linux host
-   * that chowns the new clone to the agent). The run branch keeps its name
-   * and the base commit moves, so Apply lists only the work done from here
-   * on. Unapplied commits go with the old clone; the page says so and
-   * offers Apply first. See docs/SANDBOX.md Boundary 1.
+   * Reclone: the clone is replaced by a fresh clone from the repository's
+   * GitHub mirror (fetched first), at its recorded branch or the one given.
+   * The container is stopped first so nothing holds the old clone; the next
+   * start brings it up again (on a Linux host that chowns the new clone to
+   * the agent). The run branch keeps its name and the base commit moves.
+   * Unpublished commits go with the old clone; the page says so. See
+   * docs/SANDBOX.md Boundary 1.
    */
   api.post(
     "/sessions/:id/repos/:name/restore",
@@ -1338,9 +1444,9 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
       await stopSandbox(d.sandbox, h.id);
       let restored;
       try {
-        restored = await restoreClone(d.getConfig().sessionsRoot, h.session, name, branch);
+        restored = await restoreClone(d.getConfig().sessionsRoot, h.session, name, branch, cloneSource);
       } catch (e) {
-        res.status(400).json({ error: (e as Error).message });
+        res.status((e as { status?: number }).status ?? 400).json({ error: (e as Error).message });
         return;
       }
       await h.mutate((docs) => ({

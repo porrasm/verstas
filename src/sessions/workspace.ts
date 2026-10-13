@@ -25,7 +25,8 @@ export type CloneResult = { dest: string; branch: string; runBranch: string; com
 export const runBranchName = (sessionId: string): string => `verstas/${sessionId}`;
 
 /**
- * `git clone --no-local --template= --branch <b> --single-branch <src> <dest>`
+ * `git clone --no-local --template= --branch <b> --single-branch <src> <dest>`,
+ * where <src> is the host's mirror of the GitHub repository.
  *
  * - `--no-local`: use the normal transport, which produces a self-contained
  *   clone: no hard links into your repository's objects, no alternates file
@@ -44,8 +45,9 @@ export const cloneWorkTarget = async (
   sessionId: string,
 ): Promise<CloneResult> => {
   const src = path.resolve(sourcePath);
-  const inside = await git(["-C", src, "rev-parse", "--is-inside-work-tree"]).catch(() => "false");
-  if (inside !== "true") throw new Error(`${sourcePath} is not a git work tree`);
+  // A work tree (tests, sessions from before mirrors) or a bare mirror.
+  const isRepo = await git(["-C", src, "rev-parse", "--git-dir"]).then(() => true, () => false);
+  if (!isRepo) throw new Error(`${sourcePath} is not a git repository`);
   const chosen = branch ?? (await git(["-C", src, "symbolic-ref", "--short", "HEAD"]));
   if (!BRANCH_RE.test(chosen) || chosen.startsWith("-")) throw new Error(`Bad branch name: ${chosen}`);
 
@@ -151,11 +153,4 @@ export const entryProblem = (name: string, attr: number, size: number, maxFileBy
   if ((mode & S_IFMT) === S_IFLNK) return "symlink";
   if (size > maxFileBytes) return "file too large";
   return null;
-};
-
-/** Local branches of a work target and the checked-out one, for the new-session form and the draft tools. */
-export const listBranches = async (repoPath: string): Promise<{ current: string; branches: string[] }> => {
-  const out = await git(["-C", repoPath, "for-each-ref", "--format=%(refname:short)", "refs/heads/"]);
-  const current = await git(["-C", repoPath, "symbolic-ref", "--short", "HEAD"]).catch(() => "");
-  return { current, branches: out.split("\n").filter(Boolean) };
 };

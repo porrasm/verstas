@@ -11,7 +11,7 @@ only you create, start or run.
 | Name, goal | The goal becomes the first planning request on the session page (Plan tickets); it is not part of the setup and workers do not read it. |
 | Session requirements | Instructions for the setup worker, on top of what it works out from the repositories and the board. |
 | Notes | For you: the assistant's assumptions and open questions. |
-| Repositories | Work targets from Settings, with a branch and an optional directory name. A draft cannot add work targets. |
+| Repositories | GitHub repositories from Settings, with a branch and an optional directory name. A draft cannot add repositories. |
 | Network | Packs and extra hosts. The Claude API is always on. |
 | Recipes | Library recipes by name. A draft never carries a script of its own. |
 | Board | Tickets in the board format (`docs/BOARD.md`), including a ticket's optional `agent` (its own driver and model) and chores. |
@@ -50,12 +50,12 @@ validate it, and give you the review link.
 | Tool | Does |
 | --- | --- |
 | `verstas_context` | The box, the network rules, the recipe library, the board format, the packs and the workflow. Read first. |
-| `list_repositories` | Work targets with branches and the packs their manifests imply. |
+| `list_repositories` | Repositories with their default branch, branches and the packs their manifests imply. |
 | `list_recipes` | The recipe library, optionally with the scripts. |
 | `draft_list`, `draft_get`, `draft_get_ticket` | Read drafts. |
 | `draft_create` | A new draft from a name and a goal. |
 | `draft_update` | Name, goal, requirements, notes. |
-| `draft_set_repositories`, `draft_set_network`, `draft_set_recipes` | Replace those lists. Unknown work targets, branches, packs and recipes are refused. |
+| `draft_set_repositories`, `draft_set_network`, `draft_set_recipes` | Replace those lists. Unknown repositories, branches, packs and recipes are refused. |
 | `draft_add_tickets` | Up to 20 tickets per call. A dependency on a ticket added later is allowed and shows as a problem until it exists. |
 | `draft_update_ticket`, `draft_remove_tickets` | Edit tickets. Removing a ticket drops it from other tickets' deps and says which. |
 | `draft_import_board` | A whole board at once, merged by id or replacing. |
@@ -87,8 +87,8 @@ Errors block Continue. Delete a draft from its page.
   answers only requests whose `Host` is a loopback name and refuses any
   `Origin` that is not loopback, so a web page cannot reach it through DNS
   rebinding.
-- The draft tools read the work targets' branch names and manifests (as
-  data, like the New session form) and write draft files. They run nothing
+- The draft tools read the repositories' branch names and manifests from
+  their mirrors (as data, like the New session form) and write draft files. They run nothing
   in a container and nothing from a repository.
 - The surface is the boundary for an assistant that only has these tools.
   An assistant that also has a shell on your machine can do whatever you

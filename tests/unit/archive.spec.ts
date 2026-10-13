@@ -40,8 +40,8 @@ const workedSession = async (tmp: string) => {
   zip.addFile("spec.md", Buffer.from("# spec\n"));
   const zipFile = path.join(tmp, "spec.zip");
   zip.writeZip(zipFile);
-  const { session, paths } = await createSession(root, { name: "Nuppi", repos: [{ target: { name: "nuppi", path: src } }], zips: [{ name: "spec.zip", file: zipFile }], image: "verstas-devbox:local" });
-  const { repos } = await provisionSession(root, session);
+  const { session, paths } = await createSession(root, { name: "Nuppi", repos: [{ target: { name: "nuppi", github: "me/nuppi", defaultBranch: "main" } }], zips: [{ name: "spec.zip", file: zipFile }], image: "verstas-devbox:local" });
+  const { repos } = await provisionSession(root, session, async () => src);
   const initialized = { ...session, repos, initializedAt: "2026-10-05T10:00:00.000Z", state: "paused" as const, snapshot: { image: "verstas-session-x:latest", at: "2026-10-05T10:00:00.000Z", baseImageId: "sha256:abc" }, remote: true };
   await saveSession(root, initialized);
   await saveBoard(paths.dir, { ...emptyBoard("the goal"), goal: "the goal" });
@@ -89,10 +89,9 @@ test("a worked session goes through an archive to another machine: clones at the
     expect(names).not.toContain("runs/1/env");
     expect(names).not.toContain("workspace/notes/leak");
 
-    // The other machine has its own image and a work target of the same name somewhere else.
+    // The other machine has its own image; the GitHub repository means the same there.
     const vps = path.join(tmp, "vps");
-    const there = path.join(tmp, "vps-repos", "nuppi");
-    const r = await importArchive({ root: vps, file: out, id: w.session.id, workTargets: [{ name: "nuppi", path: there }], image: "verstas-devbox:vps" });
+    const r = await importArchive({ root: vps, file: out, id: w.session.id, workTargets: [], image: "verstas-devbox:vps" });
     expect(r.unmapped).toEqual([]);
     const s = await loadSession(vps, w.session.id);
     expect(s.initializedAt).toBeNull();
@@ -100,7 +99,7 @@ test("a worked session goes through an archive to another machine: clones at the
     expect(s.snapshot).toBeUndefined();
     expect(s.image).toBe("verstas-devbox:vps");
     expect(s.remote).toBe(true);
-    expect(s.repos[0]).toMatchObject({ name: "nuppi", sourcePath: there, runBranch: `verstas/${w.session.id}`, baseCommit: w.session.repos[0]!.baseCommit });
+    expect(s.repos[0]).toMatchObject({ name: "nuppi", github: "me/nuppi", runBranch: `verstas/${w.session.id}`, baseCommit: w.session.repos[0]!.baseCommit });
     expect(s.attachments.map((a) => a.dir)).toEqual(["spec"]);
 
     const p = sessionPaths(vps, w.session.id);
@@ -139,9 +138,9 @@ test("import: an existing id is refused, a copy takes a new id, replace swaps th
     const copy = await importArchive({ root: w.root, file: out, id: `${w.session.id}-2`, name: "Nuppi (copy)", workTargets: [], image: "img" });
     expect(copy.session.id).toBe(`${w.session.id}-2`);
     expect((await loadSession(w.root, copy.session.id)).name).toBe("Nuppi (copy)");
-    expect(copy.unmapped).toEqual(["nuppi"]);
-    // No work target here: the recorded path stays, for the record.
-    expect(copy.session.repos[0]!.sourcePath).toBe(w.src);
+    // A GitHub repository needs no repository configured here to be known.
+    expect(copy.unmapped).toEqual([]);
+    expect(copy.session.repos[0]!.github).toBe("me/nuppi");
     const run = JSON.parse(await fs.readFile(path.join(sessionPaths(w.root, copy.session.id).runs, "1", "run.json"), "utf8"));
     expect(run.sessionId).toBe(copy.session.id);
 
@@ -207,18 +206,21 @@ test("replacementOf: keeping the environment removes only the container, proxy a
   expect(gone).toContain("image rm -f sha256:snap");
 });
 
-test("a plan travels without bundles; its picks point at this machine's work targets", async () => {
+test("a plan travels without bundles; a pick from a local checkout points at this machine's repository of the same name", async () => {
   const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "verstas-archive-"));
   try {
     const src = path.join(tmp, "src-repo");
     await makeSourceRepo(src);
     const root = path.join(tmp, "a");
-    const { session } = await createSession(root, { name: "Plan", repos: [{ target: { name: "nuppi", path: src } }], zips: [], image: "img" });
+    const created = await createSession(root, { name: "Plan", repos: [{ target: { name: "nuppi", github: "me/nuppi", defaultBranch: "main" } }], zips: [], image: "img" });
+    // A pick from before GitHub repositories: a local path, no github.
+    const session = { ...created.session, repos: [{ name: "nuppi", sourcePath: src, branch: "main", runBranch: created.session.repos[0]!.runBranch }] };
+    await saveSession(root, session);
     const out = path.join(tmp, "p.ver");
     await writeArchive({ root, session, bundles: [], outFile: out });
     expect(readArchive(out).manifest).toMatchObject({ initialized: false, repos: [{ name: "nuppi", runBranch: `verstas/${session.id}` }] });
-    const r = await importArchive({ root: path.join(tmp, "b"), file: out, id: session.id, workTargets: [{ name: "nuppi", path: "/elsewhere/nuppi" }], image: "img" });
-    expect(r.session.repos[0]!.sourcePath).toBe("/elsewhere/nuppi");
+    const r = await importArchive({ root: path.join(tmp, "b"), file: out, id: session.id, workTargets: [{ name: "nuppi", github: "acme/nuppi", defaultBranch: "main" }], image: "img" });
+    expect(r.session.repos[0]!.github).toBe("acme/nuppi");
     await expect(fs.access(path.join(sessionPaths(path.join(tmp, "b"), session.id).workspace, "nuppi"))).rejects.toThrow();
   } finally {
     await fs.rm(tmp, { recursive: true, force: true });

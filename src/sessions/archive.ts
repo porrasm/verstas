@@ -183,7 +183,7 @@ export type ImportInput = {
   id: string;
   /** A name other than the exported one, e.g. "Floralin (copy)" for a copy beside the original. */
   name?: string;
-  /** This machine's repositories; a pick or clone is pointed at the one with the same name. */
+  /** This machine's repositories; a pick or clone from before GitHub repositories is pointed at the one with the same name. */
   workTargets: readonly WorkTarget[];
   /** This machine's dev-box image. */
   image: string;
@@ -201,7 +201,7 @@ export type ImportInput = {
 
 export type ImportResult = {
   session: Session;
-  /** Repositories with no work target of the same name here: Apply needs one; Export bundles works regardless. */
+  /** Repositories from a local checkout with no repository of the same name here: Reclone needs one; Export bundles works regardless. */
   unmapped: string[];
   skipped: string[];
 };
@@ -255,8 +255,9 @@ export const importArchive = async (i: ImportInput): Promise<ImportResult> => {
     const unmapped: string[] = [];
     const repos: Session["repos"] = [];
     for (const r of exported.repos) {
-      const target = i.workTargets.find((w) => w.name === r.name);
-      if (!target) unmapped.push(r.name);
+      // A GitHub repository means the same everywhere; an older local pick is pointed at this machine's repository of the same name.
+      const target = r.github ? undefined : i.workTargets.find((w) => w.name === r.name);
+      if (!r.github && !target) unmapped.push(r.name);
       const m = manifest.repos.find((x) => x.name === r.name);
       if (m?.bundle) {
         const e = zip.getEntry(m.bundle);
@@ -270,7 +271,7 @@ export const importArchive = async (i: ImportInput): Promise<ImportResult> => {
         }
         await fs.rm(bundleFile, { force: true });
       } else if (manifest.initialized) throw new ArchiveError(`${r.name} has no bundle in the archive`);
-      repos.push({ ...r, sourcePath: target?.path ?? r.sourcePath });
+      repos.push(target ? { ...r, github: target.github } : r);
     }
 
     // The session as a plan of this machine: its image and no setup verdict; Initialize brings those. A replaced session's kept snapshot stays.

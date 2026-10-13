@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   api,
+  repoOrigin,
   type RemoteSettings,
   copyText,
   type ApplyResult,
@@ -727,13 +728,13 @@ const WorkPanel = ({ session, base, active, done, onExport, onDone }: { session:
         <h3>Work</h3>
         <span className="muted small">{done} ticket{done === 1 ? "" : "s"} committed</span>
       </div>
-      <p className="lead">Apply puts a repository's commits on the branch <span className="mono">{session.repos[0]?.runBranch}</span> in your real checkout. Your current branch is not touched; merge or cherry-pick when you are ready.</p>
+      {session.repos.some((r) => r.sourcePath && !r.github) && <p className="lead">Apply puts a repository's commits on the branch <span className="mono">{session.repos[0]?.runBranch}</span> in your real checkout. Your current branch is not touched; merge or cherry-pick when you are ready.</p>}
       {session.repos.map((r) => (
         <div className="row" key={r.name} style={{ justifyContent: "space-between" }}>
-          <span><strong>{r.name}</strong> <span className="muted small mono" title={r.sourcePath}>{r.sourcePath.replace(/^\/Users\/[^/]+/, "~")}</span></span>
+          <span><strong>{r.name}</strong> <span className="muted small mono" title={r.github ?? r.sourcePath}>{repoOrigin(r)}</span> <span className="muted small mono">· {r.branch}</span></span>
           <span className="row" style={{ gap: 6 }}>
-            <button className="sm" onClick={() => apply(r.name)} disabled={Boolean(busy) || active} title={active ? "Pause or stop the run first" : `Create or update ${r.runBranch} in ${r.sourcePath}`}>{busy === r.name ? "Applying…" : "Apply to repo"}</button>
-            <button className="quiet sm" onClick={() => setRestoring(r)} disabled={Boolean(busy) || active} title={active ? "Pause or stop the run first" : `Replace the clone with a fresh clone of ${r.sourcePath}`}>Restore from repo…</button>
+            {r.sourcePath && !r.github && <button className="sm" onClick={() => apply(r.name)} disabled={Boolean(busy) || active} title={active ? "Pause or stop the run first" : `Create or update ${r.runBranch} in ${r.sourcePath}`}>{busy === r.name ? "Applying…" : "Apply to repo"}</button>}
+            {r.github && <button className="quiet sm" onClick={() => setRestoring(r)} disabled={Boolean(busy) || active} title={active ? "Pause or stop the run first" : `Replace the clone with a fresh clone of ${r.github} from GitHub`}>Reclone…</button>}
           </span>
         </div>
       ))}
@@ -819,22 +820,22 @@ const RestoreRepo = ({ repo, base, onClose, onDone }: { repo: RepoSpec; base: st
   });
   const restore = () => step("restore", async () => {
     const r = await api<{ repo: RepoSpec }>("POST", `${base}/repos/${encodeURIComponent(repo.name)}/restore`, { branch });
-    await onDone(`${repo.name} restored from ${repo.sourcePath} at ${r.repo.branch} ${r.repo.baseCommit?.slice(0, 10) ?? ""}. The container was stopped; the next run starts it again. Installed dependencies inside the clone are gone; Re-run recipes if setup put them there.`);
+    await onDone(`${repo.name} recloned from ${repoOrigin(repo)} at ${r.repo.branch} ${r.repo.baseCommit?.slice(0, 10) ?? ""}. The container was stopped; the next run starts it again. Installed dependencies inside the clone are gone; Re-run recipes if setup put them there.`);
   });
   const atRisk = commits !== 0 && !applied;
   return (
     <div className="overlay" onMouseDown={(e) => e.target === e.currentTarget && !working && onClose()} role="dialog" aria-modal="true" aria-labelledby="restore-title">
       <div className="dialog">
-        <h3 id="restore-title">Restore {repo.name} from repo</h3>
+        <h3 id="restore-title">Reclone {repo.name}</h3>
         <p className="small" style={{ margin: 0 }}>
-          This deletes the clone in the box and clones <span className="mono">{repo.sourcePath}</span> again as it is now. The run branch <span className="mono">{repo.runBranch}</span> starts over from the new base, so Apply later lists only the work done from here on. Commits on it that you have not applied or exported are lost, and so are ignored files inside the clone (node_modules, build output). The container is stopped and starts again with the next run.
+          This deletes the clone in the box and clones <span className="mono">{repoOrigin(repo)}</span> again as it is on GitHub now. The run branch <span className="mono">{repo.runBranch}</span> starts over from the new base. Commits on it that you have not published or exported are lost, and so are ignored files inside the clone (node_modules, build output). The container is stopped and starts again with the next run.
         </p>
         <div className="stack tight small">
           <div>
             <strong>{repo.name}</strong> <span className="mono muted">{repo.runBranch}</span>:{" "}
             {commits === undefined ? <span className="muted">counting commits since the session started…</span> : commits === null ? <span className="warn">could not count the commits</span> : commits === 0 ? <span className="muted">no commits since the session started</span> : <b>{commits} commit{commits === 1 ? "" : "s"} since the session started</b>}
             {applied && <span className="ok"> · {applied}</span>}
-            {commits !== 0 && !applied && <> <button className="sm" onClick={() => void apply()} disabled={Boolean(working)}>{working === "apply" ? "Applying…" : "Apply to repo first"}</button></>}
+            {commits !== 0 && !applied && repo.sourcePath && !repo.github && <> <button className="sm" onClick={() => void apply()} disabled={Boolean(working)}>{working === "apply" ? "Applying…" : "Apply to repo first"}</button></>}
           </div>
           <label className="row" style={{ gap: 8 }}>
             <span>Branch to clone</span>
@@ -850,7 +851,7 @@ const RestoreRepo = ({ repo, base, onClose, onDone }: { repo: RepoSpec; base: st
           {err && <div className="banner warn"><span>{err}</span></div>}
         </div>
         <div className="row">
-          <button className="warn solid" onClick={() => void restore()} disabled={commits === undefined || Boolean(working) || !branch.trim()}>{working === "restore" ? "Restoring…" : atRisk ? `Restore and lose ${repo.name}'s unsaved work` : `Restore ${repo.name}`}</button>
+          <button className="warn solid" onClick={() => void restore()} disabled={commits === undefined || Boolean(working) || !branch.trim()}>{working === "restore" ? "Recloning…" : atRisk ? `Reclone and lose ${repo.name}'s unsaved work` : `Reclone ${repo.name}`}</button>
           <button className="quiet" onClick={onClose} disabled={Boolean(working)}>Cancel</button>
         </div>
       </div>
@@ -861,7 +862,7 @@ const RestoreRepo = ({ repo, base, onClose, onDone }: { repo: RepoSpec; base: st
 // --- the environment: repositories, attachments, recipes, setup mode, initialization ------
 
 type SetupInfo = { requirements: string; readiness: Readiness | null; env: string; recipe: string; recipeLog: string; logs: Record<string, string> };
-type RepoChoice = { target: string; path: string; branches: string[]; current: string };
+type RepoChoice = { target: string; github: string; branches: string[]; current: string };
 type Brief = { text: string; updatedAt: string | null; words: number };
 
 /**
@@ -897,7 +898,7 @@ const useEnvironment = (session: Session, base: string, active: boolean, onDone:
         const out: RepoChoice[] = [];
         for (const w of c.workTargets) {
           const b = await api<{ current: string; branches: string[] }>("GET", `/work-targets/${encodeURIComponent(w.name)}/branches`).catch(() => ({ current: "", branches: [] }));
-          out.push({ target: w.name, path: w.path, branches: b.branches, current: b.current });
+          out.push({ target: w.name, github: w.github, branches: b.branches, current: b.current || w.defaultBranch });
         }
         setChoices(out);
       })
@@ -929,7 +930,7 @@ type Env = ReturnType<typeof useEnvironment>;
 const RepoSection = ({ env, bare }: { env: Env; bare?: boolean }) => {
   const { session, base, active, busy, choices, initialized, act } = env;
   const [adding, setAdding] = useState<{ target: string; branch: string; as: string } | null>(null);
-  const free = choices.filter((c) => !session.repos.some((x) => x.name === c.target && x.sourcePath === c.path));
+  const free = choices.filter((c) => !session.repos.some((x) => x.name === c.target && x.github === c.github));
   const startAdd = () => {
     const c = free[0];
     if (c) setAdding({ target: c.target, branch: c.current, as: "" });
@@ -948,12 +949,12 @@ const RepoSection = ({ env, bare }: { env: Env; bare?: boolean }) => {
       {session.repos.length === 0 && <div className="muted" style={{ marginTop: 4 }}>None yet{initialized ? "" : ": add the ones the tickets touch. Without one the workers have nothing to change"}.</div>}
       {session.repos.map((x) => (
         <div className="row" key={x.name} style={{ justifyContent: "space-between", marginTop: 4 }}>
-          <span><strong>{x.name}</strong> <span className="muted mono">{x.branch}</span> <span className="muted mono" title={x.sourcePath}>{x.sourcePath.replace(/^\/Users\/[^/]+/, "~")}</span>{x.baseCommit ? <span className="muted mono"> · {x.baseCommit.slice(0, 7)}</span> : null}</span>
+          <span><strong>{x.name}</strong> <span className="muted mono">{x.branch}</span> <span className="muted mono" title={x.github ?? x.sourcePath}>{repoOrigin(x)}</span>{x.baseCommit ? <span className="muted mono"> · {x.baseCommit.slice(0, 7)}</span> : null}</span>
           {!initialized && <button className="quiet sm" onClick={() => removeRepo(x.name)} disabled={busy || active}>remove</button>}
         </div>
       ))}
       {!initialized && adding === null && free.length > 0 && <button className="sm" style={{ marginTop: 6 }} onClick={startAdd} disabled={busy || active}>Add repository</button>}
-      {!initialized && adding === null && free.length === 0 && choices.length === 0 && <div className="muted" style={{ marginTop: 4 }}>No work targets: add repositories in <a href="#/settings">Settings</a>.</div>}
+      {!initialized && adding === null && free.length === 0 && choices.length === 0 && <div className="muted" style={{ marginTop: 4 }}>No repositories: add GitHub repositories in <a href="#/settings">Settings</a>.</div>}
       {adding && (
         <div className="stack" style={{ gap: 6, marginTop: 6 }}>
           <div className="row">
@@ -968,7 +969,7 @@ const RepoSection = ({ env, bare }: { env: Env; bare?: boolean }) => {
           <div className="row">
             <button className="pri sm" onClick={addRepo} disabled={busy || !adding.branch}>Add</button>
             <button className="sm" onClick={() => setAdding(null)}>Cancel</button>
-            <span className="muted">{chosen?.path.replace(/^\/Users\/[^/]+/, "~")}</span>
+            <span className="muted mono">{chosen?.github}</span>
           </div>
         </div>
       )}

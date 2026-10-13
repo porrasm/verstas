@@ -56,7 +56,7 @@ machine, not as a container. Three reasons:
    app would make the web app the weakest point. On the host it runs with
    your user's permissions and the `docker` CLI you already trust.
 2. **Cloning needs to read your repositories.** The app makes a fresh
-   `git clone` of each work target into the session. From a container that
+   `git clone` of each repository's mirror into the session. From a container that
    would mean mounting your home directory into it.
 3. **No path mapping.** Bind-mount sources are host paths; an app in a
    container would have to know both views of every path.
@@ -75,25 +75,29 @@ A session directory is created under the sessions root you chose, for
 example `~/verstas/sessions/<id>/`. Inside, `workspace/` is the only
 directory a container ever sees.
 
-- **Repositories are cloned, never mounted.** `git clone --no-hardlinks
-  <path> workspace/<name>`. Plain local clones hard-link object files into
-  the source repository; a process that could overwrite a hard-linked object
-  would corrupt your real repository, hence `--no-hardlinks`. Clones carry no
-  hooks and no git-ignored files, so `.env`, keys and build output stay
-  home. The clone's `origin` remote is removed, because it points at a host
-  path that means nothing inside the box.
+- **Repositories are GitHub repositories, cloned, never mounted.** The
+  host app keeps one bare mirror of each under
+  `~/.verstas/mirrors/<owner>/<name>.git`. A fetch from GitHub brings only
+  what is new; the session's clone is then
+  `git clone --no-local --template= --single-branch --branch <b> <mirror> workspace/<name>`.
+  `--no-local` makes a self-contained clone (no hard links, no alternates
+  pointing at the mirror), `--template=` and the bare mirror mean no hooks,
+  and `--single-branch` keeps other branches out of the box. The clone has
+  no remote. The mirror is made with no template, has no remote configured,
+  is never mounted into a container, and host git runs in it with hooks and
+  fsmonitor off.
 - **Zip attachments** are extracted into `workspace/attachments/<name>/`
   after every entry name is checked: no absolute paths, no `..` segments, no
   symlinks, a size limit per file and in total. Entries that fail are
   skipped and listed in the session log.
 - **Nothing else is copied.** No dotfiles from your home, no SSH agent, no
   npm or pip credentials.
-- **Restore from repo** (the session page's Work panel) replaces one
-  clone with a fresh clone of the work target, made the same way and
+- **Reclone** (the session page's Work panel) replaces one clone with a
+  fresh clone from the mirror, fetched first, made the same way and
   swapped in once it exists. The old clone is deleted as files; host git
   never reads its `.git` (Boundary 5). The container is stopped first and
-  the run branch starts over from the new base, so unapplied commits go
-  with the old clone; the dialog counts them and offers Apply first.
+  the run branch starts over from the new base, so unpublished commits go
+  with the old clone; the dialog counts them.
 
 ## Boundary 2: the container
 
@@ -287,6 +291,17 @@ and kept), and a ticket that would have been done is blocked with the
 reason. This keeps the
 token out of bundles and out of "Apply to repo". Taking the token out of
 the box entirely, with the proxy adding it to requests, is backlog V-04.
+
+**The GitHub token** never enters a session. It is stored in the same
+secrets file and used by the host app only, when you press a button: mirror
+fetches get it through `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_*`/`GIT_CONFIG_VALUE_*`
+environment variables as an `http.https://github.com/.extraheader` (host
+credential helpers off), so it is in no argv, no git config file and no
+remote URL; the GitHub API gets it as an `Authorization` header to
+`api.github.com`. It is not in `sandbox.env`, any `docker exec`, the agent
+API, the draft tools or the remote dashboard, and the commit scan looks for
+it like the agent credentials. Use a fine-grained token with Contents and
+Pull requests read/write and no Workflows permission.
 
 Secrets requested by the agent (a third-party API key) are a later feature.
 When added, they are injected the same way and the agent sees only the

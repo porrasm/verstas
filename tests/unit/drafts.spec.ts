@@ -86,7 +86,7 @@ test("validateDraft reports what creation would refuse as errors", () => {
   const p = validateDraft(d, env);
   expect(p.errors).toEqual(
     expect.arrayContaining([
-      expect.stringContaining('"ghost" is not a work target'),
+      expect.stringContaining('"ghost" is not a configured repository'),
       'Recipe "postgres" is not in the library',
       expect.stringContaining('T-2 names repo "kapula"'),
       "T-3 depends on T-9, which is not in the draft",

@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { z } from "zod";
 import { writeJsonAtomic } from "./board/store.js";
+import { GITHUB_REPO_RE } from "./github/api.js";
 
 /**
  * Host app configuration, kept outside the repository and outside any
@@ -11,17 +12,25 @@ import { writeJsonAtomic } from "./board/store.js";
  * matters; everything a session needs lives under it.
  */
 
+/**
+ * A repository sessions can be made from: a GitHub repository, cloned
+ * through the host's mirror of it (src/github/mirror.ts). Local checkouts
+ * as work targets are gone; entries from that time (a `path`, no `github`)
+ * are dropped when the config is read.
+ */
 export const workTargetSchema = z.object({
-  /** Display name and default clone directory name. */
+  /** Display name and default clone directory name; drafts and tickets name the repository by it. */
   name: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/),
-  /** Absolute path to a git repository on this machine. */
-  path: z.string().min(1),
+  /** "owner/name" on github.com. */
+  github: z.string().regex(GITHUB_REPO_RE, "owner/name on github.com"),
+  /** GitHub's default branch when the repository was added; new sessions start from it. */
+  defaultBranch: z.string().min(1).max(200),
 });
 export type WorkTarget = z.infer<typeof workTargetSchema>;
 
 export const configSchema = z.object({
   sessionsRoot: z.string().min(1).default(path.join(os.homedir(), "verstas", "sessions")),
-  workTargets: z.array(workTargetSchema).default([]),
+  workTargets: z.preprocess((v) => (Array.isArray(v) ? v.filter((w) => w && typeof w === "object" && "github" in w) : v), z.array(workTargetSchema)).default([]),
   uiPort: z.number().int().min(1).max(65535).default(4700),
   agentApiPort: z.number().int().min(1).max(65535).default(4701),
   devboxImage: z.string().min(1).default("verstas-devbox:local"),
@@ -54,6 +63,12 @@ export const secretsSchema = z.object({
   cursorApiKey: z.string().min(1).optional(),
   /** The token you created in the remote dashboard; sent as a bearer token to its base URL only. */
   remoteToken: z.string().min(1).optional(),
+  /**
+   * A fine-grained GitHub token (Contents and Pull requests read/write, no
+   * Workflows). Host-side only: mirror fetches and pushes get it through
+   * the environment, the API through a header; no session ever sees it.
+   */
+  githubToken: z.string().min(1).optional(),
 });
 export type Secrets = z.infer<typeof secretsSchema>;
 
@@ -66,6 +81,7 @@ export const secretValues = (s: Secrets): string[] => {
   const out: string[] = [];
   if (s.claudeToken) out.push(s.claudeToken);
   if (s.cursorApiKey) out.push(s.cursorApiKey);
+  if (s.githubToken) out.push(s.githubToken);
   if (s.codexAuth) {
     const walk = (v: unknown) => {
       if (typeof v === "string") {

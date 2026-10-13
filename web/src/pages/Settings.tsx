@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, fmtAgo, type Config, type RemoteSettings, type Status } from "../api";
+import { api, fmtAgo, type Config, type RemoteSettings, type Status, type WorkTargetView } from "../api";
 
 /**
  * Remote dashboard: a base URL and a token you created there. Only sessions
@@ -209,12 +209,143 @@ const Credentials = ({ ok, fail }: { ok: (text: string) => void; fail: (e: unkno
   );
 };
 
+/**
+ * GitHub: the token and the repositories sessions are made from. The token
+ * stays in this app (~/.verstas/secrets.json); fetches, pushes and the API
+ * use it on the host, and no session ever sees it. Each repository has a
+ * mirror on this machine: GitHub is downloaded once, then fetched for what
+ * is new, and sessions clone from the mirror.
+ */
+const Github = ({ ok, fail }: { ok: (text: string) => void; fail: (e: unknown) => void }) => {
+  const [hasToken, setHasToken] = useState<boolean | null>(null);
+  const [token, setToken] = useState("");
+  const [targets, setTargets] = useState<WorkTargetView[] | null>(null);
+  const [add, setAdd] = useState({ repo: "", name: "" });
+  const [busy, setBusy] = useState<string | null>(null);
+  const [test, setTest] = useState<{ ok: boolean; login?: string | null; error?: string; repos?: { name: string; github: string; ok: boolean; canPush?: boolean | null; error?: string }[] } | null>(null);
+  const load = () => {
+    api<{ hasToken: boolean }>("GET", "/github").then((g) => setHasToken(g.hasToken)).catch(fail);
+    api<WorkTargetView[]>("GET", "/work-targets").then(setTargets).catch(fail);
+  };
+  useEffect(() => {
+    load();
+  }, []);
+  // A first fetch runs in the background; poll while one is going.
+  const fetching = targets?.some((t) => t.mirror.fetching);
+  useEffect(() => {
+    if (!fetching) return;
+    const id = setInterval(() => api<WorkTargetView[]>("GET", "/work-targets").then(setTargets).catch(() => undefined), 2000);
+    return () => clearInterval(id);
+  }, [fetching]);
+  const run = async (key: string, fn: () => Promise<void>) => {
+    setBusy(key);
+    try {
+      await fn();
+    } catch (e) {
+      fail(e);
+    } finally {
+      setBusy(null);
+    }
+  };
+  const saveToken = (value: string) =>
+    run("token", async () => {
+      const g = await api<{ hasToken: boolean }>("PUT", "/github", { token: value });
+      setHasToken(g.hasToken);
+      setToken("");
+      setTest(null);
+      ok(value ? "GitHub token saved." : "GitHub token removed. Public repositories still fetch; private ones and pull requests need a token.");
+    });
+  const runTest = () =>
+    run("test", async () => {
+      setTest(await api("POST", "/github/test", { token: token || undefined }));
+    });
+  const addRepo = () =>
+    run("add", async () => {
+      const t = await api<WorkTargetView>("POST", "/work-targets", { repo: add.repo, name: add.name || undefined });
+      setAdd({ repo: "", name: "" });
+      ok(`${t.github} added as ${t.name}. Its first fetch runs now; a large repository takes a while once.`);
+      load();
+    });
+  const fetchNow = (name: string) =>
+    run(`fetch:${name}`, async () => {
+      try {
+        await api("POST", `/work-targets/${encodeURIComponent(name)}/fetch`);
+      } finally {
+        load();
+      }
+    });
+  const remove = (name: string) =>
+    run(`rm:${name}`, async () => {
+      await api("DELETE", `/work-targets/${encodeURIComponent(name)}`);
+      ok(`${name} removed. Existing sessions keep their clones.`);
+      load();
+    });
+  return (
+    <section className="card">
+      <h3>GitHub</h3>
+      <p className="lead">
+        Sessions clone GitHub repositories. Use a{" "}
+        <a href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noreferrer">fine-grained token</a> limited to these repositories with <strong>Contents</strong> and <strong>Pull requests</strong> read and write, and <strong>without Workflows</strong>, so a push can never change CI. It stays in <code>~/.verstas/secrets.json</code>; Verstas uses it on this machine only, when you press a button. No agent and no session ever sees it.
+      </p>
+      <div className="row">
+        <input id="github-token" type="password" className="mono" autoComplete="off" placeholder={hasToken ? "A token is saved; paste a new one to replace it" : "github_pat_…"} value={token} onChange={(e) => setToken(e.target.value)} />
+        <button className="pri" disabled={busy !== null || token.trim().length < 10} onClick={() => void saveToken(token.trim())}>Save token</button>
+        <button disabled={busy !== null || (!token && !hasToken)} onClick={() => void runTest()}>{busy === "test" ? "Testing…" : "Test"}</button>
+        {hasToken && <button className="quiet sm" disabled={busy !== null} onClick={() => void saveToken("")}>Remove</button>}
+        <span className={`small ${hasToken ? "ok" : "muted"}`}>{hasToken === null ? "" : hasToken ? "Token saved." : "No token: public repositories only."}</span>
+      </div>
+      {test && (
+        <div className={`small ${test.ok ? "" : "err"}`} style={{ marginTop: 6 }}>
+          {test.ok ? (
+            <>
+              <div className="ok">{test.login ? `The token belongs to ${test.login}.` : "No token: anonymous access."}</div>
+              {test.repos?.map((r) => (
+                <div key={r.name} className={r.ok ? "" : "err"}>
+                  {r.github}: {r.ok ? (r.canPush === false ? "readable, but the token cannot push (pull requests will fail)" : "reachable") : r.error}
+                </div>
+              ))}
+            </>
+          ) : (
+            test.error
+          )}
+        </div>
+      )}
+
+      <h4 style={{ marginTop: 16 }}>Repositories</h4>
+      <table>
+        <tbody>
+          {targets?.map((t) => (
+            <tr key={t.name}>
+              <td style={{ paddingLeft: 0 }}><strong>{t.name}</strong></td>
+              <td className="mono">
+                <a href={`https://github.com/${t.github}`} target="_blank" rel="noreferrer">{t.github}</a> <span className="muted">· {t.defaultBranch}</span>
+              </td>
+              <td className={`small ${t.mirror.error ? "err" : "muted"}`}>
+                {t.mirror.fetching || busy === `fetch:${t.name}` ? "Fetching…" : t.mirror.error ? t.mirror.error : t.mirror.fetchedAt ? `fetched ${fmtAgo(t.mirror.fetchedAt, Date.now())}` : "not fetched yet"}
+              </td>
+              <td style={{ textAlign: "right", paddingRight: 0, whiteSpace: "nowrap" }}>
+                <button className="quiet sm" disabled={busy !== null || t.mirror.fetching} onClick={() => void fetchNow(t.name)}>{busy === `fetch:${t.name}` ? "Fetching…" : "Fetch"}</button>
+                <button className="quiet sm" disabled={busy !== null} onClick={() => void remove(t.name)}>Remove</button>
+              </td>
+            </tr>
+          ))}
+          {targets?.length === 0 && <tr><td className="muted" colSpan={4} style={{ paddingLeft: 0 }}>None yet. Add one below.</td></tr>}
+        </tbody>
+      </table>
+      <div className="row">
+        <input id="gh-repo" className="mono" placeholder="owner/name or https://github.com/owner/name" value={add.repo} onChange={(e) => setAdd({ ...add, repo: e.target.value })} onKeyDown={(e) => e.key === "Enter" && add.repo && void addRepo()} />
+        <input id="gh-name" placeholder="name (optional)" value={add.name} onChange={(e) => setAdd({ ...add, name: e.target.value })} style={{ flex: "0 1 180px" }} />
+        <button onClick={() => void addRepo()} disabled={busy !== null || !add.repo.trim()}>{busy === "add" ? "Adding…" : "Add"}</button>
+      </div>
+    </section>
+  );
+};
+
 export const SettingsPage = ({ status: _status }: { status: Status | null }) => {
   const [cfg, setCfg] = useState<Config | null>(null);
   const [msg, setMsg] = useState<{ text: string; error: boolean } | null>(null);
   const ok = (text: string) => setMsg({ text, error: false });
   const fail = (e: unknown) => setMsg({ text: (e as Error).message, error: true });
-  const [wt, setWt] = useState({ name: "", path: "" });
   const [root, setRoot] = useState("");
   const [ports, setPorts] = useState({ devboxImage: "", agentApiPort: "", uiPort: "" });
   const load = () =>
@@ -237,25 +368,6 @@ export const SettingsPage = ({ status: _status }: { status: Status | null }) => 
       fail(e);
     }
   };
-  const addTarget = async () => {
-    try {
-      await api("POST", "/work-targets", wt);
-      ok(`Work target ${wt.name} added.`);
-      setWt({ name: "", path: "" });
-      load();
-    } catch (e) {
-      fail(e);
-    }
-  };
-  const removeTarget = async (name: string) => {
-    try {
-      await api("DELETE", `/work-targets/${encodeURIComponent(name)}`);
-      ok(`Work target ${name} removed. Existing sessions keep their clones.`);
-      load();
-    } catch (e) {
-      fail(e);
-    }
-  };
   const portsDirty = ports.devboxImage !== cfg.devboxImage || Number(ports.agentApiPort) !== cfg.agentApiPort || Number(ports.uiPort) !== cfg.uiPort;
   return (
     <div className="form">
@@ -271,27 +383,7 @@ export const SettingsPage = ({ status: _status }: { status: Status | null }) => 
 
       <RemoteDashboard />
 
-      <section className="card">
-        <h3>Work targets</h3>
-        <p className="lead">Local git repositories a session may be created from. Sessions get a fresh clone; your checkout is never mounted.</p>
-        <table>
-          <tbody>
-            {cfg.workTargets.map((w) => (
-              <tr key={w.name}>
-                <td style={{ paddingLeft: 0 }}><strong>{w.name}</strong></td>
-                <td className="mono muted wrap">{w.path}</td>
-                <td style={{ textAlign: "right", paddingRight: 0 }}><button className="quiet sm" onClick={() => removeTarget(w.name)}>Remove</button></td>
-              </tr>
-            ))}
-            {cfg.workTargets.length === 0 && <tr><td className="muted" colSpan={3} style={{ paddingLeft: 0 }}>None yet. Add one below.</td></tr>}
-          </tbody>
-        </table>
-        <div className="row">
-          <input id="wt-name" placeholder="name (letters, digits, . _ -)" value={wt.name} onChange={(e) => setWt({ ...wt, name: e.target.value })} style={{ flex: "0 1 220px" }} />
-          <input id="wt-path" className="mono" placeholder="/absolute/path/to/repo or ~/path" value={wt.path} onChange={(e) => setWt({ ...wt, path: e.target.value })} onKeyDown={(e) => e.key === "Enter" && wt.name && wt.path && addTarget()} />
-          <button onClick={addTarget} disabled={!wt.name || !wt.path}>Add</button>
-        </div>
-      </section>
+      <Github ok={ok} fail={fail} />
 
       <section className="card">
         <h3>Sessions root</h3>

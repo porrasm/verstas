@@ -48,7 +48,7 @@ test("needs-hosts header is read from the first lines", () => {
 });
 
 test("context builder: tails and facts", () => {
-  const config = configSchema.parse({ workTargets: [{ name: "nuppi", path: "/x" }] });
+  const config = configSchema.parse({ workTargets: [{ name: "nuppi", github: "acme/nuppi", defaultBranch: "main" }] });
   const facts = { image: "verstas-devbox:local", os: "Debian 12", arch: "aarch64", node: "v22.23.3", npm: "10.9.9", python: "Python 3.11.2", git: "git version 2.39", claude: "2.1.287", packages: ["git", "curl"] };
   const script = buildContext({ tail: "script", config, facts, scripts: [{ name: "postgres", description: "pg", hosts: ["deb.debian.org"], note: "", script: "x", runAs: "root", env: "" }] });
   expect(script).toContain("Debian 12, aarch64");

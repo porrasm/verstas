@@ -57,7 +57,9 @@ Without a window: `npm run serve`, then open http://127.0.0.1:4700.
 Then, in the web app:
 
 1. **Settings**: choose the sessions root (default `~/verstas/sessions`),
-   add work targets (local git repositories), paste the Claude token.
+   paste a GitHub token and add the GitHub repositories sessions work on
+   (each gets a mirror on this machine; sessions clone from it), paste the
+   Claude token.
 2. **New session**: a name and, if you have one, a board. That is all the
    form asks. The session starts as a **plan**: nothing is cloned and no
    container exists yet. Or let an assistant prepare a draft first
@@ -209,8 +211,9 @@ Then, in the web app:
    environment"), so the Initialize that follows finds everything
    installed and is quick; it still runs the setup worker, since the
    imported board and setup instructions may differ. A copy has a new id
-   and so no environment here. Repositories are matched to work targets by
-   name, for Apply. Format: `src/sessions/archive.ts`.
+   and so no environment here. GitHub repositories mean the same on every
+   machine; a repository from an older local checkout is matched to a
+   repository of the same name here. Format: `src/sessions/archive.ts`.
 11. **Delete** the session when done. Its containers, network and directory
    go with it.
 

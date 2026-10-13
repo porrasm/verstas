@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import express from "express";
 import { WebSocketServer, WebSocket } from "ws";
 import { createAgentApi, RunTokens } from "./agent-api/agent-api.js";
-import { loadConfig, loadSecrets, saveConfig, saveSecrets, type Config } from "./config.js";
+import { loadConfig, loadSecrets, saveConfig, saveSecrets, verstasHome, type Config } from "./config.js";
 import { DRIVERS } from "./harness/drivers.js";
 import { stopAllSandboxes } from "./sandbox/lifecycle.js";
 import { createDockerRunManager, proxyDistPath, workerDistPath, type RunManagerConfig } from "./harness/docker-worker.js";
@@ -22,8 +22,7 @@ import { createDraftTools, DRAFT_SERVER_INSTRUCTIONS } from "./drafts/tools.js";
 import { createMcpHandler, createMcpRouter } from "./drafts/mcp.js";
 import { buildContext, probeImage } from "./context/context.js";
 import { listScripts } from "./scripts/library.js";
-import { listBranches } from "./sessions/workspace.js";
-import { detectPacksInRepo } from "./network/packs.js";
+import { Mirrors } from "./github/mirror.js";
 import { mcpSetup } from "./drafts/setup.js";
 
 /**
@@ -86,6 +85,8 @@ export const startVerstas = async (): Promise<Verstas> => {
     linuxHost: config.linuxHost,
   };
   const hub = new SessionHub(config.sessionsRoot);
+  // GitHub repositories: one host-side mirror each; the token stays in this process (src/github/mirror.ts).
+  const mirrors = new Mirrors({ home: verstasHome(), token: async () => (await loadSecrets()).githubToken });
   const tokens = new RunTokens();
   const agentApiUrl = `http://host.docker.internal:${config.agentApiPort}/agent`;
   const runConfig: RunManagerConfig = {
@@ -140,8 +141,14 @@ export const startVerstas = async (): Promise<Verstas> => {
     store: drafts,
     workTargets: () => config.workTargets,
     recipes: () => listScripts(),
-    branches: listBranches,
-    detectPacks: detectPacksInRepo,
+    branches: async (t) => {
+      await mirrors.fresh(t.github);
+      return { current: t.defaultBranch, branches: await mirrors.branches(t.github) };
+    },
+    detectPacks: async (t, branch) => {
+      await mirrors.fresh(t.github);
+      return mirrors.packs(t.github, branch ?? t.defaultBranch);
+    },
     context: async () => {
       const facts = await probeImage(docker, config.devboxImage).catch(() => null);
       return buildContext({ tail: "draft", config, facts, scripts: await listScripts(), repoNames: config.workTargets.map((w) => w.name) });
@@ -168,6 +175,7 @@ export const startVerstas = async (): Promise<Verstas> => {
     version,
     remote,
     drafts,
+    mirrors,
     mcpSetup: async () => {
       const stdioScript = path.join(distRoot, "src", "drafts", "mcp-stdio.js");
       const stdioBuilt = await fs.access(stdioScript).then(() => true, () => false);

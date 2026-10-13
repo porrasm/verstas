@@ -26,10 +26,10 @@ const setup = async () => {
   const store = new DraftStore(dir);
   const tools = createDraftTools({
     store,
-    workTargets: () => [{ name: "nuppi", path: "/repos/nuppi" }, { name: "kapula", path: "/repos/kapula" }],
+    workTargets: () => [{ name: "nuppi", github: "acme/nuppi", defaultBranch: "main" }, { name: "kapula", github: "acme/kapula", defaultBranch: "main" }],
     recipes: async () => [setupScriptSchema.parse({ name: "chromium", description: "Chromium deps", script: "#!/bin/sh\ntrue\n" })],
     branches: async () => ({ current: "main", branches: ["main", "feature"] }),
-    detectPacks: async (p) => (p.endsWith("nuppi") ? ["node", "playwright"] : ["node"]),
+    detectPacks: async (t) => (t.name === "nuppi" ? ["node", "playwright"] : ["node"]),
     context: async () => "# Verstas sandbox: context for an assistant\n",
     reviewUrl: (id) => `http://127.0.0.1:4700/#/d/${id}`,
   });
@@ -105,8 +105,8 @@ test("a draft is built step by step and every edit answers with its problems", a
     expect((await s.call("verstas_context")).text).toContain("context for an assistant");
     const repos = await s.call("list_repositories");
     expect(repos.json).toEqual([
-      { name: "nuppi", currentBranch: "main", branches: ["main", "feature"], impliedPacks: ["node", "playwright"] },
-      { name: "kapula", currentBranch: "main", branches: ["main", "feature"], impliedPacks: ["node"] },
+      { name: "nuppi", github: "acme/nuppi", defaultBranch: "main", branches: ["main", "feature"], impliedPacks: ["node", "playwright"] },
+      { name: "kapula", github: "acme/kapula", defaultBranch: "main", branches: ["main", "feature"], impliedPacks: ["node"] },
     ]);
     expect((await s.call("list_recipes")).json).toEqual([{ name: "chromium", description: "Chromium deps", hosts: [], note: "", runAs: "root" }]);
 
@@ -114,7 +114,7 @@ test("a draft is built step by step and every edit answers with its problems", a
     const id = created.json.id as string;
     expect(created.json).toMatchObject({ ok: true, tickets: 0, reviewUrl: `http://127.0.0.1:4700/#/d/${id}` });
 
-    expect((await s.call("draft_set_repositories", { id, repos: [{ target: "ghost" }] })).text).toMatch(/^Error: "ghost" is not a work target. Known: nuppi, kapula/);
+    expect((await s.call("draft_set_repositories", { id, repos: [{ target: "ghost" }] })).text).toMatch(/^Error: "ghost" is not a configured repository. Known: nuppi, kapula/);
     expect((await s.call("draft_set_repositories", { id, repos: [{ target: "nuppi", branch: "nope" }] })).text).toMatch(/has no branch "nope"/);
     const set = await s.call("draft_set_repositories", { id, repos: [{ target: "nuppi" }, { target: "kapula", branch: "feature" }] });
     expect(set.json).toMatchObject({ directories: ["nuppi", "kapula"], impliedPacks: ["node", "playwright"], hint: expect.stringContaining("playwright") });

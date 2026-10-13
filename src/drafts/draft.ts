@@ -42,9 +42,9 @@ export const RESERVED_REPO_NAMES = ["attachments", "notes", ".home"];
 const repoDirName = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
 export const draftRepoSchema = z.object({
-  /** A work target configured in Settings, by name. A draft cannot add work targets. */
-  target: z.string().regex(repoDirName, "A work target name"),
-  /** Branch to clone; the work target's checked-out branch when omitted. */
+  /** A repository configured in Settings, by name. A draft cannot add repositories. */
+  target: z.string().regex(repoDirName, "A repository name"),
+  /** Branch to clone; the repository's default branch when omitted. */
   branch: z.string().min(1).max(200).optional(),
   /** Directory under /workspace; the target name when omitted. */
   name: z.string().regex(repoDirName, "Letters, digits, . _ -").optional(),
@@ -242,7 +242,7 @@ export const importIntoDraft = (draft: Draft, text: string, mode: "merge" | "rep
 };
 
 export type DraftEnv = {
-  /** Work targets configured in Settings. */
+  /** Repositories configured in Settings. */
   workTargets: readonly { name: string }[];
   /** Recipe names in the library. */
   recipes: readonly string[];
@@ -260,7 +260,7 @@ export const validateDraft = (draft: Draft, env: DraftEnv): DraftProblems => {
   const targets = new Set(env.workTargets.map((w) => w.name));
   const dirs = repoDirNames(draft);
 
-  for (const r of draft.repos) if (!targets.has(r.target)) errors.push(`Repository "${r.target}" is not a work target (known: ${[...targets].join(", ") || "none; add them in Settings"})`);
+  for (const r of draft.repos) if (!targets.has(r.target)) errors.push(`Repository "${r.target}" is not a configured repository (known: ${[...targets].join(", ") || "none; add them in Settings"})`);
   const seen = new Set<string>();
   for (const d of dirs) {
     if (RESERVED_REPO_NAMES.includes(d)) errors.push(`"${d}" is reserved under /workspace; give the repository another name`);

@@ -22,7 +22,7 @@ import { planningSchema } from "../core/types.js";
 
 /**
  * The tools an assistant gets through the draft MCP server. They read the
- * installation (work targets, recipes, the box) and edit drafts; nothing
+ * installation (repositories, recipes, the box) and edit drafts; nothing
  * here creates, starts or touches a session, and no tool runs anything in a
  * container. That is the whole point: a person reviews the draft in the app
  * and creates the session there (docs/DRAFTS.md).
@@ -42,8 +42,10 @@ export type DraftToolDeps = {
   store: DraftStore;
   workTargets: () => readonly WorkTarget[];
   recipes: () => Promise<SetupScript[]>;
-  branches: (repoPath: string) => Promise<{ current: string; branches: string[] }>;
-  detectPacks: (repoPath: string) => Promise<string[]>;
+  /** A repository's branches on GitHub (from the host's mirror) and its default branch as `current`. */
+  branches: (target: WorkTarget) => Promise<{ current: string; branches: string[] }>;
+  /** The packs the manifests on a branch imply (the default branch when none is given). */
+  detectPacks: (target: WorkTarget, branch?: string) => Promise<string[]>;
   /** The Markdown from buildContext with the "draft" tail. */
   context: () => Promise<string>;
   /** Where a person reviews the draft, e.g. http://127.0.0.1:4700/#/d/<id>. */
@@ -119,13 +121,13 @@ export const createDraftTools = (d: DraftToolDeps): DraftTool[] => {
     },
     {
       name: "list_repositories",
-      description: "Work targets configured in Verstas: the repositories a session can clone, with their branches and the network packs their manifests imply. A draft can only use these; a person adds new ones in Settings.",
+      description: "Repositories configured in Verstas (GitHub repositories): the ones a session can clone, with their default branch, their branches and the network packs their manifests imply. A draft can only use these; a person adds new ones in Settings.",
       inputSchema: obj({}, []),
       call: async () =>
         Promise.all(
           d.workTargets().map(async (w) => {
-            const b = await d.branches(w.path).catch(() => ({ current: "", branches: [] as string[] }));
-            return { name: w.name, currentBranch: b.current, branches: b.branches.slice(0, 40), impliedPacks: (await d.detectPacks(w.path).catch(() => [])).filter((p) => p !== "anthropic") };
+            const b = await d.branches(w).catch(() => ({ current: w.defaultBranch, branches: [] as string[] }));
+            return { name: w.name, github: w.github, defaultBranch: w.defaultBranch, branches: b.branches.slice(0, 40), impliedPacks: (await d.detectPacks(w).catch(() => [])).filter((p) => p !== "anthropic") };
           }),
         ),
     },
@@ -211,14 +213,14 @@ export const createDraftTools = (d: DraftToolDeps): DraftTool[] => {
     },
     {
       name: "draft_set_repositories",
-      description: "Set the repositories the session clones (replaces the list). Each is a work target from list_repositories, optionally a branch and a directory name. Tickets name a repository by its directory name. Answers with the packs these repositories imply; apply them with draft_set_network.",
+      description: "Set the repositories the session clones (replaces the list). Each is a repository from list_repositories, optionally a branch and a directory name. Tickets name a repository by its directory name. Answers with the packs these repositories imply; apply them with draft_set_network.",
       inputSchema: obj(
         {
           id: draftIdProp,
           repos: {
             type: "array",
             maxItems: 20,
-            items: obj({ target: str("Work target name", 64), branch: str("Branch to clone; the checked-out one when left out", 200), name: str("Directory under /workspace; the target name when left out", 64) }, ["target"]),
+            items: obj({ target: str("Repository name, from list_repositories", 64), branch: str("Branch to clone; the repository's default branch when left out", 200), name: str("Directory under /workspace; the target name when left out", 64) }, ["target"]),
           },
         },
         ["id", "repos"],
@@ -229,12 +231,12 @@ export const createDraftTools = (d: DraftToolDeps): DraftTool[] => {
         const implied = new Set<string>();
         for (const r of repos) {
           const t = targets.find((w) => w.name === r.target);
-          if (!t) throw new DraftError(`"${r.target}" is not a work target. Known: ${targets.map((w) => w.name).join(", ") || "none (a person adds them in Settings)"}`, "invalid");
+          if (!t) throw new DraftError(`"${r.target}" is not a configured repository. Known: ${targets.map((w) => w.name).join(", ") || "none (a person adds them in Settings)"}`, "invalid");
           if (r.branch) {
-            const b = await d.branches(t.path).catch(() => ({ current: "", branches: [] as string[] }));
+            const b = await d.branches(t).catch(() => ({ current: t.defaultBranch, branches: [] as string[] }));
             if (!b.branches.includes(r.branch)) throw new DraftError(`${r.target} has no branch "${r.branch}". Branches: ${b.branches.slice(0, 20).join(", ")}`, "invalid");
           }
-          for (const p of await d.detectPacks(t.path).catch(() => [])) if (p !== "anthropic") implied.add(p);
+          for (const p of await d.detectPacks(t, r.branch).catch(() => [])) if (p !== "anthropic") implied.add(p);
         }
         const { draft } = await d.store.mutate(id, (x) => ({ draft: { ...x, repos } }));
         const missing = [...implied].filter((p) => !(draft.packs as string[]).includes(p));

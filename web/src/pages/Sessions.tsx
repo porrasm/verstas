@@ -95,7 +95,7 @@ export const SessionsPage = ({ status }: { status: Status | null }) => {
     setClash(null);
     try {
       const r = await api<{ session: { id: string; name: string }; unmapped: string[]; skipped: string[] }>("POST", "/sessions/import", { upload: uploadId, as, ...(as === "replace" ? { keepEnvironment: keepEnv } : {}) });
-      const unmapped = r.unmapped.length ? ` No work target here for ${r.unmapped.join(", ")}: add one with the same name to apply its work to a repository here (exporting bundles works regardless).` : "";
+      const unmapped = r.unmapped.length ? ` ${r.unmapped.join(", ")} came from a local checkout and no repository of that name is set up here: add the GitHub repository with the same name in Settings to reclone it (exporting bundles works regardless).` : "";
       return `Imported ${r.session.name} (${r.session.id}). Open it and press Initialize: the container, recipes and setup are rebuilt here; the clones, board and notes are kept.${unmapped}`;
     } catch (e) {
       const exists = e instanceof ApiError && e.status === 409 ? (e.body as { exists?: { id: string; name: string } } | null)?.exists : undefined;

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, isInitialized, useLive, type Config, type DraftDetail, type SessionSummary } from "../api";
+import { api, isInitialized, repoOrigin, useLive, type Config, type DraftDetail, type SessionSummary } from "../api";
 import { ConnectAssistant } from "./ConnectAssistant";
 
 /**
@@ -181,7 +181,7 @@ export const NewSessionPage = ({ draftId = null, fromSession = null }: { draftId
               <label className="chk"><input type="checkbox" checked={copy.attachments} onChange={(e) => setCopy({ ...copy, attachments: e.target.checked })} /> Copy attachments ({source.attachments.length})</label>
               {source.repos.map((r) => (
                 <label key={r.name}>
-                  {r.name} <span className="help">Branch to clone from <span className="mono">{r.sourcePath}</span></span>
+                  {r.name} <span className="help">Branch to clone from <span className="mono">{repoOrigin(r)}</span></span>
                   <select value={branches[r.name] ?? r.branch} onChange={(e) => setBranches({ ...branches, [r.name]: e.target.value })}>
                     <option value={r.branch}>{r.branch} (what {source.name} started from)</option>
                     {(unapplied[r.name] ?? 0) > 0 && <option value={r.runBranch}>{r.runBranch} ({unapplied[r.name]} commit{unapplied[r.name] === 1 ? "" : "s"} of {source.name}, not applied)</option>}

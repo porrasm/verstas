@@ -162,7 +162,11 @@ export type Status = {
   credentials: Record<DriverName, boolean>;
   drivers: DriverInfo[];
 };
-export type Config = { sessionsRoot: string; workTargets: { name: string; path: string }[]; uiPort: number; agentApiPort: number; devboxImage: string; linuxHost: boolean };
+/** A GitHub repository sessions can be made from. */
+export type WorkTarget = { name: string; github: string; defaultBranch: string };
+export type MirrorStatus = { github: string; fetchedAt: string | null; fetching: boolean; error: string | null };
+export type WorkTargetView = WorkTarget & { mirror: MirrorStatus };
+export type Config = { sessionsRoot: string; workTargets: WorkTarget[]; uiPort: number; agentApiPort: number; devboxImage: string; linuxHost: boolean };
 
 export class ApiError extends Error {
   constructor(readonly status: number, message: string, readonly body?: unknown) {
@@ -334,8 +338,14 @@ export type TouchedRepo = { repo: string; added: number; removed: number; files:
 /** A session repository. */
 export type RepoSpec = {
   name: string;
-  sourcePath: string;
+  /** owner/name on github.com; absent on sessions cloned from a local checkout. */
+  github?: string;
+  sourcePath?: string;
+  /** The base branch. */
   branch: string;
   runBranch: string;
   baseCommit?: string;
 };
+
+/** Where a session repository came from, for display: owner/name, or the old local path with the home directory shortened. */
+export const repoOrigin = (r: { github?: string; sourcePath?: string }): string => r.github ?? r.sourcePath?.replace(/^\/Users\/[^/]+|^\/home\/[^/]+/, "~") ?? "";

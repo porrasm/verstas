@@ -24,6 +24,8 @@ import { inboxSchema } from "../../src/core/types.js";
 import { DEFAULT_ALLOWLIST } from "../../src/core/types.js";
 
 const execFileP = promisify(execFile);
+/** A clone source that is a local repository (in production, the GitHub mirror). */
+const at = (dir: string) => async () => dir;
 const git = async (cwd: string, ...args: string[]) => (await execFileP("git", args, { cwd })).stdout.trim();
 
 /** A source repo the way a real work target looks: ignored secrets, a live hook, two branches. */
@@ -66,7 +68,7 @@ test("createSession records the plan; provisionSession clones fresh, without sec
   try {
     const { session, paths } = await createSession(root, {
       name: "Nuppi MVP",
-      repos: [{ target: { name: "nuppi", path: src } }],
+      repos: [{ target: { name: "nuppi", github: "me/nuppi", defaultBranch: "main" } }],
       zips: [],
       image: "verstas-devbox:local",
     });
@@ -74,15 +76,15 @@ test("createSession records the plan; provisionSession clones fresh, without sec
     // A plan: the pick is recorded, nothing is cloned, nothing is initialized.
     expect(session.initializedAt).toBeNull();
     expect(session.state).toBe("setup");
-    expect(session.repos[0]).toEqual({ name: "nuppi", sourcePath: src, branch: "main", runBranch: `verstas/${session.id}` });
+    expect(session.repos[0]).toEqual({ name: "nuppi", github: "me/nuppi", branch: "main", runBranch: `verstas/${session.id}` });
     const clone = path.join(paths.workspace, "nuppi");
     await expect(fs.access(clone)).rejects.toThrow();
 
     // Initialization clones at the recorded branch.
-    const { repos, clones } = await provisionSession(root, session);
+    const { repos, clones } = await provisionSession(root, session, at(src));
     expect(repos[0]!.baseCommit).toBe(await git(src, "rev-parse", "main"));
     // A second provisioning (a retry) leaves the existing clone alone.
-    expect((await provisionSession(root, { ...session, repos })).clones).toEqual([]);
+    expect((await provisionSession(root, { ...session, repos }, at(src))).clones).toEqual([]);
     expect(await fs.readFile(path.join(clone, "README.md"), "utf8")).toBe("hello\n");
     await expect(fs.access(path.join(clone, ".env"))).rejects.toThrow();
     await expect(fs.access(path.join(clone, ".git", "hooks", "pre-commit"))).rejects.toThrow();
@@ -116,14 +118,21 @@ test("createSession records the plan; provisionSession clones fresh, without sec
   }
 });
 
-test("createSession rejects a non-repo target and cleans up after itself", async () => {
+test("provisionSession refuses a source that is not a repository and removes the clones it made", async () => {
   const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "verstas-sessions-"));
+  const src = path.join(tmp, "src-repo");
+  await makeSourceRepo(src);
   const root = path.join(tmp, "sessions");
   try {
-    await expect(
-      createSession(root, { name: "x", repos: [{ target: { name: "nope", path: tmp } }], zips: [], image: "i" }),
-    ).rejects.toThrow(/not a git work tree/);
-    expect(await listSessions(root)).toEqual([]);
+    const { session, paths } = await createSession(root, {
+      name: "x",
+      repos: [{ target: { name: "good", github: "me/good", defaultBranch: "main" } }, { target: { name: "nope", github: "me/nope", defaultBranch: "main" } }],
+      zips: [],
+      image: "i",
+    });
+    await expect(provisionSession(root, session, async (r) => (r.name === "good" ? src : path.join(tmp, "empty")))).rejects.toThrow(/not a git repository/);
+    await expect(fs.access(path.join(paths.workspace, "good"))).rejects.toThrow();
+    await expect(createSession(root, { name: "y", repos: [{ target: { name: "bad", github: "me/bad", defaultBranch: "main" }, branch: "-x" }], zips: [], image: "i" })).rejects.toThrow(/Bad branch name/);
   } finally {
     await fs.rm(tmp, { recursive: true, force: true });
   }
@@ -251,7 +260,7 @@ test("setup scripts are copied into the session and their hosts join the allowli
   try {
     const { session, paths } = await createSession(root, {
       name: "with scripts",
-      repos: [{ target: { name: "app", path: src } }],
+      repos: [{ target: { name: "app", github: "me/app", defaultBranch: "main" } }],
       zips: [],
       image: "i",
       setupScripts: [
@@ -276,9 +285,9 @@ test("applyBundle creates and updates the feature branch in the real repo withou
   await makeSourceRepo(src);
   const root = path.join(tmp, "sessions");
   try {
-    const created = await createSession(root, { name: "apply", repos: [{ target: { name: "app", path: src } }], zips: [], image: "i" });
+    const created = await createSession(root, { name: "apply", repos: [{ target: { name: "app", github: "me/app", defaultBranch: "main" } }], zips: [], image: "i" });
     const paths = created.paths;
-    const session = { ...created.session, repos: (await provisionSession(root, created.session)).repos };
+    const session = { ...created.session, repos: (await provisionSession(root, created.session, at(src))).repos };
     const clone = path.join(paths.workspace, "app");
     const branch = session.repos[0]!.runBranch;
     // The harness's work, simulated: two ticket commits in the clone, then a bundle (in production both happen inside the container).
@@ -335,14 +344,14 @@ test("sessions from before initialization existed migrate: cloned at creation, t
   expect("preflight" in plain.caps).toBe(false);
 });
 
-test("restoreClone replaces the clone with a fresh clone of the work target; a failed clone leaves the old one", async () => {
+test("restoreClone replaces the clone with a fresh clone from its source; a failed clone leaves the old one", async () => {
   const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "verstas-sessions-"));
   const src = path.join(tmp, "src-repo");
   await makeSourceRepo(src);
   const root = path.join(tmp, "sessions");
   try {
-    const created = await createSession(root, { name: "Restore", repos: [{ target: { name: "nuppi", path: src } }], zips: [], image: "img" });
-    const session = { ...created.session, repos: (await provisionSession(root, created.session)).repos };
+    const created = await createSession(root, { name: "Restore", repos: [{ target: { name: "nuppi", github: "me/nuppi", defaultBranch: "main" } }], zips: [], image: "img" });
+    const session = { ...created.session, repos: (await provisionSession(root, created.session, at(src))).repos };
     const clone = path.join(created.paths.workspace, "nuppi");
     const oldBase = session.repos[0]!.baseCommit;
     // The agent worked in the box; the real repository moved on by hand.
@@ -356,7 +365,7 @@ test("restoreClone replaces the clone with a fresh clone of the work target; a f
     const newMain = await git(src, "rev-parse", "main");
     expect(newMain).not.toBe(oldBase);
 
-    const restored = await restoreClone(root, session, "nuppi");
+    const restored = await restoreClone(root, session, "nuppi", undefined, at(src));
     expect(restored).toEqual({ ...session.repos[0], baseCommit: newMain });
     expect(await fs.readFile(path.join(clone, "README.md"), "utf8")).toBe("hello again\n");
     await expect(fs.access(path.join(clone, "agent.txt"))).rejects.toThrow();
@@ -367,16 +376,16 @@ test("restoreClone replaces the clone with a fresh clone of the work target; a f
     expect(await git(clone, "branch", "--list", "feature")).toBe("");
     await expect(fs.access(path.join(created.paths.dir, "restore"))).rejects.toThrow();
 
-    // Another branch of the work target can be chosen.
-    const onFeature = await restoreClone(root, session, "nuppi", "feature");
+    // Another branch can be chosen.
+    const onFeature = await restoreClone(root, session, "nuppi", "feature", at(src));
     expect(onFeature.branch).toBe("feature");
     expect(onFeature.baseCommit).toBe(await git(src, "rev-parse", "feature"));
     expect(await fs.readFile(path.join(clone, "feature.txt"), "utf8")).toBe("f\n");
 
-    // A work target that is gone: the old clone stays.
-    await expect(restoreClone(root, { ...session, repos: [{ ...session.repos[0]!, sourcePath: path.join(tmp, "gone") }] }, "nuppi")).rejects.toThrow(/not a git work tree/);
+    // A source that is gone: the old clone stays.
+    await expect(restoreClone(root, session, "nuppi", undefined, at(path.join(tmp, "gone")))).rejects.toThrow(/not a git repository/);
     expect(await fs.readFile(path.join(clone, "feature.txt"), "utf8")).toBe("f\n");
-    await expect(restoreClone(root, session, "other")).rejects.toThrow(/No repository other/);
+    await expect(restoreClone(root, session, "other", undefined, at(src))).rejects.toThrow(/No repository other/);
   } finally {
     await fs.rm(tmp, { recursive: true, force: true });
   }

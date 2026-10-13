@@ -17,7 +17,8 @@ import { writeJsonAtomic, saveBoard } from "../board/store.js";
 import { emptyBoard } from "../board/board.js";
 import type { WorkTarget } from "../config.js";
 import { allowlistFor, DEFAULT_PACKS, driverPack, packHosts } from "../network/packs.js";
-import { cloneWorkTarget, extractZip, listBranches, runBranchName, type CloneResult, type ExtractResult } from "./workspace.js";
+import { cloneWorkTarget, extractZip, runBranchName, type CloneResult, type ExtractResult } from "./workspace.js";
+import { isBranchName } from "../github/mirror.js";
 
 /**
  * A session is a directory under the sessions root:
@@ -139,17 +140,22 @@ export const RESERVED_WORKSPACE_NAMES: readonly string[] = ["attachments", "note
 
 /**
  * The record of a repository pick, before the clone exists: the branch is
- * fixed now (the one you chose, or the target's current one), the clone and
- * its base commit come at initialization.
+ * fixed now (the one you chose, or the repository's default branch), the
+ * clone and its base commit come at initialization.
  */
 export const repoPick = async (sessionId: string, pick: { target: WorkTarget; branch?: string; name?: string }): Promise<Session["repos"][number]> => {
   const name = pick.name ?? pick.target.name;
-  const found = await listBranches(pick.target.path).catch(() => null);
-  if (!found) throw new Error(`${pick.target.path} is not a git work tree`);
-  const branch = pick.branch ?? found.current;
-  if (!branch) throw new Error(`${pick.target.name}: cannot tell the current branch (detached HEAD?); choose one`);
-  return { name, sourcePath: pick.target.path, branch, runBranch: runBranchName(sessionId) };
+  const branch = pick.branch ?? pick.target.defaultBranch;
+  if (!isBranchName(branch)) throw new Error(`Bad branch name: ${branch}`);
+  return { name, github: pick.target.github, branch, runBranch: runBranchName(sessionId) };
 };
+
+/**
+ * Where a repository's clone comes from: a git directory on the host that
+ * host git may read. For a GitHub repository that is its mirror, fetched
+ * now (src/github/mirror.ts); the caller supplies it.
+ */
+export type CloneSource = (repo: Session["repos"][number]) => Promise<string>;
 
 /**
  * Creates the session directory and its files. Nothing is cloned and no
@@ -251,7 +257,7 @@ export const cloneExists = (paths: SessionPaths, name: string): Promise<boolean>
  * is left alone. On a failure the clones made in this call are removed, so
  * the session can be initialized again. Returns the updated repos.
  */
-export const provisionSession = async (root: string, session: Session): Promise<{ repos: Session["repos"]; clones: CloneResult[] }> => {
+export const provisionSession = async (root: string, session: Session, source: CloneSource): Promise<{ repos: Session["repos"]; clones: CloneResult[] }> => {
   const paths = sessionPaths(root, session.id);
   const clones: CloneResult[] = [];
   const made: string[] = [];
@@ -262,7 +268,7 @@ export const provisionSession = async (root: string, session: Session): Promise<
         repos.push(r);
         continue;
       }
-      const clone = await cloneWorkTarget(r.sourcePath, path.join(paths.workspace, r.name), r.branch, session.id);
+      const clone = await cloneWorkTarget(await source(r), path.join(paths.workspace, r.name), r.branch, session.id);
       made.push(clone.dest);
       clones.push(clone);
       repos.push({ ...r, branch: clone.branch, runBranch: clone.runBranch, baseCommit: clone.commit });
@@ -275,8 +281,8 @@ export const provisionSession = async (root: string, session: Session): Promise<
 };
 
 /**
- * Restore from repo: one repository's clone is replaced by a fresh clone of
- * its work target, at the recorded branch or the one given, so the box sees
+ * Reclone: one repository's clone is replaced by a fresh clone from its
+ * source (the GitHub mirror, just fetched), at the recorded branch or the one given, so the box sees
  * the repository as it is now. The run branch keeps its name and starts
  * over from the new base; commits the old clone had and were not applied
  * go with it, as do its ignored files (build output, node_modules). The new
@@ -286,7 +292,7 @@ export const provisionSession = async (root: string, session: Session): Promise<
  * .git is deleted as files, never read. The caller stops the container
  * first and records the returned spec.
  */
-export const restoreClone = async (root: string, session: Session, name: string, branch?: string): Promise<Session["repos"][number]> => {
+export const restoreClone = async (root: string, session: Session, name: string, branch: string | undefined, source: CloneSource): Promise<Session["repos"][number]> => {
   const paths = sessionPaths(root, session.id);
   const spec = session.repos.find((r) => r.name === name);
   if (!spec) throw new Error(`No repository ${name} in this session`);
@@ -297,7 +303,7 @@ export const restoreClone = async (root: string, session: Session, name: string,
   await fs.rm(stagingDir, { recursive: true, force: true });
   await fs.mkdir(stagingDir, { recursive: true });
   try {
-    const clone = await cloneWorkTarget(spec.sourcePath, staging, branch ?? spec.branch, session.id);
+    const clone = await cloneWorkTarget(await source(spec), staging, branch ?? spec.branch, session.id);
     await fs.rm(dest, { recursive: true, force: true });
     await fs.rename(staging, dest);
     return { ...spec, branch: clone.branch, runBranch: clone.runBranch, baseCommit: clone.commit };

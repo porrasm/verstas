@@ -100,7 +100,7 @@ export const detectPacks = (files: { path: string; text: string }[]): PackName[]
   return PACK_NAMES.filter((n) => found.has(n));
 };
 
-const MANIFESTS = ["package.json", "pyproject.toml", "setup.py", "setup.cfg", "Pipfile", "requirements*.txt", "Cargo.toml", "go.mod", "pom.xml", "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts", "Gemfile", "*.csproj", "*.fsproj", "*.vbproj", "global.json", "Directory.Build.props", "Directory.Packages.props", "nuget.config", "NuGet.config", "NuGet.Config"];
+export const MANIFESTS = ["package.json", "pyproject.toml", "setup.py", "setup.cfg", "Pipfile", "requirements*.txt", "Cargo.toml", "go.mod", "pom.xml", "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts", "Gemfile", "*.csproj", "*.fsproj", "*.vbproj", "global.json", "Directory.Build.props", "Directory.Packages.props", "nuget.config", "NuGet.config", "NuGet.Config"];
 
 /** Detects packs in a git work tree on the host (your own repository): tracked manifests only, at most 60 files. */
 export const detectPacksInRepo = async (repoPath: string): Promise<PackName[]> => {
