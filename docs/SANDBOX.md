@@ -245,6 +245,16 @@ machine (`core.fsmonitor`, `core.sshCommand`, `pre-commit`). So:
   on the sha Verstas last pushed, so a branch someone moved on GitHub is
   not overwritten. Then the API opens a draft pull request, or the open
   one is updated. Only you start it, from the session page.
+- **Sync** (and Next round, and Start when the base branch moved) comes
+  the other way, also as a bundle. The host fetches GitHub into the
+  mirror and bundles what the clone lacks (`<branch> ^<base>`), streams
+  the file into the container's `/tmp` through `docker exec -i … cat >`
+  (the path resolves inside the container, so nothing the agent links can
+  point the write at the host), and git inside the container fetches it
+  into `refs/remotes/github/<branch>` and moves the run branch there. A
+  clone with uncommitted files, or with commits that are not in a pull
+  request GitHub reports as merged, is left alone unless you choose to
+  rebase or discard; Start refuses with the reason instead of choosing.
 - **A session archive** (Export session) carries each clone as a bundle
   made the same way. Importing it runs host git only in a repository it
   has just created empty (no template, nothing from the archive's `.git`),

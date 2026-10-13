@@ -7,6 +7,7 @@ import {
   type RepoState,
   type PublishPreview,
   type PullRecord,
+  type CommitLine,
   type RemoteSettings,
   copyText,
   type ApplyResult,
@@ -616,7 +617,7 @@ const RunBody = (p: BodyProps) => {
       <aside className="side">
         <InboxPanel inbox={inbox} onRead={(mid) => void p.tryAct("read", () => api("POST", `${base}/messages/${mid}/read`))} onPromote={(iid) => void p.tryAct("promote", () => api("POST", `${base}/ideas/${iid}/promote`))} onOpenTicket={p.openTicket} />
         {!goalMode && <ChoresPanel board={board} base={base} tryAct={p.tryAct} onOpenTicket={p.openTicket} />}
-        <WorkPanel session={session} base={base} active={active} done={counts.done ?? 0} repoState={p.repoState} onExport={p.onExport} onDone={async () => { await p.refreshRun(); await p.repoState.refresh(); }} />
+        <WorkPanel session={session} base={base} active={active} done={counts.done ?? 0} repoState={p.repoState} onExport={p.onExport} onPlan={p.onPlan} onDone={async () => { await p.refreshRun(); await p.repoState.refresh(); }} />
         <PromptBox session={session} base={base} active={active} onDone={p.refreshRun} />
         <EnvironmentPanel env={env} />
         <SessionSettings session={session} onSave={p.saveSettings} />
@@ -761,6 +762,162 @@ const RepoChips = ({ state, names }: { state: ReposState | null; names: string[]
     })}
   </span>
 );
+
+type Unpublished = "refuse" | "rebase" | "discard";
+type SyncAnswer = { name: string; branch: string; tip?: CommitLine; mode?: string; upToDate?: boolean; ok?: boolean; error?: string; reason?: string };
+
+/** What a sync would do to a repository, from its last reading: the words for the dialog and whether a choice is needed. */
+const syncNeeds = (st: RepoState | undefined): { text: string; choose: boolean } => {
+  const b = st?.box;
+  if (!b) return { text: "not read yet", choose: false };
+  const last = st.prs.at(-1);
+  if (b.dirty > 0) return { text: `${b.dirty} uncommitted file${b.dirty === 1 ? "" : "s"}`, choose: true };
+  if (b.ahead === 0) return { text: "no commits of its own", choose: false };
+  if (last && last.headSha === b.head && last.state === "merged") return { text: `its commits are in merged #${last.number}`, choose: false };
+  if (last && last.headSha === b.head && last.state === "open") return { text: `#${last.number} is still open`, choose: true };
+  return { text: `${b.ahead ?? b.commits.length} commit${b.ahead === 1 ? "" : "s"} not in a merged pull request`, choose: true };
+};
+
+const UnpublishedChoice = ({ value, onChange, disabled }: { value: Unpublished; onChange: (v: Unpublished) => void; disabled: boolean }) => (
+  <div className="stack tight small">
+    <label className="chk"><input type="radio" checked={value === "refuse"} onChange={() => onChange("refuse")} disabled={disabled} /> Leave repositories with work of their own as they are</label>
+    <label className="chk"><input type="radio" checked={value === "rebase"} onChange={() => onChange("rebase")} disabled={disabled} /> Rebase their commits onto the new base (stops on a conflict)</label>
+    <label className="chk"><input type="radio" checked={value === "discard"} onChange={() => onChange("discard")} disabled={disabled} /> Discard their commits and uncommitted files</label>
+  </div>
+);
+
+/**
+ * Sync one repository: its clone moves to the latest branch from GitHub
+ * without a new clone. Work of its own is kept unless you choose otherwise.
+ */
+const SyncDialog = ({ repo, st, base, onClose, onDone }: { repo: RepoSpec; st: RepoState | undefined; base: string; onClose: () => void; onDone: (text: string) => Promise<void> }) => {
+  const [branches, setBranches] = useState<string[] | null>(null);
+  const [branch, setBranch] = useState(repo.branch);
+  const [choice, setChoice] = useState<Unpublished>("refuse");
+  const [working, setWorking] = useState(false);
+  const [err, setErr] = useState("");
+  useEffect(() => {
+    api<{ branches: string[] }>("GET", `${base}/repos/${encodeURIComponent(repo.name)}/branches`).then((b) => setBranches(b.branches)).catch((e: Error) => setErr(e.message));
+  }, [base, repo.name]);
+  const needs = syncNeeds(st);
+  const go = async () => {
+    setWorking(true);
+    setErr("");
+    try {
+      const r = await api<SyncAnswer>("POST", `${base}/repos/${encodeURIComponent(repo.name)}/sync`, { branch, onUnpublished: choice });
+      await onDone(r.upToDate ? `${repo.name} is already at ${r.branch} @ ${r.tip?.sha.slice(0, 7)}.` : `${repo.name} synced to ${r.branch} @ ${r.tip?.sha.slice(0, 7)} “${r.tip?.subject}”${r.mode === "rebase" ? "; its commits were rebased onto it" : r.mode === "discard" ? "; its own work was discarded" : ""}.`);
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setWorking(false);
+    }
+  };
+  return (
+    <div className="overlay" onMouseDown={(e) => e.target === e.currentTarget && !working && onClose()} role="dialog" aria-modal="true" aria-labelledby="sync-title">
+      <div className="dialog">
+        <h3 id="sync-title">Sync {repo.name}</h3>
+        <p className="small" style={{ margin: 0 }}>Brings the latest branch from GitHub into the clone, without a new clone: installed dependencies and build output stay. The container keeps running.</p>
+        <div className="stack small" style={{ gap: 8 }}>
+          <label className="row" style={{ gap: 8 }}>
+            <span>Branch</span>
+            <select value={branch} onChange={(e) => setBranch(e.target.value)} disabled={working || !branches}>
+              {!(branches ?? []).includes(branch) && <option value={branch}>{branch}</option>}
+              {(branches ?? []).map((b) => <option key={b} value={b}>{b}</option>)}
+            </select>
+          </label>
+          <div>The clone has {needs.text}.</div>
+          {needs.choose && <UnpublishedChoice value={choice} onChange={setChoice} disabled={working} />}
+          {err && <div className="banner warn"><span>{err}</span></div>}
+        </div>
+        <div className="row">
+          <button className="pri" onClick={() => void go()} disabled={working}>{working ? "Syncing…" : `Sync to ${branch}`}</button>
+          <button className="quiet" onClick={onClose} disabled={working}>Cancel</button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+/**
+ * Next round: after you merged the pull requests on GitHub, every
+ * repository moves to the latest branch (the repository's default branch
+ * unless you pick another), and you see each new tip before planning.
+ */
+const NextRoundDialog = ({ session, state, base, onClose, onDone, onPlan }: { session: Session; state: ReposState | null; base: string; onClose: () => void; onDone: () => Promise<void>; onPlan: () => void }) => {
+  const repos = session.repos.filter((r) => r.github);
+  const [defaults, setDefaults] = useState<Record<string, string>>({});
+  const [branches, setBranches] = useState<Record<string, string>>({});
+  const [choice, setChoice] = useState<Unpublished>("refuse");
+  const [working, setWorking] = useState(false);
+  const [results, setResults] = useState<SyncAnswer[] | null>(null);
+  const [err, setErr] = useState("");
+  useEffect(() => {
+    api<Config>("GET", "/config")
+      .then((c) => {
+        const d: Record<string, string> = {};
+        for (const r of repos) d[r.name] = c.workTargets.find((t) => t.github.toLowerCase() === r.github!.toLowerCase())?.defaultBranch ?? r.branch;
+        setDefaults(d);
+        setBranches(d);
+      })
+      .catch(() => undefined);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  const needs = repos.map((r) => ({ r, n: syncNeeds(state?.repos.find((x) => x.name === r.name)) }));
+  const go = async () => {
+    setWorking(true);
+    setErr("");
+    try {
+      const res = await fetch(`/api${base}/next-round`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ branches, onUnpublished: choice }) });
+      const j = (await res.json()) as { results?: SyncAnswer[]; error?: string };
+      if (!j.results) throw new Error(j.error ?? `HTTP ${res.status}`);
+      setResults(j.results);
+      await onDone();
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setWorking(false);
+    }
+  };
+  const allOk = results?.every((r) => r.ok);
+  return (
+    <div className="overlay" onMouseDown={(e) => e.target === e.currentTarget && !working && onClose()} role="dialog" aria-modal="true" aria-labelledby="round-title">
+      <div className="dialog">
+        <h3 id="round-title">Next round</h3>
+        {!results ? (
+          <>
+            <p className="small" style={{ margin: 0 }}>Every repository moves to the latest branch on GitHub, with your merges in. Then plan the next tickets or revise the goal.</p>
+            <div className="stack small" style={{ gap: 6 }}>
+              {needs.map(({ r, n }) => (
+                <div key={r.name} className="row" style={{ gap: 8, justifyContent: "space-between" }}>
+                  <span><strong>{r.name}</strong> <span className={n.choose ? "warn" : "muted"}>{n.text}</span></span>
+                  <input className="mono" style={{ width: 160 }} value={branches[r.name] ?? ""} placeholder={defaults[r.name] ?? r.branch} onChange={(e) => setBranches({ ...branches, [r.name]: e.target.value })} disabled={working} aria-label={`Branch for ${r.name}`} />
+                </div>
+              ))}
+              {needs.some((x) => x.n.choose) && <UnpublishedChoice value={choice} onChange={setChoice} disabled={working} />}
+            </div>
+          </>
+        ) : (
+          <div className="stack small" style={{ gap: 6 }}>
+            {results.map((r) => (
+              <div key={r.name} className={r.ok ? "" : "err"}>
+                <strong>{r.name}</strong>{" "}
+                {r.ok ? <span className="ok">{r.upToDate ? "already at" : "now at"} <span className="mono">{r.branch} @ {r.tip?.sha.slice(0, 7)}</span> “{r.tip?.subject}”</span> : r.error}
+              </div>
+            ))}
+            {allOk && <div className="muted">Every repository has your latest changes.</div>}
+          </div>
+        )}
+        {err && <div className="banner warn"><span>{err}</span></div>}
+        <div className="row">
+          {!results && <button className="pri" onClick={() => void go()} disabled={working || !repos.length}>{working ? "Syncing…" : "Sync every repository"}</button>}
+          {results && allOk && <button className="pri" onClick={() => { onClose(); onPlan(); }}>Plan tickets…</button>}
+          {results && !allOk && <button onClick={() => setResults(null)}>Back</button>}
+          <button className="quiet" onClick={onClose} disabled={working}>{results ? "Close" : "Cancel"}</button>
+        </div>
+      </div>
+    </div>
+  );
+};
 
 /** The repository's latest pull request: number, state, link. */
 const PullLine = ({ pr }: { pr: PullRecord }) => (
@@ -911,10 +1068,12 @@ const RepoStatus = ({ r, live }: { r: RepoState; live: boolean }) => {
   );
 };
 
-const WorkPanel = ({ session, base, active, done, repoState, onExport, onDone }: { session: Session; base: string; active: boolean; done: number; repoState: RepoStateHandle; onExport: () => void; onDone: () => Promise<void> }) => {
+const WorkPanel = ({ session, base, active, done, repoState, onExport, onDone, onPlan }: { session: Session; base: string; active: boolean; done: number; repoState: RepoStateHandle; onExport: () => void; onDone: () => Promise<void>; onPlan: () => void }) => {
   const [busy, setBusy] = useState("");
   const [restoring, setRestoring] = useState<RepoSpec | null>(null);
   const [publishing, setPublishing] = useState<RepoSpec | null>(null);
+  const [syncing, setSyncing] = useState<RepoSpec | null>(null);
+  const [nextRound, setNextRound] = useState(false);
   const [note, setNote] = useState("");
   const [result, setResult] = useState<ApplyResult | null>(null);
   const [err, setErr] = useState("");
@@ -935,7 +1094,10 @@ const WorkPanel = ({ session, base, active, done, repoState, onExport, onDone }:
     <section className="card stack" style={{ gap: 8 }}>
       <div className="row" style={{ justifyContent: "space-between" }}>
         <h3>Work</h3>
-        <span className="muted small">{done} ticket{done === 1 ? "" : "s"} committed</span>
+        <span className="row" style={{ gap: 8 }}>
+          <span className="muted small">{done} ticket{done === 1 ? "" : "s"} committed</span>
+          {session.repos.some((r) => r.github) && <button className="sm" onClick={() => setNextRound(true)} disabled={Boolean(busy) || active} title={active ? "Pause or stop the run first" : "After merging on GitHub: sync every repository to its latest branch, then plan"}>Next round…</button>}
+        </span>
       </div>
       {session.repos.some((r) => r.sourcePath && !r.github) && <p className="lead">Apply puts a repository's commits on the branch <span className="mono">{session.repos[0]?.runBranch}</span> in your real checkout. Your current branch is not touched; merge or cherry-pick when you are ready.</p>}
       {session.repos.map((r) => {
@@ -955,6 +1117,7 @@ const WorkPanel = ({ session, base, active, done, repoState, onExport, onDone }:
                     </button>
                   );
                 })()}
+                {r.github && <button className="sm" onClick={() => setSyncing(r)} disabled={Boolean(busy) || active} title={active ? "Pause or stop the run first" : `Bring the latest ${r.branch} from GitHub into the clone`}>Sync…</button>}
                 {r.github && <button className="quiet sm" onClick={() => setRestoring(r)} disabled={Boolean(busy) || active} title={active ? "Pause or stop the run first" : `Replace the clone with a fresh clone of ${r.github} from GitHub`}>Reclone…</button>}
               </span>
             </div>
@@ -970,6 +1133,20 @@ const WorkPanel = ({ session, base, active, done, repoState, onExport, onDone }:
       <div className="row"><button className="quiet sm" onClick={onExport} disabled={active}>Export bundles…</button></div>
       {note && <div className="banner ok small"><span>{note}</span><button className="quiet sm end" onClick={() => setNote("")}>Dismiss</button></div>}
       {err && <div className="banner warn"><span>{err}</span><button className="quiet sm end" onClick={() => setErr("")}>Dismiss</button></div>}
+      {syncing && (
+        <SyncDialog
+          repo={syncing}
+          st={repoState.state?.repos.find((x) => x.name === syncing.name)}
+          base={base}
+          onClose={() => setSyncing(null)}
+          onDone={async (text) => {
+            setSyncing(null);
+            setNote(text);
+            await onDone();
+          }}
+        />
+      )}
+      {nextRound && <NextRoundDialog session={session} state={repoState.state} base={base} onClose={() => setNextRound(false)} onDone={onDone} onPlan={onPlan} />}
       {publishing && (
         <PublishDialog
           repo={publishing}

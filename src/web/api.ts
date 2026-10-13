@@ -48,9 +48,10 @@ import { copyEnvironmentFiles, environmentSettings } from "../sessions/from-envi
 import { applyBundle, ApplyError } from "../sessions/apply.js";
 import { loadRepoStateCache, readBoxRepoState, saveRepoStateCache } from "../sessions/repo-state.js";
 import { bundleForPublish, changedPaths, defaultPullText, flaggedPaths, publishTarget, remoteBranchFor } from "../sessions/publish.js";
+import { syncCheck, syncInBox, type UnpublishedChoice } from "../sessions/sync.js";
 import { importArchive, readArchive, writeArchive } from "../sessions/archive.js";
 import type { SessionHandle } from "../sessions/hub.js";
-import { copyHomeVolume, copySnapshot, listSandboxes, replacementOf, removeSandbox, sandboxStatus, snapshotSandbox, stopAllSandboxes, stopSandbox, type SandboxConfig } from "../sandbox/lifecycle.js";
+import { copyHomeVolume, copyIntoSandbox, copySnapshot, listSandboxes, replacementOf, removeSandbox, sandboxStatus, snapshotSandbox, stopAllSandboxes, stopSandbox, type SandboxConfig } from "../sandbox/lifecycle.js";
 import { dockerAvailable } from "../sandbox/docker.js";
 import type { RunManager } from "../harness/run.js";
 import { dockerShell, ensureSessionSandbox, runSetup, type RunManagerConfig } from "../harness/docker-worker.js";
@@ -1031,15 +1032,17 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
       const id = param(req, "id");
       if (action === "start" || action === "plan" || action === "brief" || action === "setup" || action === "prompt") {
         let ctl;
+        let synced: string[] = [];
         try {
           // Starting anything ends an agent terminal first (its changes are committed); the page asked you before calling this.
           if (!(await d.runs.endTerminal(id))) throw new Error("The agent terminal did not end in time; try again");
+          if ((action === "start" || action === "plan") && !d.runs.status(id)) synced = await syncBeforeStart(await d.hub.get(id));
           ctl = await d.runs.start(id, { plan: action === "plan" ? (prompt ?? "") : undefined, brief: action === "brief", setup: action === "setup", prompt: action === "prompt" ? (prompt ?? "") : undefined });
         } catch (e) {
           res.status(409).json({ error: (e as Error).message });
           return;
         }
-        res.json({ ok: true, run: ctl.run });
+        res.json({ ok: true, run: ctl.run, synced });
         return;
       }
       const ok = action === "pause" ? d.runs.pauseAfterTicket(id) : d.runs.stopNow(id);
@@ -1497,6 +1500,149 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
       res.json({ pr: record, updated: Boolean(target.update), commits: st.ahead });
     }),
   );
+
+  /**
+   * Sync one repository's clone to the latest `branch` (its base branch by
+   * default) from GitHub, without recloning (src/sessions/sync.ts). With
+   * unpublished commits or uncommitted files it refuses (409) unless told to
+   * rebase the commits onto the new base or discard them. The caller makes
+   * sure no run is active and the container is up.
+   */
+  const syncRepo = async (h: SessionHandle, name: string, opts: { branch?: string; onUnpublished: UnpublishedChoice }) => {
+    const spec = h.session.repos.find((r) => r.name === name);
+    if (!spec) throw Object.assign(new Error(`No repository ${name} in this session`), { status: 404 });
+    if (!spec.github) throw Object.assign(new Error(`${name} came from a local checkout; only GitHub repositories sync`), { status: 409 });
+    const branch = opts.branch ?? spec.branch;
+    try {
+      await d.mirrors.fetch(spec.github);
+    } catch (e) {
+      throw Object.assign(new Error((e as Error).message), { status: 502 });
+    }
+    const tip = await d.mirrors.tip(spec.github, branch);
+    if (!tip) throw Object.assign(new Error(`${spec.github} has no branch ${branch} on GitHub`), { status: 400 });
+    const sh = dockerShell(d.sandbox, h.id);
+    const box = await readBoxRepoState(sh, spec);
+    if (!box) throw Object.assign(new Error(`Could not read ${name}'s clone in the container`), { status: 500 });
+    const check = syncCheck(spec, box);
+    if (check.ok && tip.sha === spec.baseCommit && box.ahead === 0 && branch === spec.branch) return { name, branch, tip, mode: "none" as const, upToDate: true };
+    let mode: "fast" | "rebase" | "discard" = "fast";
+    if (!check.ok) {
+      if (check.reason === "dirty" && opts.onUnpublished !== "discard") throw Object.assign(new Error(`${check.message}: commit or discard them first`), { status: 409, reason: check.reason, repo: name });
+      if (check.reason !== "dirty" && opts.onUnpublished === "refuse") throw Object.assign(new Error(`${check.message}. Publish them, or sync with rebase or discard.`), { status: 409, reason: check.reason, repo: name });
+      mode = opts.onUnpublished === "rebase" ? "rebase" : "discard";
+    }
+    const file = path.join(h.paths.dir, `${name}.sync.bundle`);
+    const inBox = `/tmp/verstas-sync-${name}.bundle`;
+    try {
+      await d.mirrors.bundleFor(spec.github, branch, spec.baseCommit, file);
+      await copyIntoSandbox(d.sandbox, h.id, file, inBox);
+      await syncInBox(sh, spec, branch, tip.sha, inBox, mode);
+    } catch (e) {
+      throw Object.assign(new Error((e as Error).message), { status: (e as { status?: number }).status ?? 409 });
+    } finally {
+      await fs.rm(file, { force: true });
+      await sh.exec(["rm", "-f", inBox]).catch(() => undefined);
+    }
+    const at = now();
+    await h.mutate((docs) => ({
+      next: { session: { ...docs.session, repos: docs.session.repos.map((r) => (r.name === name ? { ...r, branch, baseCommit: tip.sha, syncedAt: at } : r)) } },
+    }));
+    const cache = await loadRepoStateCache(h.paths.dir);
+    delete cache[name];
+    await saveRepoStateCache(h.paths.dir, cache);
+    return { name, branch, tip, mode, upToDate: false };
+  };
+
+  /** Brings the container up for a sync, unless a run is active (409). */
+  const readyForSync = async (res: Response, h: SessionHandle): Promise<boolean> => {
+    if (notWhileRunning(res, h.id)) return false;
+    if (!isInitialized(h.session)) {
+      res.status(409).json({ error: "The session is not initialized: Initialize clones the latest" });
+      return false;
+    }
+    await ensureSessionSandbox(d.runConfig, h.session, path.join(h.paths.dir, "sandbox.env"), false);
+    return true;
+  };
+
+  const syncBody = z.object({ branch: z.string().min(1).max(200).optional(), onUnpublished: z.enum(["refuse", "rebase", "discard"]).default("refuse") });
+
+  api.post(
+    "/sessions/:id/repos/:name/sync",
+    wrap(async (req, res) => {
+      const body = syncBody.parse(req.body ?? {});
+      const h = await d.hub.get(param(req, "id"));
+      if (!(await readyForSync(res, h))) return;
+      try {
+        res.json(await syncRepo(h, String(param(req, "name")), body));
+      } catch (e) {
+        const x = e as Error & { status?: number; reason?: string; repo?: string };
+        res.status(x.status ?? 500).json({ error: x.message, reason: x.reason, repo: x.repo });
+      }
+    }),
+  );
+
+  /**
+   * Next round: every GitHub repository synced to its branch (the
+   * repository's default branch unless one is given), after you merged the
+   * last round's pull requests. Each repository is synced on its own; the
+   * answer lists what moved and what refused, and why.
+   */
+  api.post(
+    "/sessions/:id/next-round",
+    wrap(async (req, res) => {
+      const body = z.object({ branches: z.record(z.string(), z.string().min(1).max(200)).default({}), onUnpublished: z.enum(["refuse", "rebase", "discard"]).default("refuse") }).parse(req.body ?? {});
+      const h = await d.hub.get(param(req, "id"));
+      if (!(await readyForSync(res, h))) return;
+      await refreshPulls(h, true).catch(() => undefined);
+      const targets = d.getConfig().workTargets;
+      const results = [];
+      for (const r of h.session.repos.filter((x) => x.github)) {
+        const branch = body.branches[r.name] ?? targets.find((t) => t.github.toLowerCase() === r.github!.toLowerCase())?.defaultBranch ?? r.branch;
+        try {
+          results.push({ ...(await syncRepo(await d.hub.get(h.id), r.name, { branch, onUnpublished: body.onUnpublished })), ok: true });
+        } catch (e) {
+          const x = e as Error & { reason?: string };
+          results.push({ name: r.name, branch, ok: false, error: x.message, reason: x.reason });
+        }
+      }
+      res.status(results.every((x) => x.ok) ? 200 : 409).json({ results });
+    }),
+  );
+
+  /**
+   * Before a run or planning starts: repositories whose branch moved on
+   * GitHub are synced first, when that loses nothing. A repository with
+   * unpublished commits or uncommitted files stops the start with the
+   * reason; you resolve it by hand. GitHub out of reach does not stop it.
+   */
+  const syncBeforeStart = async (h: SessionHandle): Promise<string[]> => {
+    if (!isInitialized(h.session)) return [];
+    const moved: string[] = [];
+    for (const r of h.session.repos) {
+      if (!r.github || !r.baseCommit) continue;
+      try {
+        await d.mirrors.fresh(r.github);
+        const tip = await d.mirrors.tip(r.github, r.branch);
+        if (tip && tip.sha !== r.baseCommit) moved.push(r.name);
+      } catch (e) {
+        console.warn(`[sync] ${r.github}: ${(e as Error).message}; starting without syncing`);
+      }
+    }
+    if (!moved.length) return [];
+    await ensureSessionSandbox(d.runConfig, h.session, path.join(h.paths.dir, "sandbox.env"), false);
+    const done: string[] = [];
+    const refused: string[] = [];
+    for (const name of moved) {
+      try {
+        const r = await syncRepo(await d.hub.get(h.id), name, { onUnpublished: "refuse" });
+        done.push(`${name} → ${r.branch} @ ${r.tip.sha.slice(0, 7)}`);
+      } catch (e) {
+        refused.push((e as Error).message);
+      }
+    }
+    if (refused.length) throw new Error(`The base branch moved on GitHub, and syncing first would lose work: ${refused.join("; ")}. Resolve it in the Work panel (Publish PR, or Sync with rebase or discard), then start again.${done.length ? ` Synced: ${done.join(", ")}.` : ""}`);
+    return done;
+  };
 
   /**
    * What state each repository is in, for the Work panel and the header:

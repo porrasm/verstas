@@ -300,3 +300,88 @@ test("the pull request API: create a draft, find by branch, read its state as me
   expect(calls.at(-1)).toMatchObject({ method: "PATCH", body: { title: "T-1 and T-2" } });
   await expect(api.pull("acme/app", 8)).rejects.toThrow(/Validation Failed: No commits between/);
 });
+
+test("sync: refuses to lose work, moves a clean clone to the new tip, rebases or discards on request, and aborts a conflicting rebase", async () => {
+  const { syncCheck, syncInBox } = await import("../../src/sessions/sync.js");
+  const { readBoxRepoState } = await import("../../src/sessions/repo-state.js");
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "verstas-sync-"));
+  try {
+    const upstream = path.join(tmp, "upstream");
+    await makeUpstream(upstream);
+    const mirrors = new Mirrors({ home: path.join(tmp, "home"), token: async () => undefined, remote: () => upstream });
+    await mirrors.fetch("acme/app");
+    const clone = path.join(tmp, "workspace", "app");
+    await execFileP("git", ["clone", "-q", "--no-local", "--template=", "--single-branch", "--branch", "main", mirrors.path("acme/app"), clone]);
+    await git(clone, "remote", "remove", "origin");
+    await git(clone, "checkout", "-q", "-b", "verstas/s");
+    await git(clone, "config", "user.name", "Verstas");
+    await git(clone, "config", "user.email", "v@localhost");
+    const sh = {
+      exec: async (cmd: readonly string[], opts: { workdir?: string } = {}) => {
+        const cwd = (opts.workdir ?? "/workspace").replace(/^\/workspace/, path.join(tmp, "workspace"));
+        return execFileP(cmd[0]!, cmd.slice(1), { cwd }).then((r) => ({ code: 0, stdout: r.stdout, stderr: r.stderr }), (e: { stdout?: string; stderr?: string }) => ({ code: 1, stdout: e.stdout ?? "", stderr: e.stderr ?? "" }));
+      },
+    };
+    let repo = { name: "app", github: "acme/app", branch: "main", runBranch: "verstas/s", baseCommit: await git(clone, "rev-parse", "HEAD"), prs: [] as never[] };
+    const commitUpstream = async (file: string, text: string, msg: string) => {
+      await fs.writeFile(path.join(upstream, file), text);
+      await git(upstream, "add", ".");
+      await git(upstream, "commit", "-q", "-m", msg);
+      await mirrors.fetch("acme/app");
+      return (await mirrors.tip("acme/app", "main"))!.sha;
+    };
+    const bundle = path.join(tmp, "sync.bundle");
+    const syncTo = async (tip: string, mode: "fast" | "rebase" | "discard") => {
+      await mirrors.bundleFor("acme/app", "main", repo.baseCommit, bundle);
+      await syncInBox(sh, repo, "main", tip, bundle, mode);
+      repo = { ...repo, baseCommit: tip };
+    };
+
+    // GitHub moved on (your merge); the clone has nothing of its own: a fast move.
+    const tip1 = await commitUpstream("merged.txt", "1\n", "Merge pull request #1");
+    let box = (await readBoxRepoState(sh, repo))!;
+    expect(syncCheck(repo, box)).toEqual({ ok: true, reason: "clean" });
+    await syncTo(tip1, "fast");
+    expect(await git(clone, "rev-parse", "HEAD")).toBe(tip1);
+    expect(await git(clone, "branch", "--show-current")).toBe("verstas/s");
+
+    // The agents committed; nothing published: refused, unless rebased.
+    await fs.writeFile(path.join(clone, "agent.txt"), "a\n");
+    await git(clone, "add", ".");
+    await git(clone, "commit", "-q", "-m", "T-2: agent work");
+    const tip2 = await commitUpstream("other.txt", "2\n", "Someone else's change");
+    box = (await readBoxRepoState(sh, repo))!;
+    expect(syncCheck(repo, box)).toMatchObject({ ok: false, reason: "unpublished" });
+    await syncTo(tip2, "rebase");
+    expect(await git(clone, "log", "--format=%s", "-2")).toBe("T-2: agent work\nSomeone else's change");
+    expect(await git(clone, "rev-parse", "HEAD~1")).toBe(tip2);
+
+    // Published and still open: refused with the PR named; merged (even squashed): safe.
+    box = (await readBoxRepoState(sh, repo))!;
+    const pr = { round: 1, number: 5, url: "u", remoteBranch: "verstas/s-1", headSha: box.head, base: "main", title: "t", publishedAt: "now" };
+    expect(syncCheck({ ...repo, prs: [{ ...pr, state: "open" }] }, box)).toMatchObject({ ok: false, reason: "open-pr" });
+    expect(syncCheck({ ...repo, prs: [{ ...pr, state: "merged" }] }, box)).toEqual({ ok: true, reason: "merged" });
+
+    // A rebase that conflicts is aborted and the clone stays as it was.
+    await fs.writeFile(path.join(clone, "agent.txt"), "mine\n");
+    await git(clone, "commit", "-q", "-am", "T-3: edit agent.txt");
+    const before = await git(clone, "rev-parse", "HEAD");
+    const tip3 = await commitUpstream("agent.txt", "theirs\n", "Conflicting change");
+    await mirrors.bundleFor("acme/app", "main", repo.baseCommit, bundle);
+    await expect(syncInBox(sh, repo, "main", tip3, bundle, "rebase")).rejects.toThrow(/conflicts in agent.txt; nothing changed/);
+    expect(await git(clone, "rev-parse", "HEAD")).toBe(before);
+    expect(await git(clone, "status", "--porcelain")).toBe("");
+
+    // Uncommitted files: refused; discard drops them and the commits.
+    await fs.writeFile(path.join(clone, "wip.txt"), "wip\n");
+    box = (await readBoxRepoState(sh, repo))!;
+    expect(syncCheck(repo, box)).toMatchObject({ ok: false, reason: "dirty" });
+    await syncTo(tip3, "discard");
+    expect(await git(clone, "rev-parse", "HEAD")).toBe(tip3);
+    await expect(fs.access(path.join(clone, "wip.txt"))).rejects.toThrow();
+    // A bundle that brings another tip than expected is refused.
+    await expect(syncInBox(sh, repo, "main", "0".repeat(40), bundle, "fast")).rejects.toThrow(/the bundle brought/);
+  } finally {
+    await fs.rm(tmp, { recursive: true, force: true });
+  }
+});

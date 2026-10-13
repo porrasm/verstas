@@ -494,6 +494,8 @@ export const repoSpecSchema = z.object({
   runBranch: z.string().min(1).max(200),
   /** The commit the clone started from; the feature branch's base when applying. */
   baseCommit: z.string().optional(),
+  /** When the clone last moved to the latest base from GitHub (Sync), or was cloned. */
+  syncedAt: z.string().optional(),
   /** Pull requests published from this repository, oldest first. */
   prs: z.array(pullRecordSchema).optional(),
   // Sessions from before the harness stopped running checks carry `check`,

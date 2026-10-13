@@ -1,4 +1,4 @@
-import { promises as fs } from "node:fs";
+import { createReadStream, promises as fs } from "node:fs";
 import path from "node:path";
 import { LABEL_KEY as SESSION_LABEL } from "./docker-args.js";
 import type { ChildProcess } from "node:child_process";
@@ -292,6 +292,27 @@ export const execInSandbox = (cfg: SandboxConfig, sessionId: string, cmd: readon
 /** Runs a command to completion as the agent user and returns its output. */
 export const runInSandbox = (cfg: SandboxConfig, sessionId: string, cmd: readonly string[], opts: { timeoutMs?: number; allowFailure?: boolean; input?: string; workdir?: string } = {}) =>
   cfg.docker.run(execArgs(sessionId, cmd, { workdir: opts.workdir, stdin: opts.input !== undefined }), { timeoutMs: opts.timeoutMs ?? 600_000, allowFailure: opts.allowFailure, input: opts.input });
+
+/**
+ * Streams a host file into the container as the agent user (`docker exec -i
+ * … cat > path`). The path is resolved inside the container, so nothing the
+ * agent links there can point the write at the host; and unlike `docker cp`
+ * it reaches tmpfs mounts such as /tmp.
+ */
+export const copyIntoSandbox = (cfg: SandboxConfig, sessionId: string, hostFile: string, boxPath: string): Promise<void> =>
+  new Promise((resolve, reject) => {
+    const child = cfg.docker.spawn(execArgs(sessionId, ["sh", "-c", 'cat > "$1"', "sh", boxPath], { stdin: true }));
+    let stderr = "";
+    child.stderr?.on("data", (c: Buffer) => (stderr += c.toString()));
+    child.on("error", reject);
+    child.on("close", (code) => (code === 0 ? resolve() : reject(new Error(`copying into the container failed (${code}): ${stderr.trim().slice(-300)}`))));
+    const src = createReadStream(hostFile);
+    src.on("error", (e) => {
+      child.kill();
+      reject(e);
+    });
+    src.pipe(child.stdin!);
+  });
 
 /** An approved root script (docs/SANDBOX.md Boundary 7): bash -e on stdin, as root, 15-minute cap. */
 export const runRootScript = async (cfg: SandboxConfig, sessionId: string, script: string, cwd?: string): Promise<{ ok: boolean; code: number; output: string }> => {

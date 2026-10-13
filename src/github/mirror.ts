@@ -225,6 +225,21 @@ export class Mirrors {
     return /^[0-9a-f]{40}$/.test(sha) ? sha : null;
   }
 
+  /**
+   * A bundle of a branch for a clone that has `have` (its base): only the
+   * commits it lacks. When that leaves nothing to bundle (the branch moved
+   * back, or to a branch the base is ahead of), the whole branch.
+   */
+  async bundleFor(github: string, branch: string, have: string | undefined, file: string): Promise<void> {
+    if (!isBranchName(branch)) throw new Error(`Bad branch name: ${branch}`);
+    const ref = `refs/heads/${branch}`;
+    if (have && /^[0-9a-f]{40}$/.test(have)) {
+      const ok = await this.git(github, ["bundle", "create", file, ref, `^${have}`], { timeoutMs: 600_000 }).then(() => true, () => false);
+      if (ok) return;
+    }
+    await this.git(github, ["bundle", "create", file, ref], { timeoutMs: 600_000 });
+  }
+
   /** The packs a branch's manifests imply, read from the mirror's objects (no checkout exists). */
   async packs(github: string, branch: string): Promise<PackName[]> {
     if (!isBranchName(branch)) return [];
