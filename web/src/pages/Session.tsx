@@ -10,7 +10,6 @@ import {
   type CommitLine,
   type RemoteSettings,
   copyText,
-  type ApplyResult,
   type RequestAction,
   fmtAgo,
   fmtBytes,
@@ -650,7 +649,7 @@ const PlanBody = (p: BodyProps) => {
           <>
             <section className="card stack" style={{ gap: 10 }}>
               <SheetHead title="Repositories" mark={session.repos.length ? `${session.repos.length} to clone` : "none yet"} tone={session.repos.length ? "good" : "warn"} />
-              <p className="lead" style={{ margin: 0 }}>Cloned fresh at initialization, at the branch chosen here. The workers commit on a branch of their own; Apply brings it back to your checkout.</p>
+              <p className="lead" style={{ margin: 0 }}>Cloned fresh at initialization, at the branch chosen here. The workers commit on a branch of their own; Publish PR takes it to GitHub.</p>
               <RepoSection env={env} bare />
             </section>
 
@@ -1069,37 +1068,21 @@ const RepoStatus = ({ r, live }: { r: RepoState; live: boolean }) => {
 };
 
 const WorkPanel = ({ session, base, active, done, repoState, onExport, onDone, onPlan }: { session: Session; base: string; active: boolean; done: number; repoState: RepoStateHandle; onExport: () => void; onDone: () => Promise<void>; onPlan: () => void }) => {
-  const [busy, setBusy] = useState("");
   const [restoring, setRestoring] = useState<RepoSpec | null>(null);
   const [publishing, setPublishing] = useState<RepoSpec | null>(null);
   const [syncing, setSyncing] = useState<RepoSpec | null>(null);
   const [nextRound, setNextRound] = useState(false);
   const [note, setNote] = useState("");
-  const [result, setResult] = useState<ApplyResult | null>(null);
-  const [err, setErr] = useState("");
   if (!session.repos.length || !isInitialized(session)) return null;
-  const apply = async (repo: string) => {
-    setBusy(repo);
-    setErr("");
-    setResult(null);
-    try {
-      setResult(await api<ApplyResult>("POST", `${base}/apply`, { repo }));
-    } catch (e) {
-      setErr((e as Error).message);
-    } finally {
-      setBusy("");
-    }
-  };
   return (
     <section className="card stack" style={{ gap: 8 }}>
       <div className="row" style={{ justifyContent: "space-between" }}>
         <h3>Work</h3>
         <span className="row" style={{ gap: 8 }}>
           <span className="muted small">{done} ticket{done === 1 ? "" : "s"} committed</span>
-          {session.repos.some((r) => r.github) && <button className="sm" onClick={() => setNextRound(true)} disabled={Boolean(busy) || active} title={active ? "Pause or stop the run first" : "After merging on GitHub: sync every repository to its latest branch, then plan"}>Next round…</button>}
+          {session.repos.some((r) => r.github) && <button className="sm" onClick={() => setNextRound(true)} disabled={active} title={active ? "Pause or stop the run first" : "After merging on GitHub: sync every repository to its latest branch, then plan"}>Next round…</button>}
         </span>
       </div>
-      {session.repos.some((r) => r.sourcePath && !r.github) && <p className="lead">Apply puts a repository's commits on the branch <span className="mono">{session.repos[0]?.runBranch}</span> in your real checkout. Your current branch is not touched; merge or cherry-pick when you are ready.</p>}
       {session.repos.map((r) => {
         const st = repoState.state?.repos.find((x) => x.name === r.name);
         return (
@@ -1107,18 +1090,17 @@ const WorkPanel = ({ session, base, active, done, repoState, onExport, onDone, o
             <div className="row" style={{ justifyContent: "space-between" }}>
               <span><strong>{r.name}</strong> {r.github ? <a className="muted small mono" href={`https://github.com/${r.github}`} target="_blank" rel="noreferrer">{r.github}</a> : <span className="muted small mono" title={r.sourcePath}>{repoOrigin(r)}</span>}</span>
               <span className="row" style={{ gap: 6 }}>
-                {r.sourcePath && !r.github && <button className="sm" onClick={() => apply(r.name)} disabled={Boolean(busy) || active} title={active ? "Pause or stop the run first" : `Create or update ${r.runBranch} in ${r.sourcePath}`}>{busy === r.name ? "Applying…" : "Apply to repo"}</button>}
                 {r.github && (() => {
                   const open = st?.prs.at(-1)?.state === "open" ? st.prs.at(-1) : undefined;
                   const nothing = st?.box?.ahead === 0;
                   return (
-                    <button className="sm pri" onClick={() => setPublishing(r)} disabled={Boolean(busy) || active || nothing} title={active ? "Pause or stop the run first" : nothing ? "No commits since the base: nothing to publish" : open ? `Push the new commits to ${open.remoteBranch}` : `Push the commits to a verstas/ branch and open a draft pull request into ${r.branch}`}>
+                    <button className="sm pri" onClick={() => setPublishing(r)} disabled={active || nothing} title={active ? "Pause or stop the run first" : nothing ? "No commits since the base: nothing to publish" : open ? `Push the new commits to ${open.remoteBranch}` : `Push the commits to a verstas/ branch and open a draft pull request into ${r.branch}`}>
                       {open ? `Update PR #${open.number}` : "Publish PR"}
                     </button>
                   );
                 })()}
-                {r.github && <button className="sm" onClick={() => setSyncing(r)} disabled={Boolean(busy) || active} title={active ? "Pause or stop the run first" : `Bring the latest ${r.branch} from GitHub into the clone`}>Sync…</button>}
-                {r.github && <button className="quiet sm" onClick={() => setRestoring(r)} disabled={Boolean(busy) || active} title={active ? "Pause or stop the run first" : `Replace the clone with a fresh clone of ${r.github} from GitHub`}>Reclone…</button>}
+                {r.github && <button className="sm" onClick={() => setSyncing(r)} disabled={active} title={active ? "Pause or stop the run first" : `Bring the latest ${r.branch} from GitHub into the clone`}>Sync…</button>}
+                {r.github && <button className="quiet sm" onClick={() => setRestoring(r)} disabled={active} title={active ? "Pause or stop the run first" : `Replace the clone with a fresh clone of ${r.github} from GitHub`}>Reclone…</button>}
               </span>
             </div>
             {st && <RepoStatus r={st} live={Boolean(repoState.state?.live)} />}
@@ -1132,7 +1114,6 @@ const WorkPanel = ({ session, base, active, done, repoState, onExport, onDone, o
       </div>
       <div className="row"><button className="quiet sm" onClick={onExport} disabled={active}>Export bundles…</button></div>
       {note && <div className="banner ok small"><span>{note}</span><button className="quiet sm end" onClick={() => setNote("")}>Dismiss</button></div>}
-      {err && <div className="banner warn"><span>{err}</span><button className="quiet sm end" onClick={() => setErr("")}>Dismiss</button></div>}
       {syncing && (
         <SyncDialog
           repo={syncing}
@@ -1171,38 +1152,20 @@ const WorkPanel = ({ session, base, active, done, repoState, onExport, onDone, o
           }}
         />
       )}
-      {result && (
-        <div className="stack" style={{ gap: 6 }}>
-          <div className="small ok">Branch <span className="mono">{result.branch}</span> is up to date in <span className="mono">{result.targetPath}</span>: {result.commits.length} commit{result.commits.length === 1 ? "" : "s"} since the session started.</div>
-          {result.commits.length > 0 && (
-            <ul className="small mono" style={{ margin: 0, paddingLeft: 18 }}>
-              {result.commits.map((c) => <li key={c.sha}><span className="muted">{c.sha}</span> {c.subject}</li>)}
-            </ul>
-          )}
-          <details>
-            <summary className="muted small">Next steps in a terminal</summary>
-            <pre className="mono" style={{ whiteSpace: "pre-wrap" }}>{result.howTo.join("\n")}</pre>
-          </details>
-          <button className="quiet sm" onClick={() => setResult(null)}>Close</button>
-        </div>
-      )}
     </section>
   );
 };
 
 /**
- * Restore from repo: the clone is replaced by a fresh clone of the work
- * target as it is now, when the real repository moved on (you merged the
- * run branch, committed by hand) and the box fell behind. The dialog counts
- * the run branch's commits since the session started and offers Apply
- * first, since they go with the old clone, and lets you pick the branch to
- * clone when the repository's branch changed.
+ * Reclone: the clone is replaced by a fresh clone from GitHub, for a broken
+ * clone or a guaranteed-fresh tree (Sync is the usual way to catch up).
+ * The dialog counts the run branch's commits since the base, since they go
+ * with the old clone, and lets you pick the branch.
  */
 const RestoreRepo = ({ repo, base, onClose, onDone }: { repo: RepoSpec; base: string; onClose: () => void; onDone: (text: string) => Promise<void> }) => {
   const [commits, setCommits] = useState<number | null | undefined>(undefined);
   const [branches, setBranches] = useState<string[] | null>(null);
   const [branch, setBranch] = useState(repo.branch);
-  const [applied, setApplied] = useState("");
   const [working, setWorking] = useState("");
   const [err, setErr] = useState("");
   useEffect(() => {
@@ -1232,15 +1195,11 @@ const RestoreRepo = ({ repo, base, onClose, onDone }: { repo: RepoSpec; base: st
       setWorking("");
     }
   };
-  const apply = () => step("apply", async () => {
-    const r = await api<ApplyResult>("POST", `${base}/apply`, { repo: repo.name });
-    setApplied(`applied to ${r.branch} in ${r.targetPath}`);
-  });
   const restore = () => step("restore", async () => {
     const r = await api<{ repo: RepoSpec }>("POST", `${base}/repos/${encodeURIComponent(repo.name)}/restore`, { branch });
     await onDone(`${repo.name} recloned from ${repoOrigin(repo)} at ${r.repo.branch} ${r.repo.baseCommit?.slice(0, 10) ?? ""}. The container was stopped; the next run starts it again. Installed dependencies inside the clone are gone; Re-run recipes if setup put them there.`);
   });
-  const atRisk = commits !== 0 && !applied;
+  const atRisk = commits !== 0;
   return (
     <div className="overlay" onMouseDown={(e) => e.target === e.currentTarget && !working && onClose()} role="dialog" aria-modal="true" aria-labelledby="restore-title">
       <div className="dialog">
@@ -1252,8 +1211,7 @@ const RestoreRepo = ({ repo, base, onClose, onDone }: { repo: RepoSpec; base: st
           <div>
             <strong>{repo.name}</strong> <span className="mono muted">{repo.runBranch}</span>:{" "}
             {commits === undefined ? <span className="muted">counting commits since the session started…</span> : commits === null ? <span className="warn">could not count the commits</span> : commits === 0 ? <span className="muted">no commits since the session started</span> : <b>{commits} commit{commits === 1 ? "" : "s"} since the session started</b>}
-            {applied && <span className="ok"> · {applied}</span>}
-            {commits !== 0 && !applied && repo.sourcePath && !repo.github && <> <button className="sm" onClick={() => void apply()} disabled={Boolean(working)}>{working === "apply" ? "Applying…" : "Apply to repo first"}</button></>}
+            {commits !== 0 && commits !== undefined && <span className="muted"> · publish them first (Publish PR) to keep them</span>}
           </div>
           <label className="row" style={{ gap: 8 }}>
             <span>Branch to clone</span>
@@ -1649,8 +1607,8 @@ const EnvironmentPanel = ({ env }: { env: Env }) => {
 /**
  * Reset environment: what goes, said plainly, with each repository's
  * commits since the session started. The clones are deleted, so work on a
- * run branch that was not applied or exported is lost; when there is any,
- * the dialog offers Apply and Export before the reset.
+ * run branch that was not published or exported is lost; when there is any,
+ * the dialog says to publish it first and offers Export.
  */
 const ResetEnvironment = ({ env }: { env: Env }) => {
   const { session, base, active, busy, act } = env;
@@ -1688,10 +1646,6 @@ const ResetEnvironment = ({ env }: { env: Env }) => {
       setWorking("");
     }
   };
-  const apply = (repo: string) => step(repo, async () => {
-    const r = await api<ApplyResult>("POST", `${base}/apply`, { repo });
-    return `applied to ${r.branch} in ${r.targetPath}`;
-  });
   const exportAll = () => step("export", async () => {
     const r = await api<{ howTo: string[] }>("POST", `${base}/export`);
     return r.howTo.join(" ");
@@ -1707,7 +1661,7 @@ const ResetEnvironment = ({ env }: { env: Env }) => {
       <div className="dialog">
         <h3 id="reset-title">Reset environment</h3>
         <p className="small" style={{ margin: 0 }}>
-          This deletes the container, the proxy and network, the home volume (installed toolchains and caches), the snapshot, and <strong>the clones of your repositories</strong>. Commits on a run branch that you have not applied or exported are lost with them. The board, notes, settings and run history stay; the session becomes a plan again and needs Initialize.
+          This deletes the container, the proxy and network, the home volume (installed toolchains and caches), the snapshot, and <strong>the clones of your repositories</strong>. Commits on a run branch that you have not published or exported are lost with them. The board, notes, settings and run history stay; the session becomes a plan again and needs Initialize.
         </p>
         <div className="stack tight">
           {repos === null && <div className="muted small">Counting commits since the session started…</div>}
@@ -1718,11 +1672,11 @@ const ResetEnvironment = ({ env }: { env: Env }) => {
                 {r.commits === null ? <span className="warn">could not count the commits</span> : r.commits === 0 ? <span className="muted">no commits since the session started</span> : <b>{r.commits} commit{r.commits === 1 ? "" : "s"} since the session started</b>}
                 {saved[r.name] && <span className="ok"> · {saved[r.name]}</span>}
               </span>
-              {r.commits !== 0 && <button className="sm" onClick={() => void apply(r.name)} disabled={Boolean(working)}>{working === r.name ? "Applying…" : "Apply to repo"}</button>}
             </div>
           ))}
           {repos && repos.some((r) => r.commits !== 0) && (
             <div className="row small">
+              <span className="muted">Publish them first (Publish PR in the Work panel), or</span>
               <button className="quiet sm" onClick={() => void exportAll()} disabled={Boolean(working)}>{working === "export" ? "Exporting…" : "Export bundles"}</button>
               {saved.export && <span className="ok">{saved.export}</span>}
             </div>

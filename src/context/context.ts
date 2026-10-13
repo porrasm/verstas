@@ -74,7 +74,7 @@ const RULES = [
   "Setup scripts run once as root when the session's container is created (bash -e, non-interactive), with their output logged. The agent can also install with sudo during the session.",
   "No systemd and no Docker inside the box. Services (Postgres, Redis, dev servers) run as plain processes under `svc` (svc start <name> --port N -- <cmd>), which remembers them and restarts them after a container restart.",
   "Repositories arrive as fresh git clones under /workspace/<name> on a run branch; git-ignored files (.env, keys) are not there. Zip attachments are extracted under /workspace/attachments.",
-  "The agent commits nothing; the harness commits once per ticket. Work is exported as git bundles.",
+  "The agent commits nothing; the harness commits once per ticket. The person takes the work to GitHub as a pull request and later syncs the clones to the merged result; the agent never pushes or pulls.",
 ];
 
 export const buildContext = (i: ContextInput): string => {

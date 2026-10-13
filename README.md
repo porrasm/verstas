@@ -88,8 +88,8 @@ Then, in the web app:
    the sidebar; **Reset environment** there removes the container, the
    home volume, the snapshot and the clones and makes the session a plan
    again; the board, notes and settings stay. Its dialog counts each
-   repository's commits since the session started and offers Apply or
-   Export first, since unapplied work on a run branch goes with the
+   repository's commits since the session started and points to Publish PR
+   or Export first, since unpublished work on a run branch goes with the
    clones.
 4. **Recipes** (own tab): bash that runs once when a session's container
    is created, so the box starts set up. After a session's setup worker
@@ -166,8 +166,9 @@ Then, in the web app:
    Starting again after a met goal means "not yet": the worker is told
    what it claimed and looks for what falls short. A session in goal mode
    is a workshop you keep: set the next goal and start, on the same box
-   and clones; when the real repository moved meanwhile, Restore from repo
-   brings a fresh clone first. The worker's rules can be replaced with
+   and clones; when the repository moved on GitHub meanwhile (you merged
+   the last pull request), Next round brings the clones up to date first,
+   and Start does it on its own when nothing would be lost. The worker's rules can be replaced with
    `~/.verstas/prompts/goal.md`. The board modes are unchanged by it.
    **Chores** (both modes keep the list, a lead works it): small fixes
    that are not worth a ticket. Reviewers and workers file them instead of
@@ -185,19 +186,21 @@ Then, in the web app:
    changes whichever it needs. The harness runs no checks of its own: the
    reviewer runs each changed repository's check (the command the brief
    names) and reads the change (`docs/BOARD.md`, Judging).
-9. **Apply to repo** when you want the work: the session page's Work panel
-   puts a repository's commits on the branch `verstas/<session>` in your
-   real checkout, one commit per ticket, without touching the branch you
-   have checked out. Merge, rebase or cherry-pick from there. Export
-   bundles remain for moving work to another machine: one `git fetch` line per
-   repository is shown. Bundles are pure data; nothing from the repository
-   runs on your machine.
-   **Restore from repo** beside it goes the other way: when the real
-   repository moved on (you merged the run branch, committed by hand), it
-   replaces the clone in the box with a fresh clone of the repository as it
-   is now, at the branch you pick, instead of a new session. Unapplied
-   commits on the run branch and ignored files inside the clone go with
-   the old clone; the dialog counts the commits and offers Apply first.
+9. **Publish PR** when you want the work: the session page's Work panel
+   shows per repository which got commits, its base and whether GitHub
+   moved on. Publish PR pushes the commits since the base to
+   `verstas/<session>-<round>` on GitHub and opens a draft pull request
+   into the base branch (Update PR while it is open). Review, tweak and
+   merge on GitHub.
+   **Next round** goes the other way once you merged: every repository's
+   clone moves to the latest default branch (or one you pick) without a
+   new clone, you see each new tip, and Plan tickets follows. **Sync** does
+   it for one repository and any branch; Start does it on its own when the
+   base moved and nothing would be lost, and refuses with the reason when
+   something would. **Reclone** replaces a clone with a fresh one for when
+   a clone is broken. Export bundles remain for moving work by hand: one
+   `git fetch` line per repository is shown. Bundles are pure data; nothing
+   from the repository runs on your machine.
 10. **Move a session to another machine** with **Export session (.ver)**
    in the session page's menu (stop the run first). The archive holds the
    settings, board, inbox, notes, attachments, run history and each clone

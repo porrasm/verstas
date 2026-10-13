@@ -330,7 +330,6 @@ export const copyText = async (text: string): Promise<void> => {
     ta.remove();
   }
 };
-export type ApplyResult = { targetPath: string; branch: string; base: string | null; commits: { sha: string; subject: string }[]; howTo: string[] };
 
 /** `check` is what the harness's own check said, from before it stopped running checks; new verdicts leave it out. */
 export type TouchedRepo = { repo: string; added: number; removed: number; files: number; check?: "passed" | "failed" | "skipped" | "none" };

@@ -486,7 +486,7 @@ export const repoSpecSchema = z.object({
   name: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/),
   /** "owner/name" on github.com: the clone comes from the host's mirror of it. */
   github: z.string().optional(),
-  /** Sessions from before GitHub repositories: the local checkout the clone came from, kept for the record and for Apply. */
+  /** Sessions from before GitHub repositories: the local checkout the clone came from, kept for the record. */
   sourcePath: z.string().min(1).optional(),
   /** The base branch: what the clone started from and follows. */
   branch: z.string().min(1).max(200),

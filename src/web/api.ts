@@ -45,7 +45,6 @@ import { createSession, deleteSessionDir, listSessions, makeSessionId, provision
 import { GithubError, githubApi, parseGithubRepo } from "../github/api.js";
 import type { Mirrors } from "../github/mirror.js";
 import { copyEnvironmentFiles, environmentSettings } from "../sessions/from-environment.js";
-import { applyBundle, ApplyError } from "../sessions/apply.js";
 import { loadRepoStateCache, readBoxRepoState, saveRepoStateCache } from "../sessions/repo-state.js";
 import { bundleForPublish, changedPaths, defaultPullText, flaggedPaths, publishTarget, remoteBranchFor } from "../sessions/publish.js";
 import { syncCheck, syncInBox, type UnpublishedChoice } from "../sessions/sync.js";
@@ -1713,36 +1712,6 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
         });
       } catch (e) {
         res.status((e as { status?: number }).status ?? 500).json({ error: (e as Error).message });
-      }
-    }),
-  );
-
-  /**
-   * Apply one repository's work to the real repository as the feature
-   * branch verstas/<session>: bundle inside the container, fetch on the
-   * host into the work target. Your checked-out branch is never moved.
-   */
-  api.post(
-    "/sessions/:id/apply",
-    wrap(async (req, res) => {
-      const { repo } = z.object({ repo: z.string().min(1) }).parse(req.body);
-      const h = await d.hub.get(param(req, "id"));
-      const spec = h.session.repos.find((r) => r.name === repo);
-      if (!spec) {
-        res.status(404).json({ error: `No repository ${repo} in this session` });
-        return;
-      }
-      if (!spec.sourcePath) {
-        res.status(400).json({ error: `${repo} is a GitHub repository; Apply works only for sessions cloned from a local checkout. Use Export to download its bundle.` });
-        return;
-      }
-      try {
-        const [file] = await bundleRepos(h, [repo]);
-        const result = await applyBundle({ targetPath: spec.sourcePath, bundleFile: file!.file, branch: spec.runBranch, baseCommit: spec.baseCommit, sourceBranch: spec.branch });
-        res.json(result);
-      } catch (e) {
-        const status = e instanceof ApplyError ? 400 : ((e as { status?: number }).status ?? 500);
-        res.status(status).json({ error: (e as Error).message });
       }
     }),
   );

@@ -230,10 +230,6 @@ machine (`core.fsmonitor`, `core.sshCommand`, `pre-commit`). So:
   `<session>/export/<repo>.bundle`. A bundle is pure data: fetching from it
   on the host runs no code from the repository. The UI tells you the exact
   `git fetch <bundle> <branch>` line.
-- **Apply to repo** does the fetch for you: host git reads the bundle (pure
-  data) and writes into your own checkout, force-updating only the branch
-  `verstas/<session>` and refusing if that branch is checked out. The
-  workspace's `.git` is still never read by host git.
 - **Publish PR** goes the same way out. Inside the container,
   `git bundle create <file> <run branch> ^<base>` bundles only the
   session's own commits; the host refuses the file if it is not a regular
@@ -310,7 +306,7 @@ token, the Cursor key, the tokens inside the Codex login). If one appears
 in any repo, nothing is committed in any of them (the changes are unstaged
 and kept), and a ticket that would have been done is blocked with the
 reason. This keeps the
-token out of bundles and out of "Apply to repo". Taking the token out of
+token out of bundles and out of pull requests. Taking the token out of
 the box entirely, with the proxy adding it to requests, is backlog V-04.
 
 **The GitHub token** never enters a session. It is stored in the same
@@ -494,4 +490,4 @@ snapshot is in the copy.
       anything, and `/mcp` keeps its loopback Host and Origin checks.
 - [ ] `src/remote/` sends only sessions with `remote: true`, never tool
       results, and `remoteCommandSchema` has no kind that reaches settings,
-      secrets, the allowlist, files, export/apply or session deletion.
+      secrets, the allowlist, files, export, publishing, syncing or session deletion.
