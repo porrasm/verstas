@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
-import { api, copyText } from "../api";
+import { api, copyText, type Artifact } from "../api";
 
 /**
  * An agent terminal on the session page: Claude Code or Codex in their own
@@ -198,8 +198,138 @@ export const AgentTerminal = ({ sessionId, base, title, driver, onEnd, onClose }
         <button className="quiet sm end" onClick={() => void copySelection()} disabled={!selected && !copied} title="Copy the selected text (⌘C on the Mac, Ctrl+Shift+C elsewhere)">{copied ? "Copied" : "Copy"}</button>
         {phase === "ended" ? <button className="quiet sm" onClick={onClose}>Close</button> : <button className="warn sm" onClick={onEnd} title="Hang up the agent; its changes in the repositories are committed">End terminal</button>}
       </div>
-      <div className="term-host" ref={host} onClick={() => host.current?.querySelector("textarea")?.focus()} />
+      {/* The fit addon sizes the terminal to its parent's computed height, padding included: the padding lives on the outer box so no row is cut off. */}
+      <div className="term-host" onClick={() => host.current?.querySelector("textarea")?.focus()}>
+        <div className="term-fit" ref={host} />
+      </div>
+      <ArtifactPills base={base} live={phase !== "ended"} />
       <div className="muted small">Select text by dragging, or with {/Mac/.test(navigator.platform) ? "⌥" : "Shift"}-drag when the agent has the mouse; {/Mac/.test(navigator.platform) ? "⌘C" : "Ctrl+Shift+C"} copies, Shift+Enter starts a new line. The agent works in the box with the board tools; its tickets go to the backlog unless you ask for them to be ready. Starting a run ends this terminal and commits what changed in the repositories.</div>
     </section>
+  );
+};
+
+const EyeIcon = () => (
+  <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
+    <path d="M1 8s2.5-5 7-5 7 5 7 5-2.5 5-7 5-7-5-7-5z" />
+    <circle cx="8" cy="8" r="2" />
+  </svg>
+);
+
+const DownloadIcon = () => (
+  <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M8 2v8M4.5 6.5 8 10l3.5-3.5M2.5 13.5h11" />
+  </svg>
+);
+
+const CloseIcon = () => (
+  <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" aria-hidden="true">
+    <path d="M4 4l8 8M12 4l-8 8" />
+  </svg>
+);
+
+/** Artifact sizes read in MB, small ones too. */
+const fmtMb = (n: number): string => (n < 10_000 ? "<0.01 MB" : `${(n / 1e6).toFixed(n < 1e7 ? 2 : 1)} MB`);
+
+/**
+ * Files agents published with their `artifact` tool (on your request), as
+ * pills: download each, view text and images in place, delete them. Under
+ * the terminal while one is open; on the session page (`card`) otherwise.
+ * They stay until you delete them.
+ */
+export const ArtifactPills = ({ base, live, card }: { base: string; live: boolean; card?: boolean }) => {
+  const [list, setList] = useState<Artifact[]>([]);
+  const [open, setOpen] = useState<Artifact | null>(null);
+  const [error, setError] = useState("");
+  const loadRef = useRef<() => void>(() => undefined);
+  useEffect(() => {
+    let gone = false;
+    const load = () =>
+      void api<{ artifacts: Artifact[] }>("GET", `${base}/artifacts`)
+        .then((r) => !gone && setList(r.artifacts))
+        .catch(() => undefined);
+    loadRef.current = load;
+    load();
+    const t = live ? window.setInterval(load, 3000) : undefined;
+    return () => {
+      gone = true;
+      if (t) clearInterval(t);
+    };
+  }, [base, live]);
+  const remove = async (path: string) => {
+    setError("");
+    await api("DELETE", `${base}${path}`).catch((e: Error) => setError(e.message));
+    loadRef.current();
+  };
+  if (!list.length) return null;
+  const url = (a: Artifact) => `/api${base}/artifacts/${encodeURIComponent(a.id)}`;
+  const pills = (
+    <div className="artifacts">
+      {!card && <span className="muted small">Artifacts</span>}
+      {list.map((a) => (
+        <span key={a.id} className="pill artifact" title={`${a.name} · ${a.bytes.toLocaleString()} bytes · ${new Date(a.publishedAt).toLocaleString()}`}>
+          <span className="artifact-name">{a.name}</span>
+          <span className="muted">{fmtMb(a.bytes)}</span>
+          {a.kind !== "file" && (
+            <button className="icon" onClick={() => setOpen(a)} aria-label={`View ${a.name}`} title="View">
+              <EyeIcon />
+            </button>
+          )}
+          <a className="icon" href={`${url(a)}?download=1`} download={a.name} aria-label={`Download ${a.name}`} title="Download">
+            <DownloadIcon />
+          </a>
+          <button className="icon" onClick={() => void remove(`/artifacts/${encodeURIComponent(a.id)}`)} aria-label={`Delete ${a.name}`} title="Delete">
+            <CloseIcon />
+          </button>
+        </span>
+      ))}
+      {list.length > 1 && <button className="quiet sm" onClick={() => window.confirm(`Delete all ${list.length} artifacts?`) && void remove("/artifacts")}>Delete all</button>}
+      {error && <span className="small" style={{ color: "var(--warn)" }}>{error}</span>}
+      {open && <ArtifactViewer a={open} url={url(open)} onClose={() => setOpen(null)} />}
+    </div>
+  );
+  return card ? (
+    <section className="card stack tight">
+      <h3>Artifacts</h3>
+      {pills}
+    </section>
+  ) : (
+    pills
+  );
+};
+
+const ArtifactViewer = ({ a, url, onClose }: { a: Artifact; url: string; onClose: () => void }) => {
+  const [text, setText] = useState<string | null>(null);
+  const [error, setError] = useState("");
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    const key = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", key);
+    return () => window.removeEventListener("keydown", key);
+  }, [onClose]);
+  useEffect(() => {
+    if (a.kind !== "text") return;
+    fetch(url)
+      .then(async (r) => (r.ok ? setText(await r.text()) : setError(r.status === 404 ? "This artifact is gone: it was deleted." : `HTTP ${r.status}`)))
+      .catch((e: Error) => setError(e.message));
+  }, [a.kind, url]);
+  const copy = async () => {
+    if (text === null) return;
+    await copyText(text);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1500);
+  };
+  return (
+    <div className="overlay" onMouseDown={(e) => e.target === e.currentTarget && onClose()} role="dialog" aria-modal="true" aria-labelledby="artifact-title">
+      <div className="dialog artifact-view">
+        <div className="row">
+          <h3 id="artifact-title" className="mono">{a.name}</h3>
+          <span className="muted small">{fmtMb(a.bytes)}</span>
+          {a.kind === "text" && <button className="quiet sm end" onClick={() => void copy()} disabled={text === null}>{copied ? "Copied" : "Copy"}</button>}
+          <a className={`btn quiet sm${a.kind === "text" ? "" : " end"}`} href={`${url}?download=1`} download={a.name}>Download</a>
+          <button className="quiet sm" onClick={onClose}>Close</button>
+        </div>
+        {error ? <div className="banner warn">{error}</div> : a.kind === "image" ? <img className="artifact-image" src={url} alt={a.name} /> : text === null ? <span className="muted small">Loading…</span> : <pre className="artifact-text">{text}</pre>}
+      </div>
+    </div>
   );
 };

@@ -4,7 +4,7 @@ import type { DriverName, Session } from "../core/types.js";
 import type { SessionHub } from "../sessions/hub.js";
 import type { RunTokens } from "../agent-api/agent-api.js";
 import { promises as fs } from "node:fs";
-import { buildSpec, ensureSandboxUp, execInSandbox, healSandbox, ownWorkspace, proxyLogsSince, runInSandbox, runRootScript, runSetupScript, snapshotSandbox, usableSnapshot, writeEnvFile, type SandboxConfig } from "../sandbox/lifecycle.js";
+import { buildSpec, copyFromSandbox, ensureSandboxUp, execInSandbox, healSandbox, ownWorkspace, proxyLogsSince, runInSandbox, runRootScript, runSetupScript, snapshotSandbox, usableSnapshot, writeEnvFile, type SandboxConfig } from "../sandbox/lifecycle.js";
 import { now, type SetupResult } from "../core/types.js";
 import { secretValues, type Secrets } from "../config.js";
 import { writeAllowlist } from "../sessions/sessions.js";
@@ -267,6 +267,7 @@ export const createDockerRunManager = (c: RunManagerConfig): RunManager =>
     shell: (sessionId) => dockerShell(c.sandbox, sessionId),
     worker: (sessionId) => dockerWorker(c.sandbox, sessionId, c.credentials),
     terminal: (sessionId) => dockerTerminal(c.sandbox, sessionId, c.credentials),
+    copyOut: (sessionId, boxPath, hostFile, maxBytes) => copyFromSandbox(c.sandbox, sessionId, boxPath, hostFile, maxBytes),
     hasCredential: async (driver) => Boolean(credentialFor(await c.credentials.secrets(), driver)),
     secrets: async () => secretValues(await c.credentials.secrets()),
     proxyDenials: (sessionId, since) => proxyDenials(c.sandbox, sessionId)(since),

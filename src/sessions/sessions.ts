@@ -35,6 +35,7 @@ import { isBranchName } from "../github/mirror.js";
  *       notes/          agent memory outside git
  *     runs/<n>/         env (0600), events.jsonl, tickets/<id>.md
  *     export/           bundles
+ *     artifacts/        files agents published on your request; you delete them
  *
  * Only the host app writes these files; the agent reaches them through the
  * agent API. Deleting a session is deleting the directory (after the
@@ -54,6 +55,8 @@ export type SessionPaths = {
   notes: string;
   runs: string;
   exportDir: string;
+  /** Session artifacts (src/sessions/artifacts.ts): outside the workspace, so the box cannot change them. */
+  artifacts: string;
   setup: string;
 };
 
@@ -72,6 +75,7 @@ export const sessionPaths = (root: string, id: string): SessionPaths => {
     notes: path.join(dir, "workspace", "notes"),
     runs: path.join(dir, "runs"),
     exportDir: path.join(dir, "export"),
+    artifacts: path.join(dir, "artifacts"),
     setup: path.join(dir, "setup"),
   };
 };

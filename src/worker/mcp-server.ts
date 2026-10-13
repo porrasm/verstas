@@ -374,6 +374,13 @@ export const TOOLS: Tool[] = [
     call: (a) => api("POST", `/messages`, { text: a.text }),
   },
   {
+    name: "artifact",
+    description:
+      "Only when the user asked for a file (in a message, the ticket, the goal or the conversation): publish it as an artifact. Never on your own initiative. It appears on the session page, where the user can download it, and view it if it is text (UTF-8, up to 2 MB) or a PNG, JPEG, GIF or WebP image. The file is copied now; later changes do not reach it. Publishing the same name again replaces the earlier one. Up to 25 MB. Artifacts are not kept in git and the user deletes them; what must be kept goes in a repository or in notes/.",
+    inputSchema: obj({ path: str("The file in the box: absolute, or relative to /workspace", 4096), name: str("The name shown to the user (default: the file's name)", 120) }, ["path"]),
+    call: (a) => api("POST", `/artifacts`, { path: a.path, ...(a.name ? { name: a.name } : {}) }),
+  },
+  {
     name: "idea",
     description: "Pitch a feature idea to the user: what the current work makes possible and why it would be valuable. Ideas are kept in a list; the user may turn one into a ticket. Do not implement it.",
     inputSchema: obj({ title: str("Short title", 200), pitch: str("Two to six sentences", 10_000) }, ["title", "pitch"]),
@@ -421,7 +428,7 @@ const forPlanning = (t: Tool, role: string): Tool => {
 };
 
 /** The goal worker has no board: it keeps its plan in notes/state.md, so it gets only what reaches the user and the harness. */
-const FOR_GOAL = new Set(["budget", "handoff", "goal_done", "request", "halt", "message", "idea"]);
+const FOR_GOAL = new Set(["budget", "handoff", "goal_done", "request", "halt", "message", "idea", "artifact"]);
 
 /** The tools for this worker's role: a lead also drives the board; the agent in your terminal plans and asks you; the goal worker has no board at all. */
 export const visibleTools = (role = process.env.VERSTAS_ROLE ?? ""): Tool[] =>

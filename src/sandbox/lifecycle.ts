@@ -1,4 +1,4 @@
-import { createReadStream, promises as fs } from "node:fs";
+import { createReadStream, createWriteStream, promises as fs } from "node:fs";
 import path from "node:path";
 import { LABEL_KEY as SESSION_LABEL } from "./docker-args.js";
 import type { ChildProcess } from "node:child_process";
@@ -312,6 +312,50 @@ export const copyIntoSandbox = (cfg: SandboxConfig, sessionId: string, hostFile:
       reject(e);
     });
     src.pipe(child.stdin!);
+  });
+
+/** Inside the container: refuse what is not a readable regular file, or is over the limit, then write it to stdout. */
+const COPY_OUT = 'f=$1; [ -f "$f" ] && [ -r "$f" ] || { echo "$f is not a readable file" >&2; exit 3; }; n=$(wc -c < "$f"); [ "$n" -le "$2" ] || { echo "$f is $n bytes; the limit is $2" >&2; exit 4; }; exec cat "$f"';
+
+/**
+ * Copies a file out of the session container to a new host file, as the
+ * agent user: the path (and any symlink in it) resolves inside the
+ * container, so the host never follows a path the agent chose. Resolves
+ * with the byte count; a file over `maxBytes` is refused.
+ */
+export const copyFromSandbox = (cfg: SandboxConfig, sessionId: string, boxPath: string, hostFile: string, maxBytes: number): Promise<number> =>
+  new Promise((resolve, reject) => {
+    const child = cfg.docker.spawn(execArgs(sessionId, ["sh", "-c", COPY_OUT, "sh", boxPath, String(maxBytes)]));
+    child.stdin?.end();
+    const out = createWriteStream(hostFile, { flags: "wx", mode: 0o600 });
+    let bytes = 0;
+    let stderr = "";
+    let failed: Error | null = null;
+    let pending = 2;
+    let created = false;
+    out.on("open", () => (created = true));
+    const fail = (e: Error) => {
+      if (failed) return;
+      failed = e;
+      child.kill();
+      out.destroy();
+      // Only a file this copy made: "wx" fails on one that was there before, and that one stays.
+      if (created) void fs.rm(hostFile, { force: true });
+      reject(e);
+    };
+    const settled = () => {
+      if (--pending === 0 && !failed) resolve(bytes);
+    };
+    child.stdout!.on("data", (c: Buffer) => {
+      bytes += c.length;
+      if (bytes > maxBytes) fail(new Error(`${boxPath} is over the limit of ${maxBytes} bytes`));
+    });
+    child.stdout!.pipe(out);
+    child.stderr?.on("data", (c: Buffer) => (stderr += c.toString()));
+    child.on("error", fail);
+    out.on("error", fail);
+    out.on("finish", settled);
+    child.on("close", (code) => (code === 0 ? settled() : fail(new Error(stderr.trim().slice(-300) || `copying out of the container failed (${code})`))));
   });
 
 /** An approved root script (docs/SANDBOX.md Boundary 7): bash -e on stdin, as root, 15-minute cap. */

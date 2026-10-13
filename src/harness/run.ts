@@ -9,6 +9,7 @@ import { writeJsonAtomic } from "../board/store.js";
 import type { SessionHandle, SessionHub } from "../sessions/hub.js";
 import type { AgentRunHooks, RunToken, RunTokens } from "../agent-api/agent-api.js";
 import { withAgentPacks, workspaceSizeMb } from "../sessions/sessions.js";
+import { addArtifact, ARTIFACT_MAX_BYTES, type Artifact } from "../sessions/artifacts.js";
 import { allowlistFor } from "../network/packs.js";
 import { goalContinuePrompt, goalPrompt, implementerPrompt, leadContinuePrompt, leadPrompt, mcpConfig, readGoalRules, readLeadRules, notesIndexMd, plannerPrompt, reviewerPrompt, setupPrompt, sweepReviewerPrompt, systemMd, terminalMd, userPrompt, verstasMd, withContext, workspaceClaudeMd, type GoalPromptOptions } from "./prompts.js";
 import { driverInfo, missingCredentialError } from "./drivers.js";
@@ -71,6 +72,8 @@ export type RunDeps = {
   secrets?: () => Promise<string[]>;
   /** Agent terminals (src/harness/terminal.ts); without it they are refused. */
   terminal?: (sessionId: string) => TerminalRunner;
+  /** Copies a file out of the session container to a new host file (as the agent; the path resolves in the box); resolves with its size. Artifacts need it. */
+  copyOut?: (sessionId: string, boxPath: string, hostFile: string, maxBytes: number) => Promise<number>;
   /** Whether a driver has a credential, so a terminal on one without fails before anything starts. */
   hasCredential?: (driver: DriverName) => Promise<boolean>;
   /** For tests: a fixed clock. */
@@ -1358,6 +1361,17 @@ export class RunManager implements AgentRunHooks {
   }
 
   /** board_changes: what the judge would see now, without the diffs. */
+  /** A file an agent published: copied out of the box now, so later changes to it in the box do not reach it. */
+  async publishArtifact(run: RunToken, boxPath: string, name?: string): Promise<Artifact> {
+    if (!this.deps.copyOut) throw new Error("Artifacts need the Docker sandbox");
+    if (this.active.get(run.sessionId)?.run.id !== run.runId) throw new Error("This run has ended");
+    const h = await this.deps.hub.get(run.sessionId);
+    const at = path.posix.isAbsolute(boxPath) ? boxPath : path.posix.join("/workspace", boxPath);
+    const a = await addArtifact(h.paths.artifacts, { name: name ?? at, runId: run.runId, now: (this.deps.now ?? now)() }, (file) => this.deps.copyOut!(run.sessionId, at, file, ARTIFACT_MAX_BYTES));
+    this.deps.hub.emitRunEvent({ sessionId: run.sessionId, runId: run.runId, event: { kind: "status", t: (this.deps.now ?? now)(), text: `artifact published: ${a.name} (${a.bytes} bytes)` } });
+    return a;
+  }
+
   async previewJudging(sessionId: string, ticketId?: string): Promise<unknown> {
     const h = await this.deps.hub.get(sessionId);
     const ticket = ticketId ? h.board.tickets.find((t) => t.id === ticketId) : undefined;

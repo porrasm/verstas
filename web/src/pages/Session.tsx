@@ -45,7 +45,7 @@ import {
   type RepoSpec,
 } from "../api";
 import { AgentOptionsButton, useDrivers } from "./AgentOptions";
-import { AgentTerminal } from "./Terminal";
+import { AgentTerminal, ArtifactPills } from "./Terminal";
 
 const COLUMNS: { key: string; title: string; states: string[] }[] = [
   { key: "backlog", title: "Backlog", states: ["backlog"] },
@@ -464,6 +464,8 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
           onClose={() => setTerminalPane(null)}
         />
       )}
+
+      {terminalPane === null && <ArtifactPills base={base} live={active} card />}
 
       {initialized ? <RunBody {...bodyProps} /> : <PlanBody {...bodyProps} />}
 

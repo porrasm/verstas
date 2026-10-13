@@ -25,6 +25,7 @@ import {
 } from "../core/types.js";
 import { addChore, addNote, agentAddDep, agentSetPriority, beginSweep, BoardError, canStart, deleteTicket, editTicket, getTicket, importBoard, openChores, replaceTicket, setChoreState, sweepInFlight, sweepToJudging, transition, validateRepos, type AgentRole } from "../board/board.js";
 import type { SessionHub } from "../sessions/hub.js";
+import type { Artifact } from "../sessions/artifacts.js";
 
 /**
  * The agent API: what a worker inside the box may do to its session,
@@ -66,6 +67,8 @@ export type AgentRunHooks = {
   sweepSubmitted?(run: RunToken, results: SweepResult[]): void;
   /** What the judge would see if the change were submitted now: touched repositories and the review level. */
   previewJudging?(sessionId: string, ticketId?: string): Promise<unknown>;
+  /** An agent published a file from the box for the user (src/sessions/artifacts.ts). */
+  publishArtifact?(run: RunToken, boxPath: string, name?: string): Promise<Artifact>;
 };
 
 /** The chore list at the session's sweep line: the lead sweeps (or drops) before it starts another ticket. */
@@ -412,6 +415,24 @@ export const createAgentApi = (hub: SessionHub, tokens: RunTokens, hooks?: Agent
         return { next: { inbox: { ...d.inbox, messages: [...d.inbox.messages, m] } }, result: m.id };
       });
       res.status(201).json({ ok: true, id });
+    }),
+  );
+
+  /** A file from the box for the user to view or download, when the user asked for one. Any role. */
+  r.post(
+    "/artifacts",
+    wrap(async (req, res) => {
+      if (!hooks?.publishArtifact) {
+        res.status(409).json({ error: "No run is attached to this API; nothing can copy the file" });
+        return;
+      }
+      const { path: boxPath, name } = z.object({ path: z.string().min(1).max(4096), name: z.string().min(1).max(200).optional() }).parse(req.body);
+      try {
+        const a = await hooks.publishArtifact(req.run, boxPath, name);
+        res.status(201).json({ ok: true, name: a.name, bytes: a.bytes, kind: a.kind, note: a.kind === "file" ? "Shown to the user on the session page as a download (no preview for this kind of file)." : "Shown to the user on the session page, with a preview." });
+      } catch (e) {
+        res.status(400).json({ error: (e as Error).message });
+      }
     }),
   );
 

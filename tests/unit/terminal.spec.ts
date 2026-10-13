@@ -16,6 +16,7 @@ import type { DockerRunner } from "../../src/sandbox/docker.js";
 import { SessionHub } from "../../src/sessions/hub.js";
 import { sessionPaths } from "../../src/sessions/sessions.js";
 import { visibleTools } from "../../src/worker/mcp-server.js";
+import { loadArtifacts } from "../../src/sessions/artifacts.js";
 import { claudeTerminalArgs, codexTerminalArgs, skipClaudeOnboarding, type TerminalJob } from "../../src/worker/terminal.js";
 
 // --- LiveTerminal ------------------------------------------------------------
@@ -323,7 +324,7 @@ const commitShell = (): Shell & { commits: string[] } => {
 
 const noWorker: WorkerRunner = { run: async () => { throw new Error("no worker runs in a terminal"); } };
 
-const terminalManager = async (state: "created" | "finished" = "created", opts: { credential?: boolean } = {}) => {
+const terminalManager = async (state: "created" | "finished" = "created", opts: { credential?: boolean; files?: Record<string, Buffer> } = {}) => {
   const s = await sessionDir(state);
   const shell = commitShell();
   const issued: RunToken[] = [];
@@ -349,6 +350,13 @@ const terminalManager = async (state: "created" | "finished" = "created", opts: 
       },
     }),
     hasCredential: async () => opts.credential ?? true,
+    copyOut: async (_id, boxPath, hostFile, max) => {
+      const b = opts.files?.[boxPath];
+      if (!b) throw new Error(`${boxPath} is not a readable file`);
+      if (b.length > max) throw new Error("over the limit");
+      await fs.writeFile(hostFile, b, { flag: "wx" });
+      return b.length;
+    },
   });
   return { s, shell, issued, p, opened, mgr };
 };
@@ -407,5 +415,48 @@ test("endTerminal leaves a work run alone", async () => {
     expect(await t.mgr.endTerminal(t.s.id)).toBe(true);
   } finally {
     await fs.rm(t.s.root, { recursive: true, force: true });
+  }
+});
+
+test("agents publish artifacts through the agent API while their run is active; they stay across runs", async () => {
+  const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
+  const t = await terminalManager("created", { files: { "/workspace/app/shot.png": png, "/tmp/report.md": Buffer.from("# Report\nall good\n") } });
+  const ctl = await t.mgr.start(t.s.id, { terminal: { driver: "claude" } });
+  const server = createAgentApi(t.s.hub, t.mgr["deps"].tokens, t.mgr).listen(0, "127.0.0.1");
+  const port = await new Promise<number>((r) => server.on("listening", () => r((server.address() as net.AddressInfo).port)));
+  try {
+    await expect.poll(() => t.mgr.terminal(t.s.id)?.running).toBe(true);
+    const terminalToken = t.mgr["deps"].tokens.issue({ sessionId: t.s.id, runId: ctl.run.id, role: "terminal" });
+    const post = async (token: string, body: unknown) => {
+      const res = await fetch(`http://127.0.0.1:${port}/agent/artifacts`, { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify(body) });
+      return { status: res.status, json: (await res.json()) as Record<string, unknown> };
+    };
+    expect(await post(terminalToken, { path: "app/shot.png" })).toMatchObject({ status: 201, json: { name: "shot.png", kind: "image", bytes: png.length } });
+    expect(await post(terminalToken, { path: "/tmp/report.md", name: "../report.md" })).toMatchObject({ status: 201, json: { name: "report.md", kind: "text" } });
+    expect((await post(terminalToken, { path: "/etc/nothing" })).status).toBe(400);
+    const worker = t.mgr["deps"].tokens.issue({ sessionId: t.s.id, runId: ctl.run.id, role: "worker" });
+    expect(await post(worker, { path: "/tmp/report.md", name: "worker.md" })).toMatchObject({ status: 201, json: { name: "worker.md" } });
+    const list = await loadArtifacts(t.s.paths.artifacts);
+    expect(list.map((a) => [a.name, a.kind, a.mime])).toEqual([["shot.png", "image", "image/png"], ["report.md", "text", "text/plain; charset=utf-8"], ["worker.md", "text", "text/plain; charset=utf-8"]]);
+    // A run that has ended publishes nothing more (its tokens are revoked); its artifacts stay until the user deletes them.
+    expect(await t.mgr.endTerminal(t.s.id)).toBe(true);
+    await ctl.done;
+    expect((await post(terminalToken, { path: "/tmp/report.md" })).status).toBe(401);
+    await expect(t.mgr.publishArtifact({ sessionId: t.s.id, runId: ctl.run.id, role: "terminal" }, "/tmp/report.md")).rejects.toThrow(/ended/);
+    expect(await loadArtifacts(t.s.paths.artifacts)).toHaveLength(3);
+    const next = await t.mgr.start(t.s.id, { terminal: { driver: "claude" } });
+    expect(await loadArtifacts(t.s.paths.artifacts)).toHaveLength(3);
+    await t.mgr.endTerminal(t.s.id);
+    await next.done;
+  } finally {
+    await new Promise((r) => server.close(r));
+    await fs.rm(t.s.root, { recursive: true, force: true });
+  }
+});
+
+test("every agent has the artifact tool, told to use it only when the user asks", () => {
+  for (const role of ["terminal", "worker", "lead", "planner", "goal", "setup", "implementer"]) {
+    const tool = visibleTools(role).find((t) => t.name === "artifact");
+    expect(tool?.description).toMatch(/^Only when the user asked/);
   }
 });

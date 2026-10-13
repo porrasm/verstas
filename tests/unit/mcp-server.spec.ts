@@ -58,7 +58,7 @@ test("board MCP server speaks JSON-RPC and forwards tool calls with the run toke
     const names = (list.result!.tools as { name: string; inputSchema: { required: string[] } }[]).map((t) => t.name);
     expect(names).toEqual([
       "budget", "board_list_tickets", "board_get_ticket", "board_add_note", "board_report", "board_create_ticket",
-      "chore", "chores_list", "chore_drop", "board_set_priority", "board_add_dep", "request", "halt", "message", "idea",
+      "chore", "chores_list", "chore_drop", "board_set_priority", "board_add_dep", "request", "halt", "message", "artifact", "idea",
     ]);
 
     const got = await call("tools/call", { name: "board_get_ticket", arguments: { id: "T-1" } });
@@ -119,7 +119,7 @@ test("claim, submit and handoff are shown to a lead only", async () => {
 
 test("the goal worker gets no board tools: budget, handoff, goal_done and the ways to reach the user; nobody else gets goal_done", async () => {
   const { visibleTools } = await import("../../src/worker/mcp-server.js");
-  expect(visibleTools("goal").map((t) => t.name).sort()).toEqual(["budget", "goal_done", "halt", "handoff", "idea", "message", "request"]);
+  expect(visibleTools("goal").map((t) => t.name).sort()).toEqual(["artifact", "budget", "goal_done", "halt", "handoff", "idea", "message", "request"]);
   for (const role of ["lead", "implementer", "reviewer", "planner", "setup", "prompt", "terminal"]) expect(visibleTools(role).map((t) => t.name)).not.toContain("goal_done");
 });
 

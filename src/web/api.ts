@@ -48,6 +48,7 @@ import { copyEnvironmentFiles, environmentSettings } from "../sessions/from-envi
 import { loadRepoStateCache, readBoxRepoState, saveRepoStateCache } from "../sessions/repo-state.js";
 import { bundleForPublish, changedPaths, defaultPullText, flaggedPaths, publishTarget, remoteBranchFor } from "../sessions/publish.js";
 import { syncCheck, syncInBox, type UnpublishedChoice } from "../sessions/sync.js";
+import { artifactFile, clearArtifacts, deleteArtifact, loadArtifacts } from "../sessions/artifacts.js";
 import { importArchive, readArchive, writeArchive } from "../sessions/archive.js";
 import type { SessionHandle } from "../sessions/hub.js";
 import { copyHomeVolume, copyIntoSandbox, copySnapshot, listSandboxes, replacementOf, removeSandbox, sandboxStatus, snapshotSandbox, stopAllSandboxes, stopSandbox, type SandboxConfig } from "../sandbox/lifecycle.js";
@@ -1120,6 +1121,62 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
       const id = param(req, "id");
       const live = d.runs.terminal(id);
       res.json(live ? { active: true, runId: live.runId, driver: live.driver, key: live.key, running: live.running } : { active: false });
+    }),
+  );
+
+  /** Files agents published on request (src/sessions/artifacts.ts), newest first. */
+  api.get(
+    "/sessions/:id/artifacts",
+    wrap(async (req, res) => {
+      const h = await d.hub.get(param(req, "id"));
+      res.json({ artifacts: (await loadArtifacts(h.paths.artifacts)).reverse() });
+    }),
+  );
+
+  api.delete(
+    "/sessions/:id/artifacts",
+    wrap(async (req, res) => {
+      const h = await d.hub.get(param(req, "id"));
+      await clearArtifacts(h.paths.artifacts);
+      res.json({ ok: true });
+    }),
+  );
+
+  api.delete(
+    "/sessions/:id/artifacts/:aid",
+    wrap(async (req, res) => {
+      const h = await d.hub.get(param(req, "id"));
+      if (!(await deleteArtifact(h.paths.artifacts, param(req, "aid")))) {
+        res.status(404).json({ error: "No such artifact" });
+        return;
+      }
+      res.json({ ok: true });
+    }),
+  );
+
+  /**
+   * One artifact's bytes. The content is the agent's, so the page's origin
+   * must not run it: the type comes from the bytes (a raster image, plain
+   * text, or else a download), never from the name, sniffing is off, and
+   * the response is sandboxed. `?download=1` saves it under its name.
+   */
+  api.get(
+    "/sessions/:id/artifacts/:aid",
+    wrap(async (req, res) => {
+      const h = await d.hub.get(param(req, "id"));
+      const found = await artifactFile(h.paths.artifacts, param(req, "aid"));
+      if (!found) {
+        res.status(404).json({ error: "No such artifact; it may have been deleted" });
+        return;
+      }
+      const { artifact: a, file } = found;
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      res.setHeader("Content-Security-Policy", "default-src 'none'; sandbox");
+      res.setHeader("Cache-Control", "private, no-store");
+      res.setHeader("Content-Type", a.mime);
+      const download = req.query.download === "1" || a.kind === "file";
+      res.setHeader("Content-Disposition", `${download ? "attachment" : "inline"}; filename="${a.name.replace(/"/g, "")}"`);
+      res.sendFile(file, { headers: { "Content-Type": a.mime } });
     }),
   );
 

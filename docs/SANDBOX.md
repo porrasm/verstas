@@ -210,6 +210,17 @@ host.docker.internal:host-gateway`).
   name, from the same origin as the page, and with the per-terminal key
   that only the UI's own API hands out (a page on another site, or one
   that rebinds its name to 127.0.0.1, fails one of those).
+- Any token may publish an **artifact** (`POST /agent/artifacts`): a file
+  you asked an agent for, shown on the session page. The host never reads
+  the path the agent names: `docker exec` runs `cat` in the container as
+  the agent user, so the path and any symlink in it resolve inside the box,
+  and the bytes stream to a new file under `<session>/artifacts/`, outside
+  the workspace (25 MB and 50 files at most). The page serves an artifact
+  with a type worked out from its bytes, never from its name: PNG, JPEG,
+  GIF or WebP as an image, UTF-8 text as `text/plain` (SVG and HTML among
+  it, shown as source), anything else as a download; always with
+  `nosniff` and a `sandbox` CSP, so nothing an agent writes runs on the UI
+  origin. You delete them; nothing expires.
 - The proxy allows plain HTTP only to `host.docker.internal:4701` and only
   under the path prefix `/agent/`. The UI and the session management API
   live on **4700**, bound to `127.0.0.1`, which no container can reach.

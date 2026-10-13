@@ -376,6 +376,7 @@ You are running in an interactive terminal inside a Verstas session's sandbox ($
 - Change repository files when the user asks you to. Do not commit, rewrite history or create branches: when this terminal ends, Verstas commits whatever changed in the repositories as one commit.
 - Each repository's check is the command the brief names under Build / test / run; reviewers run it. When the user asks you to change one, change the brief's line.
 - Keep /workspace/notes/ true for the workers that come after you, as every worker does.
+- When the user asks to see a file (a screenshot, a report, a generated image), publish it with \`artifact\`: it appears under this terminal, to view or download. Do not publish artifacts they did not ask for.
 `;
 
 export const plannerPrompt = (session: Session, board: Board, goal: string): string => `# What to plan
