@@ -5,6 +5,8 @@ import {
   repoOrigin,
   type ReposState,
   type RepoState,
+  type PublishPreview,
+  type PullRecord,
   type RemoteSettings,
   copyText,
   type ApplyResult,
@@ -760,6 +762,110 @@ const RepoChips = ({ state, names }: { state: ReposState | null; names: string[]
   </span>
 );
 
+/** The repository's latest pull request: number, state, link. */
+const PullLine = ({ pr }: { pr: PullRecord }) => (
+  <div>
+    <span className="muted">PR</span>{" "}
+    <a href={pr.url} target="_blank" rel="noreferrer">#{pr.number}</a>{" "}
+    <span className={pr.state === "merged" ? "ok" : pr.state === "closed" ? "muted" : ""}>{pr.state}</span>
+    <span className="muted"> · {pr.title}</span>
+  </div>
+);
+
+/**
+ * Publish PR for one repository: what goes (the commits since the base),
+ * what does not (uncommitted files), what deserves a look before CI runs it
+ * (build and CI files), then a draft pull request or an update of the open one.
+ */
+const PublishDialog = ({ repo, base, onClose, onDone }: { repo: RepoSpec; base: string; onClose: () => void; onDone: (text: string) => Promise<void> }) => {
+  const [p, setP] = useState<PublishPreview | null>(null);
+  const [err, setErr] = useState("");
+  const [title, setTitle] = useState("");
+  const [body, setBody] = useState("");
+  const [draft, setDraft] = useState(true);
+  const [ack, setAck] = useState(false);
+  const [working, setWorking] = useState(false);
+  const url = `${base}/repos/${encodeURIComponent(repo.name)}/publish`;
+  useEffect(() => {
+    api<PublishPreview>("GET", url)
+      .then((x) => {
+        setP(x);
+        setTitle(x.title);
+        setBody(x.body);
+      })
+      .catch((e: Error) => setErr(e.message));
+  }, [url]);
+  useEffect(() => {
+    const key = (e: KeyboardEvent) => e.key === "Escape" && !working && onClose();
+    addEventListener("keydown", key);
+    return () => removeEventListener("keydown", key);
+  }, [working, onClose]);
+  const publish = async () => {
+    setWorking(true);
+    setErr("");
+    try {
+      const r = await api<{ pr: PullRecord; updated: boolean; commits: number | null }>("POST", url, { title, body, draft });
+      await onDone(`${repo.name}: ${r.updated ? "updated" : "opened"} pull request #${r.pr.number} (${r.pr.remoteBranch} into ${r.pr.base}). ${r.pr.url}`);
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setWorking(false);
+    }
+  };
+  const nothing = p !== null && p.ahead === 0;
+  const blocked = !p || nothing || !title.trim() || (p.flagged.length > 0 && !ack);
+  return (
+    <div className="overlay" onMouseDown={(e) => e.target === e.currentTarget && !working && onClose()} role="dialog" aria-modal="true" aria-labelledby="publish-title">
+      <div className="dialog">
+        <h3 id="publish-title">{p?.update ? `Update pull request #${p.update.number}` : "Publish pull request"} · {repo.name}</h3>
+        {!p && !err && <div className="muted small">Reading the clone…</div>}
+        {p && (
+          <div className="stack small" style={{ gap: 8 }}>
+            <div>
+              {nothing ? (
+                <span className="muted">No commits since {p.base}: nothing to publish.</span>
+              ) : (
+                <>
+                  <b>{p.ahead ?? p.commits.length} commit{(p.ahead ?? p.commits.length) === 1 ? "" : "s"}</b>, {p.changedFiles} file{p.changedFiles === 1 ? "" : "s"} changed, pushed to <span className="mono">{p.remoteBranch}</span>
+                  {p.update ? <> (the branch of <a href={p.update.url} target="_blank" rel="noreferrer">#{p.update.number}</a>)</> : <> as a pull request into <span className="mono">{p.base}</span></>}.
+                </>
+              )}
+            </div>
+            {p.commits.length > 0 && (
+              <ul className="mono" style={{ margin: 0, paddingLeft: 18, maxHeight: 140, overflow: "auto" }}>
+                {p.commits.map((c) => <li key={c.sha}><span className="muted">{c.sha.slice(0, 7)}</span> {c.subject}</li>)}
+              </ul>
+            )}
+            {p.warnings.map((w) => <div key={w} className="banner warn"><span>{w}</span></div>)}
+            {p.flagged.length > 0 && (
+              <div className="banner warn stack" style={{ gap: 4 }}>
+                <span>These files change how the build or CI runs. Once pushed, the repository's CI runs the agents' code with whatever secrets it can read:</span>
+                <span className="mono">{p.flagged.slice(0, 12).join(", ")}{p.flagged.length > 12 ? ` and ${p.flagged.length - 12} more` : ""}</span>
+                <label className="chk"><input type="checkbox" checked={ack} onChange={(e) => setAck(e.target.checked)} /> I looked at them; publish anyway</label>
+              </div>
+            )}
+            {!nothing && (
+              <>
+                <label>Title<input value={title} onChange={(e) => setTitle(e.target.value)} disabled={working} maxLength={250} /></label>
+                <label>
+                  Description {p.update && <span className="help">Left empty, the pull request keeps its description</span>}
+                  <textarea value={body} onChange={(e) => setBody(e.target.value)} disabled={working} style={{ minHeight: 120 }} />
+                </label>
+                {!p.update && <label className="chk"><input type="checkbox" checked={draft} onChange={(e) => setDraft(e.target.checked)} disabled={working} /> Open as a draft</label>}
+              </>
+            )}
+          </div>
+        )}
+        {err && <div className="banner warn"><span>{err}</span></div>}
+        <div className="row">
+          <button className="pri" onClick={() => void publish()} disabled={blocked || working}>{working ? "Publishing…" : p?.update ? `Update #${p.update.number}` : draft ? "Open draft pull request" : "Open pull request"}</button>
+          <button className="quiet" onClick={onClose} disabled={working}>Cancel</button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 /** One repository in the Work panel: where its base is, what the clone added, whether GitHub moved on. */
 const RepoStatus = ({ r, live }: { r: RepoState; live: boolean }) => {
   const [open, setOpen] = useState(false);
@@ -787,6 +893,7 @@ const RepoStatus = ({ r, live }: { r: RepoState; live: boolean }) => {
           {r.remote?.fetchedAt && !r.remoteError ? <span className="muted"> · checked {fmtAgo(r.remote.fetchedAt, now)}</span> : null}
         </div>
       )}
+      {r.prs.length > 0 && <PullLine pr={r.prs.at(-1)!} />}
       <div>
         <span className={ch.changed ? "" : "muted"}>{ch.changed ? <b>{ch.text}</b> : r.box ? "No changes this session" : "Not read yet"}</span>
         {r.box && !live ? <span className="muted"> · as of {fmtAgo(r.box.at, now)}</span> : null}
@@ -807,6 +914,7 @@ const RepoStatus = ({ r, live }: { r: RepoState; live: boolean }) => {
 const WorkPanel = ({ session, base, active, done, repoState, onExport, onDone }: { session: Session; base: string; active: boolean; done: number; repoState: RepoStateHandle; onExport: () => void; onDone: () => Promise<void> }) => {
   const [busy, setBusy] = useState("");
   const [restoring, setRestoring] = useState<RepoSpec | null>(null);
+  const [publishing, setPublishing] = useState<RepoSpec | null>(null);
   const [note, setNote] = useState("");
   const [result, setResult] = useState<ApplyResult | null>(null);
   const [err, setErr] = useState("");
@@ -838,6 +946,15 @@ const WorkPanel = ({ session, base, active, done, repoState, onExport, onDone }:
               <span><strong>{r.name}</strong> {r.github ? <a className="muted small mono" href={`https://github.com/${r.github}`} target="_blank" rel="noreferrer">{r.github}</a> : <span className="muted small mono" title={r.sourcePath}>{repoOrigin(r)}</span>}</span>
               <span className="row" style={{ gap: 6 }}>
                 {r.sourcePath && !r.github && <button className="sm" onClick={() => apply(r.name)} disabled={Boolean(busy) || active} title={active ? "Pause or stop the run first" : `Create or update ${r.runBranch} in ${r.sourcePath}`}>{busy === r.name ? "Applying…" : "Apply to repo"}</button>}
+                {r.github && (() => {
+                  const open = st?.prs.at(-1)?.state === "open" ? st.prs.at(-1) : undefined;
+                  const nothing = st?.box?.ahead === 0;
+                  return (
+                    <button className="sm pri" onClick={() => setPublishing(r)} disabled={Boolean(busy) || active || nothing} title={active ? "Pause or stop the run first" : nothing ? "No commits since the base: nothing to publish" : open ? `Push the new commits to ${open.remoteBranch}` : `Push the commits to a verstas/ branch and open a draft pull request into ${r.branch}`}>
+                      {open ? `Update PR #${open.number}` : "Publish PR"}
+                    </button>
+                  );
+                })()}
                 {r.github && <button className="quiet sm" onClick={() => setRestoring(r)} disabled={Boolean(busy) || active} title={active ? "Pause or stop the run first" : `Replace the clone with a fresh clone of ${r.github} from GitHub`}>Reclone…</button>}
               </span>
             </div>
@@ -853,6 +970,18 @@ const WorkPanel = ({ session, base, active, done, repoState, onExport, onDone }:
       <div className="row"><button className="quiet sm" onClick={onExport} disabled={active}>Export bundles…</button></div>
       {note && <div className="banner ok small"><span>{note}</span><button className="quiet sm end" onClick={() => setNote("")}>Dismiss</button></div>}
       {err && <div className="banner warn"><span>{err}</span><button className="quiet sm end" onClick={() => setErr("")}>Dismiss</button></div>}
+      {publishing && (
+        <PublishDialog
+          repo={publishing}
+          base={base}
+          onClose={() => setPublishing(null)}
+          onDone={async (text) => {
+            setPublishing(null);
+            setNote(text);
+            await onDone();
+          }}
+        />
+      )}
       {restoring && (
         <RestoreRepo
           repo={restoring}

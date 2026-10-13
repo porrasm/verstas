@@ -234,6 +234,17 @@ machine (`core.fsmonitor`, `core.sshCommand`, `pre-commit`). So:
   data) and writes into your own checkout, force-updating only the branch
   `verstas/<session>` and refusing if that branch is checked out. The
   workspace's `.git` is still never read by host git.
+- **Publish PR** goes the same way out. Inside the container,
+  `git bundle create <file> <run branch> ^<base>` bundles only the
+  session's own commits; the host refuses the file if it is not a regular
+  file (no symlink is followed), fetches it into the repository's mirror
+  under `refs/verstas/<session>/<repo>` (pure data; the mirror already
+  has the base), and pushes from the mirror with the token to
+  `verstas/<session>-<round>` on GitHub. The push refspec is built in code
+  and refused unless the destination is a `verstas/` branch; it is leased
+  on the sha Verstas last pushed, so a branch someone moved on GitHub is
+  not overwritten. Then the API opens a draft pull request, or the open
+  one is updated. Only you start it, from the session page.
 - **A session archive** (Export session) carries each clone as a bundle
   made the same way. Importing it runs host git only in a repository it
   has just created empty (no template, nothing from the archive's `.git`),
@@ -430,7 +441,7 @@ snapshot is in the copy.
   your machine write draft sessions (docs/DRAFTS.md). It sits behind the
   same loopback bind, answers only loopback `Host` names and refuses
   non-loopback `Origin`s (DNS rebinding). Its tools write draft files and
-  read work-target branch names and manifests; none creates, starts or
+  read repository branch names and manifests from the mirrors; none creates, starts or
   runs a session, and a session made from a draft goes through the same
   create call and review as any other.
 
@@ -443,6 +454,16 @@ snapshot is in the copy.
   includes approving network requests. Verstas connects out; it never
   listens for the dashboard. Untick a session, or delete the token in the
   dashboard, to stop it.
+
+- **Publishing runs agent-written code in your CI.** Publish PR puts the
+  session's commits on GitHub, and the repository's existing CI, on
+  `push` or `pull_request`, runs that code (an `npm test` runs whatever
+  the agents put in `package.json`) with whatever secrets those workflows
+  can read. Without the Workflows permission the token cannot add or
+  change `.github/workflows/*`, and the Publish dialog asks you to look at
+  changed build and CI files before it pushes; it cannot judge them for
+  you. Pull requests open as drafts. Keep secrets in environments or in
+  jobs that run only on your default branch.
 
 ## Reviewer checklist
 

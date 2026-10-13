@@ -345,12 +345,31 @@ export type RepoSpec = {
   branch: string;
   runBranch: string;
   baseCommit?: string;
+  prs?: PullRecord[];
 };
 
 /** Where a session repository came from, for display: owner/name, or the old local path with the home directory shortened. */
 export const repoOrigin = (r: { github?: string; sourcePath?: string }): string => r.github ?? r.sourcePath?.replace(/^\/Users\/[^/]+|^\/home\/[^/]+/, "~") ?? "";
 
 export type CommitLine = { sha: string; date: string; subject: string };
+/** A pull request Verstas published from a session repository. */
+export type PullRecord = { round: number; number: number; url: string; remoteBranch: string; headSha: string; base: string; title: string; state: "open" | "merged" | "closed"; publishedAt: string; checkedAt?: string };
+/** What Publish would do for a repository. */
+export type PublishPreview = {
+  ahead: number | null;
+  dirty: number;
+  commits: CommitLine[];
+  changedFiles: number;
+  flagged: string[];
+  base: string;
+  round: number;
+  remoteBranch: string;
+  update: PullRecord | null;
+  last: PullRecord | null;
+  title: string;
+  body: string;
+  warnings: string[];
+};
 /** One session repository's state: the clone's side (read in the container, or the last reading) and GitHub's. */
 export type RepoState = {
   name: string;
@@ -361,6 +380,7 @@ export type RepoState = {
   box: { at: string; head: string; ahead: number | null; dirty: number; commits: CommitLine[]; base: CommitLine | null } | null;
   remote: { tip: CommitLine | null; behind: number | null; fetchedAt: string | null } | null;
   remoteError: string | null;
+  prs: PullRecord[];
 };
 export type ReposState = { live: boolean; repos: RepoState[] };
 

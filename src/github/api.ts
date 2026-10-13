@@ -36,16 +36,43 @@ const repoSchema = z.object({
 
 export type GithubRepo = { github: string; defaultBranch: string; private: boolean; canPush: boolean | null };
 
+const pullSchema = z.object({
+  number: z.number().int(),
+  html_url: z.string(),
+  state: z.enum(["open", "closed"]),
+  draft: z.boolean().optional(),
+  merged_at: z.string().nullable().optional(),
+  title: z.string(),
+  head: z.object({ ref: z.string(), sha: z.string() }),
+  base: z.object({ ref: z.string() }),
+});
+
+/** A pull request as Verstas records it. */
+export type Pull = { number: number; url: string; state: "open" | "merged" | "closed"; draft: boolean; title: string; headRef: string; headSha: string; base: string };
+
+const toPull = (raw: unknown): Pull => {
+  const p = pullSchema.parse(raw);
+  return { number: p.number, url: p.html_url, state: p.merged_at ? "merged" : p.state, draft: p.draft ?? false, title: p.title, headRef: p.head.ref, headSha: p.head.sha, base: p.base.ref };
+};
+
 export type GithubApi = {
   /** The token's user; null without a token. */
   whoami(): Promise<{ login: string } | null>;
   repo(github: string): Promise<GithubRepo>;
+  pull(github: string, number: number): Promise<Pull>;
+  /** The newest pull request from a branch of the repository itself, in any state; null when there is none. */
+  findPull(github: string, branch: string): Promise<Pull | null>;
+  createPull(github: string, p: { head: string; base: string; title: string; body: string; draft: boolean }): Promise<Pull>;
+  updatePull(github: string, number: number, p: { title?: string; body?: string }): Promise<Pull>;
 };
 
 export const githubApi = (token: string | undefined, base = "https://api.github.com", fetchImpl: typeof fetch = fetch): GithubApi => {
-  const call = async (p: string): Promise<unknown> => {
+  const call = async (p: string, method = "GET", body?: unknown): Promise<unknown> => {
     const res = await fetchImpl(`${base}${p}`, {
+      method,
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       headers: {
+        ...(body === undefined ? {} : { "Content-Type": "application/json" }),
         Accept: "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
         "User-Agent": "verstas",
@@ -57,7 +84,8 @@ export const githubApi = (token: string | undefined, base = "https://api.github.
     if (!res.ok) {
       let msg = text.slice(0, 300);
       try {
-        msg = String((JSON.parse(text) as { message?: unknown }).message ?? msg);
+        const j = JSON.parse(text) as { message?: unknown; errors?: { message?: unknown }[] };
+        msg = [j.message, ...(j.errors ?? []).map((e) => e.message)].filter(Boolean).join(": ") || msg;
       } catch {
         // not JSON
       }
@@ -77,5 +105,13 @@ export const githubApi = (token: string | undefined, base = "https://api.github.
         throw e;
       }
     },
+    pull: async (github, number) => toPull(await call(`/repos/${github}/pulls/${number}`)),
+    findPull: async (github, branch) => {
+      const owner = github.split("/")[0]!;
+      const list = z.array(z.unknown()).parse(await call(`/repos/${github}/pulls?state=all&per_page=1&head=${encodeURIComponent(`${owner}:${branch}`)}`));
+      return list.length ? toPull(list[0]) : null;
+    },
+    createPull: async (github, p) => toPull(await call(`/repos/${github}/pulls`, "POST", p)),
+    updatePull: async (github, number, p) => toPull(await call(`/repos/${github}/pulls/${number}`, "PATCH", p)),
   };
 };

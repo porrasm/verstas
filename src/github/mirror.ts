@@ -37,6 +37,9 @@ export const githubAuthEnv = (token: string | undefined): Record<string, string>
 
 const scrub = (text: string, token: string | undefined): string => (token ? text.split(token).join("***") : text);
 
+/** git asks for a username when GitHub answers 401 or 404 over https: a private repository the token cannot reach, a bad token, or no repository. */
+const isAuthRefusal = (raw: string): boolean => /could not read Username|Authentication failed|Repository not found|Invalid username or (password|token)|returned error: 40[134]/.test(raw);
+
 const BRANCH_RE = /^[A-Za-z0-9][A-Za-z0-9._\/-]{0,199}$/;
 export const isBranchName = (b: string): boolean => BRANCH_RE.test(b) && !b.includes("..") && !b.endsWith(".lock") && !b.endsWith("/");
 
@@ -118,7 +121,7 @@ export class Mirrors {
       } catch (e) {
         const raw = (e as Error).message;
         // git asks for a username when GitHub answers 401/404: private without a token that reaches it, or gone.
-        const msg = /could not read Username|Authentication failed|Repository not found|returned error: 40[34]/.test(raw) ? "GitHub refused access: the repository is private or gone, and no saved token can read it" : raw;
+        const msg = isAuthRefusal(raw) ? "GitHub refused access: the repository is private or gone and no saved token can read it, or the saved token is invalid" : raw;
         this.lastError.set(github, msg);
         throw new Error(`Fetching ${github} from GitHub failed: ${msg}`);
       } finally {
@@ -172,6 +175,54 @@ export class Mirrors {
     if (!/^[0-9a-f]{40}$/.test(from) || !isBranchName(branch)) return null;
     const out = await this.git(github, ["rev-list", "--count", `${from}..refs/heads/${branch}`]).catch(() => null);
     return out !== null && /^\d+$/.test(out) ? Number(out) : null;
+  }
+
+  /**
+   * Takes a branch from a bundle made in a session's container into the
+   * mirror, under refs/verstas/ (outside what a fetch prunes). The bundle
+   * is pure data; its prerequisites must already be in the mirror, which
+   * they are when the clone came from it. Returns the commit.
+   */
+  async importBundle(github: string, bundleFile: string, branch: string, ref: string): Promise<string> {
+    if (!isBranchName(branch)) throw new Error(`Bad branch name: ${branch}`);
+    if (!/^refs\/verstas\/[A-Za-z0-9._\/-]+$/.test(ref) || ref.includes("..")) throw new Error(`Bad ref: ${ref}`);
+    await this.git(github, ["bundle", "verify", "--quiet", bundleFile]).catch((e: Error) => {
+      throw new Error(`The bundle does not apply to the mirror: ${e.message.split("\n")[0]}`);
+    });
+    await this.git(github, ["fetch", "--quiet", "--no-tags", bundleFile, `+refs/heads/${branch}:${ref}`], { timeoutMs: 600_000 });
+    return this.git(github, ["rev-parse", "--verify", `${ref}^{commit}`]);
+  }
+
+  /**
+   * Pushes one of Verstas's refs to a `verstas/` branch on GitHub, never
+   * anything else. `expect` is the sha the branch had when Verstas last
+   * pushed it, or null for a branch that must not exist yet: a branch
+   * someone else moved is refused rather than overwritten.
+   */
+  async push(github: string, ref: string, remoteBranch: string, expect: string | null): Promise<void> {
+    if (!remoteBranch.startsWith("verstas/") || !isBranchName(remoteBranch)) throw new Error(`Verstas pushes only verstas/ branches, not ${remoteBranch}`);
+    if (!ref.startsWith("refs/verstas/")) throw new Error(`Bad ref: ${ref}`);
+    if (expect !== null && !/^[0-9a-f]{40}$/.test(expect)) throw new Error(`Bad sha: ${expect}`);
+    try {
+      await this.git(github, ["push", "--quiet", "--no-verify", `--force-with-lease=refs/heads/${remoteBranch}:${expect ?? ""}`, this.remote(github), `${ref}:refs/heads/${remoteBranch}`], { auth: true, timeoutMs: 1_800_000 });
+    } catch (e) {
+      const raw = (e as Error).message;
+      if (/workflow/i.test(raw) && /scope|permission/i.test(raw)) throw new Error("GitHub refused the push: it changes a workflow file under .github/workflows, and the token has no Workflows permission. That is the guard working; remove the change from the branch or push it yourself.");
+      if (/stale info|rejected/.test(raw)) throw new Error(`GitHub refused the push: ${remoteBranch} changed on GitHub since Verstas last pushed it. Look at it there first. (${raw.split("\n")[0]})`);
+      if (isAuthRefusal(raw) || /403|denied/i.test(raw)) throw new Error(`GitHub refused the push: the token cannot write to ${github}. It needs Contents read and write. (${raw.split("\n")[0]})`);
+      throw new Error(`Pushing to ${github} failed: ${raw}`);
+    }
+  }
+
+  /** The sha a branch has on GitHub now; null when it does not exist there. */
+  async remoteSha(github: string, branch: string): Promise<string | null> {
+    if (!isBranchName(branch)) throw new Error(`Bad branch name: ${branch}`);
+    await this.ensure(github);
+    const out = await this.git(github, ["ls-remote", this.remote(github), `refs/heads/${branch}`], { auth: true }).catch((e: Error) => {
+      throw new Error(isAuthRefusal(e.message) ? `GitHub refused access to ${github}: the saved token is invalid or cannot read it` : `Reading ${github} on GitHub failed: ${e.message}`);
+    });
+    const sha = out.split(/\s+/)[0] ?? "";
+    return /^[0-9a-f]{40}$/.test(sha) ? sha : null;
   }
 
   /** The packs a branch's manifests imply, read from the mirror's objects (no checkout exists). */

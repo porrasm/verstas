@@ -47,6 +47,7 @@ import type { Mirrors } from "../github/mirror.js";
 import { copyEnvironmentFiles, environmentSettings } from "../sessions/from-environment.js";
 import { applyBundle, ApplyError } from "../sessions/apply.js";
 import { loadRepoStateCache, readBoxRepoState, saveRepoStateCache } from "../sessions/repo-state.js";
+import { bundleForPublish, changedPaths, defaultPullText, flaggedPaths, publishTarget, remoteBranchFor } from "../sessions/publish.js";
 import { importArchive, readArchive, writeArchive } from "../sessions/archive.js";
 import type { SessionHandle } from "../sessions/hub.js";
 import { copyHomeVolume, copySnapshot, listSandboxes, replacementOf, removeSandbox, sandboxStatus, snapshotSandbox, stopAllSandboxes, stopSandbox, type SandboxConfig } from "../sandbox/lifecycle.js";
@@ -1348,6 +1349,155 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
     }),
   );
 
+  /** Reads the state of each repository's open pull request from GitHub (at most once a minute) and records a change. */
+  const refreshPulls = async (h: SessionHandle, force = false): Promise<void> => {
+    const stale = h.session.repos.filter((r) => {
+      const last = r.prs?.at(-1);
+      return r.github && last?.state === "open" && (force || !last.checkedAt || Date.now() - Date.parse(last.checkedAt) > 60_000);
+    });
+    if (!stale.length) return;
+    const client = await gh();
+    const fresh = new Map<string, { state: "open" | "merged" | "closed"; title: string }>();
+    for (const r of stale) {
+      const last = r.prs!.at(-1)!;
+      const p = await client.pull(r.github!, last.number).catch(() => null);
+      if (p) fresh.set(r.name, { state: p.state, title: p.title });
+    }
+    const at = now();
+    await h.mutate((docs) => ({
+      next: {
+        session: {
+          ...docs.session,
+          repos: docs.session.repos.map((r) => {
+            const f = fresh.get(r.name);
+            const prs = r.prs ?? [];
+            if (!f || !prs.length) return r;
+            return { ...r, prs: [...prs.slice(0, -1), { ...prs.at(-1)!, state: f.state, title: f.title, checkedAt: at }] };
+          }),
+        },
+      },
+    }));
+  };
+
+  /** A session repository on GitHub, for Publish; 404 or 409 otherwise. */
+  const githubRepoOf = (h: SessionHandle, name: string) => {
+    const spec = h.session.repos.find((r) => r.name === name);
+    if (!spec) throw Object.assign(new Error(`No repository ${name} in this session`), { status: 404 });
+    if (!spec.github) throw Object.assign(new Error(`${name} came from a local checkout; only GitHub repositories publish pull requests`), { status: 409 });
+    if (!isInitialized(h.session)) throw Object.assign(new Error("The session is not initialized: nothing to publish"), { status: 409 });
+    return spec as typeof spec & { github: string };
+  };
+
+  /**
+   * What Publish would do for one repository: the commits since the base,
+   * uncommitted files (they are not published), files that touch CI or the
+   * build, and whether it opens a new pull request or updates the open one.
+   * Read inside the container, which this brings up when it is stopped.
+   */
+  api.get(
+    "/sessions/:id/repos/:name/publish",
+    wrap(async (req, res) => {
+      const h = await d.hub.get(param(req, "id"));
+      const spec = githubRepoOf(h, String(param(req, "name")));
+      await refreshPulls(h, true).catch(() => undefined);
+      const fresh = (await d.hub.get(h.id)).session.repos.find((r) => r.name === spec.name)!;
+      if (!d.runs.status(h.id)) await ensureSessionSandbox(d.runConfig, h.session, path.join(h.paths.dir, "sandbox.env"), false);
+      const sh = dockerShell(d.sandbox, h.id);
+      const st = await readBoxRepoState(sh, fresh);
+      if (!st) throw Object.assign(new Error(`Could not read ${spec.name}'s clone in the container`), { status: 500 });
+      const paths = await changedPaths(sh, fresh);
+      const target = publishTarget(fresh.prs);
+      const last = fresh.prs?.at(-1);
+      const text = target.update ? { title: target.update.title, body: "" } : defaultPullText(h.session, st.commits, Math.max(0, (st.ahead ?? 0) - st.commits.length));
+      const warnings: string[] = [];
+      if (last && last.state !== "open" && fresh.baseCommit && st.base && last.headSha && st.commits.some((c) => c.sha === last.headSha))
+        warnings.push(`Pull request #${last.number} was ${last.state}, and the run branch still holds its commits. Sync to ${fresh.branch} first so the new pull request has only new work.`);
+      if (st.dirty) warnings.push(st.dirty === 1 ? "1 file is changed but not committed; it is not published." : `${st.dirty} files are changed but not committed; they are not published.`);
+      if (!(await loadSecrets()).githubToken) warnings.push("No GitHub token is saved: pushing and opening pull requests need one (Settings, GitHub).");
+      res.json({
+        ahead: st.ahead,
+        dirty: st.dirty,
+        commits: st.commits,
+        changedFiles: paths.length,
+        flagged: flaggedPaths(paths),
+        base: fresh.branch,
+        round: target.round,
+        remoteBranch: target.update?.remoteBranch ?? remoteBranchFor(h.id, target.round),
+        update: target.update,
+        last: last ?? null,
+        title: text.title,
+        body: text.body,
+        warnings,
+      });
+    }),
+  );
+
+  /**
+   * Publish: the run branch's commits since the base go to GitHub as
+   * verstas/<session>-<round> and a draft pull request into the base branch,
+   * or update the open one. Only on your click; the token is used here, on
+   * the host, and the push can name only a verstas/ branch.
+   */
+  api.post(
+    "/sessions/:id/repos/:name/publish",
+    wrap(async (req, res) => {
+      const body = z.object({ title: z.string().trim().min(1).max(250), body: z.string().max(60_000).default(""), draft: z.boolean().default(true) }).parse(req.body);
+      const h = await d.hub.get(param(req, "id"));
+      if (notWhileRunning(res, h.id)) return;
+      const spec = githubRepoOf(h, String(param(req, "name")));
+      if (!(await loadSecrets()).githubToken) throw Object.assign(new Error("Save a GitHub token in Settings first: pushing needs one"), { status: 400 });
+      const client = await gh();
+      await refreshPulls(h, true).catch(() => undefined);
+      const fresh = (await d.hub.get(h.id)).session.repos.find((r) => r.name === spec.name)!;
+      const target = publishTarget(fresh.prs);
+
+      await ensureSessionSandbox(d.runConfig, h.session, path.join(h.paths.dir, "sandbox.env"), false);
+      const sh = dockerShell(d.sandbox, h.id);
+      const st = await readBoxRepoState(sh, fresh);
+      if (!st) throw Object.assign(new Error(`Could not read ${spec.name}'s clone in the container`), { status: 500 });
+      if (st.ahead === 0) throw Object.assign(new Error(`${spec.name} has no commits since ${fresh.branch} @ ${fresh.baseCommit?.slice(0, 7)}: nothing to publish`), { status: 409 });
+
+      const bundle = await bundleForPublish(sh, fresh, h.paths.workspace, h.paths.exportDir);
+      const ref = `refs/verstas/${h.id}/${spec.name}`;
+      let sha: string;
+      try {
+        sha = await d.mirrors.importBundle(spec.github, bundle, fresh.runBranch, ref);
+      } finally {
+        await fs.rm(bundle, { force: true });
+      }
+      const remoteBranch = target.update?.remoteBranch ?? remoteBranchFor(h.id, target.round);
+      // The branch is Verstas's own; one left by a publish that failed after its push is taken over at the sha GitHub has.
+      try {
+        const expect = target.update ? target.update.headSha : await d.mirrors.remoteSha(spec.github, remoteBranch);
+        await d.mirrors.push(spec.github, ref, remoteBranch, expect);
+      } catch (e) {
+        throw Object.assign(new Error((e as Error).message), { status: 502 });
+      }
+      let pull;
+      try {
+        if (target.update) pull = await client.updatePull(spec.github, target.update.number, { title: body.title, ...(body.body.trim() ? { body: body.body } : {}) });
+        else pull = (await client.findPull(spec.github, remoteBranch).then((p) => (p?.state === "open" ? p : null))) ?? (await client.createPull(spec.github, { head: remoteBranch, base: fresh.branch, title: body.title, body: body.body, draft: body.draft }));
+      } catch (e) {
+        throw Object.assign(new Error(`Pushed ${remoteBranch}, but the pull request failed: ${(e as Error).message}`), { status: 502 });
+      }
+      const at = now();
+      const record = { round: target.round, number: pull.number, url: pull.url, remoteBranch, headSha: sha, base: pull.base, title: pull.title, state: pull.state, publishedAt: at, checkedAt: at };
+      await h.mutate((docs) => ({
+        next: {
+          session: {
+            ...docs.session,
+            repos: docs.session.repos.map((r) => {
+              if (r.name !== spec.name) return r;
+              const prs = r.prs ?? [];
+              return { ...r, prs: prs.at(-1)?.number === record.number ? [...prs.slice(0, -1), record] : [...prs, record] };
+            }),
+          },
+        },
+      }));
+      res.json({ pr: record, updated: Boolean(target.update), commits: st.ahead });
+    }),
+  );
+
   /**
    * What state each repository is in, for the Work panel and the header:
    * the clone's commits since its base, uncommitted files, and how far
@@ -1377,6 +1527,7 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
           live = true;
         }
       }
+      await refreshPulls(h);
       const repos = await Promise.all(
         h.session.repos.map(async (r) => {
           let remote: { tip: { sha: string; date: string; subject: string } | null; behind: number | null; fetchedAt: string | null } | null = null;
@@ -1396,7 +1547,8 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
           // A reading from before the base moved (a Reclone) describes a clone that is gone.
           const cached = cache[r.name];
           const box = cached && (!r.baseCommit || !cached.base || cached.base.sha === r.baseCommit) ? cached : null;
-          return { name: r.name, github: r.github, branch: r.branch, runBranch: r.runBranch, baseCommit: r.baseCommit, box, remote, remoteError };
+          const prs = (await d.hub.get(h.id)).session.repos.find((x) => x.name === r.name)?.prs ?? [];
+          return { name: r.name, github: r.github, branch: r.branch, runBranch: r.runBranch, baseCommit: r.baseCommit, box, remote, remoteError, prs };
         }),
       );
       res.json({ live, repos });

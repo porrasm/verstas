@@ -199,3 +199,104 @@ test("the mirror says how far GitHub moved past a base", async () => {
     await fs.rm(tmp, { recursive: true, force: true });
   }
 });
+
+test("publish: a bundle of the session's commits goes into the mirror and is pushed to a verstas/ branch, never anything else", async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "verstas-publish-"));
+  try {
+    // GitHub, played by a bare repository.
+    const work = path.join(tmp, "work");
+    await makeUpstream(work);
+    const upstream = path.join(tmp, "upstream.git");
+    await execFileP("git", ["clone", "-q", "--bare", work, upstream]);
+    const mirrors = new Mirrors({ home: path.join(tmp, "home"), token: async () => "tok", remote: () => upstream });
+    await mirrors.fetch("acme/app");
+
+    // The session's clone, made from the mirror, with a ticket's commit.
+    const clone = path.join(tmp, "clone");
+    await execFileP("git", ["clone", "-q", "--no-local", "--template=", "--single-branch", "--branch", "main", mirrors.path("acme/app"), clone]);
+    await git(clone, "checkout", "-q", "-b", "verstas/s");
+    const base = await git(clone, "rev-parse", "HEAD");
+    await git(clone, "config", "user.name", "Verstas");
+    await git(clone, "config", "user.email", "v@localhost");
+    await fs.writeFile(path.join(clone, "a.txt"), "a\n");
+    await git(clone, "add", ".");
+    await git(clone, "commit", "-q", "-m", "T-1: first");
+    const bundle = path.join(tmp, "app.bundle");
+    await git(clone, "bundle", "create", bundle, "verstas/s", `^${base}`);
+
+    const ref = "refs/verstas/s/app";
+    const sha = await mirrors.importBundle("acme/app", bundle, "verstas/s", ref);
+    expect(sha).toBe(await git(clone, "rev-parse", "HEAD"));
+    expect(await mirrors.remoteSha("acme/app", "verstas/s-1")).toBeNull();
+    await mirrors.push("acme/app", ref, "verstas/s-1", null);
+    expect(await git(upstream, "rev-parse", "refs/heads/verstas/s-1")).toBe(sha);
+    expect(await mirrors.remoteSha("acme/app", "verstas/s-1")).toBe(sha);
+    // main on "GitHub" is untouched.
+    expect(await git(upstream, "rev-parse", "refs/heads/main")).toBe(base);
+
+    // A second ticket: the branch moves forward, leased on what Verstas pushed.
+    await fs.writeFile(path.join(clone, "b.txt"), "b\n");
+    await git(clone, "add", ".");
+    await git(clone, "commit", "-q", "-m", "T-2: second");
+    await git(clone, "bundle", "create", bundle, "verstas/s", `^${base}`);
+    const sha2 = await mirrors.importBundle("acme/app", bundle, "verstas/s", ref);
+    await mirrors.push("acme/app", ref, "verstas/s-1", sha);
+    expect(await git(upstream, "rev-parse", "refs/heads/verstas/s-1")).toBe(sha2);
+    // Someone moved the branch on GitHub: a push leased on what Verstas pushed is refused.
+    await git(upstream, "update-ref", "refs/heads/verstas/s-1", base);
+    await expect(mirrors.push("acme/app", ref, "verstas/s-1", sha2)).rejects.toThrow(/changed on GitHub/);
+    expect(await git(upstream, "rev-parse", "refs/heads/verstas/s-1")).toBe(base);
+
+    // Only verstas/ branches, only Verstas's refs.
+    await expect(mirrors.push("acme/app", ref, "main", null)).rejects.toThrow(/only verstas\/ branches/);
+    await expect(mirrors.push("acme/app", "refs/heads/main", "verstas/x-1", null)).rejects.toThrow(/Bad ref/);
+    await expect(mirrors.importBundle("acme/app", bundle, "verstas/s", "refs/heads/main")).rejects.toThrow(/Bad ref/);
+    // Fetches prune branches deleted on GitHub but keep Verstas's refs.
+    await mirrors.fetch("acme/app");
+    expect(await git(mirrors.path("acme/app"), "rev-parse", ref)).toBe(sha2);
+  } finally {
+    await fs.rm(tmp, { recursive: true, force: true });
+  }
+});
+
+test("publish helpers: rounds, branch names, flagged files, the default text", async () => {
+  const { publishTarget, remoteBranchFor, flaggedPaths, defaultPullText } = await import("../../src/sessions/publish.js");
+  const pr = (round: number, state: "open" | "merged" | "closed") => ({ round, number: round, url: "u", remoteBranch: `verstas/s-${round}`, headSha: "x", base: "main", title: "t", state, publishedAt: "now" });
+  expect(publishTarget(undefined)).toEqual({ round: 1, update: null });
+  expect(publishTarget([pr(1, "open")])).toMatchObject({ round: 1, update: { number: 1 } });
+  expect(publishTarget([pr(1, "merged")])).toEqual({ round: 2, update: null });
+  expect(publishTarget([pr(1, "merged"), pr(2, "closed")])).toEqual({ round: 3, update: null });
+  expect(remoteBranchFor("2026-10-13-nuppi", 2)).toBe("verstas/2026-10-13-nuppi-2");
+  expect(flaggedPaths(["src/a.ts", ".github/workflows/ci.yml", "web/package.json", "Makefile", "docs/x.md"])).toEqual([".github/workflows/ci.yml", "web/package.json", "Makefile"]);
+  const one = defaultPullText({ name: "Nuppi", goal: "" }, [{ sha: "a", date: "", subject: "T-1: login" }]);
+  expect(one.title).toBe("T-1: login");
+  const two = defaultPullText({ name: "Nuppi", goal: "Ship it\nmore" }, [{ sha: "b", date: "", subject: "T-2: b" }, { sha: "a", date: "", subject: "T-1: a" }], 3);
+  expect(two.title).toBe("Nuppi");
+  expect(two.body).toContain("Goal: Ship it");
+  expect(two.body).toContain("- T-1: a\n- T-2: b\n- … and 3 more");
+});
+
+test("the pull request API: create a draft, find by branch, read its state as merged or not", async () => {
+  const calls: { method: string; url: string; body?: unknown }[] = [];
+  const pull = (state: string, merged: string | null) => ({ number: 7, html_url: "https://github.com/acme/app/pull/7", state, draft: true, merged_at: merged, title: "T-1", head: { ref: "verstas/s-1", sha: "abc" }, base: { ref: "main" } });
+  const fake = (async (url: string | URL | Request, init?: RequestInit) => {
+    const u = String(url);
+    calls.push({ method: init?.method ?? "GET", url: u, body: init?.body ? JSON.parse(String(init.body)) : undefined });
+    if (u.endsWith("/pulls") && init?.method === "POST") return new Response(JSON.stringify(pull("open", null)), { status: 201 });
+    if (u.includes("/pulls?")) return new Response(JSON.stringify(u.includes("verstas%2Fs-9") ? [] : [pull("open", null)]));
+    if (u.endsWith("/pulls/7") && init?.method === "PATCH") return new Response(JSON.stringify(pull("open", null)));
+    if (u.endsWith("/pulls/7")) return new Response(JSON.stringify(pull("closed", "2026-10-13T00:00:00Z")));
+    if (u.endsWith("/pulls/8")) return new Response(JSON.stringify({ message: "Validation Failed", errors: [{ message: "No commits between main and verstas/s-1" }] }), { status: 422 });
+    return new Response("{}", { status: 404 });
+  }) as typeof fetch;
+  const api = githubApi("tok", "https://api.example", fake);
+  expect(await api.createPull("acme/app", { head: "verstas/s-1", base: "main", title: "T-1", body: "b", draft: true })).toMatchObject({ number: 7, state: "open", draft: true });
+  expect(calls[0]).toMatchObject({ method: "POST", url: "https://api.example/repos/acme/app/pulls", body: { head: "verstas/s-1", base: "main", draft: true } });
+  expect((await api.findPull("acme/app", "verstas/s-1"))?.number).toBe(7);
+  expect(calls[1]!.url).toContain("head=acme%3Averstas%2Fs-1");
+  expect(await api.findPull("acme/app", "verstas/s-9")).toBeNull();
+  expect((await api.pull("acme/app", 7)).state).toBe("merged");
+  await api.updatePull("acme/app", 7, { title: "T-1 and T-2" });
+  expect(calls.at(-1)).toMatchObject({ method: "PATCH", body: { title: "T-1 and T-2" } });
+  await expect(api.pull("acme/app", 8)).rejects.toThrow(/Validation Failed: No commits between/);
+});

@@ -462,6 +462,25 @@ export type Inbox = z.infer<typeof inboxSchema>;
 export const SESSION_ID_PATTERN = /^[a-z0-9][a-z0-9-]{2,80}$/;
 export const sessionIdSchema = z.string().regex(SESSION_ID_PATTERN);
 
+/** A pull request Verstas opened from a session repository; one per round of work. */
+export const pullRecordSchema = z.object({
+  /** 1, 2, 3…: a new round after the previous pull request was merged or closed. */
+  round: z.number().int().min(1),
+  number: z.number().int(),
+  url: z.string(),
+  /** The branch on GitHub, verstas/<session>-<round>. */
+  remoteBranch: z.string(),
+  /** The commit Verstas last pushed there. */
+  headSha: z.string(),
+  base: z.string(),
+  title: z.string().default(""),
+  state: z.enum(["open", "merged", "closed"]),
+  publishedAt: z.string(),
+  /** When the state was last read from GitHub. */
+  checkedAt: z.string().optional(),
+});
+export type PullRecord = z.infer<typeof pullRecordSchema>;
+
 export const repoSpecSchema = z.object({
   /** Directory name under /workspace. */
   name: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/),
@@ -475,6 +494,8 @@ export const repoSpecSchema = z.object({
   runBranch: z.string().min(1).max(200),
   /** The commit the clone started from; the feature branch's base when applying. */
   baseCommit: z.string().optional(),
+  /** Pull requests published from this repository, oldest first. */
+  prs: z.array(pullRecordSchema).optional(),
   // Sessions from before the harness stopped running checks carry `check`,
   // `noCheck`, `review`, `alsoCheck` and `agentPolicy` here; they are dropped on
   // parse (the schema is not strict) and the reviewer runs the checks instead.
