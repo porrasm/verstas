@@ -284,9 +284,31 @@ const Github = ({ ok, fail }: { ok: (text: string) => void; fail: (e: unknown) =
     <section className="card">
       <h3>GitHub</h3>
       <p className="lead">
-        Sessions clone GitHub repositories. Use a{" "}
-        <a href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noreferrer">fine-grained token</a> limited to these repositories with <strong>Contents</strong> and <strong>Pull requests</strong> read and write, and <strong>without Workflows</strong>, so a push can never change CI. It stays in <code>~/.verstas/secrets.json</code>; Verstas uses it on this machine only, when you press a button. No agent and no session ever sees it.
+        Sessions clone GitHub repositories. The token stays in <code>~/.verstas/secrets.json</code>; Verstas uses it on this machine only, when you press a button. No agent and no session ever sees it.
       </p>
+      <details open={hasToken === false}>
+        <summary className="small">How to make the token</summary>
+        <ol className="small" style={{ margin: "6px 0 10px", paddingLeft: 20 }}>
+          <li>
+            Create a <a href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noreferrer">fine-grained personal access token</a>.
+          </li>
+          <li><strong>Resource owner</strong>: the account or organization that owns the repositories. A token owned by your account cannot see an organization's repositories, and an organization may have to approve the token.</li>
+          <li><strong>Repository access</strong>: Only select repositories, and pick the ones you add below.</li>
+          <li>
+            <strong>Repository permissions</strong>:
+            <table className="small" style={{ margin: "4px 0" }}>
+              <tbody>
+                <tr><td style={{ paddingLeft: 0 }}><strong>Contents</strong></td><td>Read and write</td><td className="muted">fetch the repository, push <span className="mono">verstas/</span> branches</td></tr>
+                <tr><td style={{ paddingLeft: 0 }}><strong>Pull requests</strong></td><td>Read and write</td><td className="muted">open and update draft pull requests, see when they are merged</td></tr>
+                <tr><td style={{ paddingLeft: 0 }}><strong>Metadata</strong></td><td>Read-only</td><td className="muted">added by GitHub on its own; find the repository and its default branch</td></tr>
+                <tr><td style={{ paddingLeft: 0 }}><strong>Workflows</strong></td><td className="warn">No access</td><td className="muted">so a push can never add or change CI workflows</td></tr>
+              </tbody>
+            </table>
+            Everything else: No access.
+          </li>
+          <li>Paste it below, <strong>Save token</strong>, then <strong>Test</strong>: each repository should say it is reachable. Permissions changed later on GitHub apply to the same token.</li>
+        </ol>
+      </details>
       <div className="row">
         <input id="github-token" type="password" className="mono" autoComplete="off" placeholder={hasToken ? "A token is saved; paste a new one to replace it" : "github_pat_…"} value={token} onChange={(e) => setToken(e.target.value)} />
         <button className="pri" disabled={busy !== null || token.trim().length < 10} onClick={() => void saveToken(token.trim())}>Save token</button>
