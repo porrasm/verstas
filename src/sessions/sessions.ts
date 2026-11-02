@@ -357,6 +357,8 @@ export const migrateSession = (raw: unknown): unknown => {
     r.readiness = { verdict: pre.ok ? "ready" : "needs", at: pre.at, summary: pre.summary ?? "", checks: [], confirmedAt: pre.ok ? pre.at : undefined };
   }
   delete r.preflight;
+  // From before one lead did everything: loop and goal sessions run as the one mode.
+  delete r.mode;
   if (r.initializedAt === undefined) {
     const readiness = r.readiness as { confirmedAt?: string } | undefined;
     const gated = Boolean(String(r.requirements ?? "").trim()) && !readiness?.confirmedAt;

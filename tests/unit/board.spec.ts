@@ -2,7 +2,6 @@ import { test, expect } from "@playwright/test";
 import {
   agentAddDep,
   agentSetPriority,
-  assertAgentMayCreate,
   BoardError,
   emptyBoard,
   importBoard,
@@ -105,22 +104,19 @@ test("transition enforces the state machine and leaves attempts to the loop's ve
   expect(() => transition(b, "T-99", "ready")).toThrow(/No ticket/);
 });
 
-test("agents may file bugs, followups and chores, never features", () => {
-  expect(() => assertAgentMayCreate("bug", "worker")).not.toThrow();
-  expect(() => assertAgentMayCreate("feature", "worker")).toThrow(/idea/);
-  expect(() => assertAgentMayCreate("feature", "planner")).not.toThrow();
+test("agents file tickets of any kind; the board records who", () => {
   const r = importBoard(emptyBoard(), { tickets: [{ title: "Cool feature" }, { title: "Fix", kind: "bug" }] }, { by: "agent", role: "worker" });
-  expect(r.created).toHaveLength(1);
-  expect(r.skipped[0]?.title).toBe("Cool feature");
+  expect(r.created).toHaveLength(2);
+  expect(r.skipped).toEqual([]);
 });
 
-test("agent reprioritization respects pins and records a reason", () => {
+test("agent reprioritization records a reason; a pin no longer stops it", () => {
   let b = seeded();
   b = agentSetPriority(b, "T-2", 1, "unblocks the UI work");
   expect(b.tickets[1]!.priority).toBe(1);
   expect(b.tickets[1]!.notes.at(-1)?.text).toContain("20 -> 1");
   const pinned = { ...b, tickets: b.tickets.map((t) => (t.id === "T-1" ? { ...t, pinned: true } : t)) };
-  expect(() => agentSetPriority(pinned, "T-1", 0, "x")).toThrow(/pinned/);
+  expect(agentSetPriority(pinned, "T-1", 0, "x").tickets[0]!.priority).toBe(0);
   expect(() => agentAddDep(b, "T-1", "T-3", "x")).toThrow(/cycle/);
   expect(agentAddDep(b, "T-3", "T-1", "needs schema").tickets[2]!.deps).toEqual(["T-2", "T-1"]);
 });

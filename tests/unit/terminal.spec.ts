@@ -175,16 +175,15 @@ test("the terminal wrapper starts Claude Code with the board server and the term
 test("the agent in a terminal sees the planning tools but not reports, requests, halt or the lead's tools", () => {
   const names = visibleTools("terminal").map((t) => t.name);
   expect(names).toEqual(expect.arrayContaining(["board_list_tickets", "board_get_ticket", "board_create_ticket", "board_add_note", "board_set_priority", "board_add_dep", "chore", "chores_list", "chore_drop", "idea", "message"]));
-  for (const hidden of ["board_report", "request", "halt", "budget", "board_claim", "board_submit", "chores_sweep", "handoff"]) expect(names).not.toContain(hidden);
+  for (const hidden of ["board_report", "request", "halt", "budget", "board_move", "done", "chores_sweep", "handoff"]) expect(names).not.toContain(hidden);
 });
 
-test("the planner and a terminal's agent can create features through the board tool; unattended workers and leads cannot", () => {
+test("every agent creates tickets of any kind; the terminal agent may make one ready, the lead may start one, nobody else chooses a state", () => {
   const props = (role: string) => (visibleTools(role).find((t) => t.name === "board_create_ticket")!.inputSchema as { properties: { kind: { enum: string[] }; state?: { enum: string[] } } }).properties;
-  for (const role of ["planner", "terminal"]) expect(props(role).kind.enum).toEqual(["feature", "bug", "followup", "chore"]);
-  for (const role of ["lead", "implementer", "reviewer"]) expect(props(role).kind.enum).toEqual(["bug", "followup", "chore"]);
-  // Only the agent you are typing to may put a ticket straight into ready.
+  for (const role of ["planner", "terminal", "lead", "reviewer"]) expect(props(role).kind.enum).toEqual(["feature", "bug", "followup", "chore"]);
   expect(props("terminal").state?.enum).toEqual(["backlog", "ready"]);
-  for (const role of ["planner", "lead", "implementer"]) expect(props(role).state).toBeUndefined();
+  expect(props("lead").state?.enum).toEqual(["backlog", "ready", "in_progress"]);
+  for (const role of ["planner", "reviewer"]) expect(props(role).state).toBeUndefined();
 });
 
 test("Claude Code's onboarding is marked done once, keeping the rest of its config", async () => {
@@ -204,10 +203,11 @@ test("Claude Code's onboarding is marked done once, keeping the rest of its conf
   }
 });
 
-test("the terminal agent alone gets the tools to edit and delete tickets", () => {
+test("the terminal agent and the lead get the tools to edit and delete tickets", () => {
   for (const name of ["board_update_ticket", "board_delete_ticket"]) {
     expect(visibleTools("terminal").map((t) => t.name)).toContain(name);
-    for (const role of ["planner", "lead", "implementer", "reviewer"]) expect(visibleTools(role).map((t) => t.name)).not.toContain(name);
+    expect(visibleTools("lead").map((t) => t.name)).toContain(name);
+    for (const role of ["planner", "reviewer", "setup"]) expect(visibleTools(role).map((t) => t.name)).not.toContain(name);
   }
 });
 
@@ -240,9 +240,11 @@ test("a merge: the kept ticket is edited (pinned too), the others are deleted an
   expect(getTicket(deleteTicket(mergeBoard(), "T-2", "not needed"), "T-3").deps).toEqual([]);
 });
 
-test("edits and deletes never touch a held ticket, follow the state rules and keep deps sound", () => {
-  expect(() => editTicket(mergeBoard(), "T-4", { title: "x" }, "r")).toThrow(/in_progress/);
-  expect(() => deleteTicket(mergeBoard(), "T-4", "r")).toThrow(/in_progress/);
+test("edits and deletes never touch a ticket in review (one in progress is the lead's to change), follow the state rules and keep deps sound", () => {
+  expect(editTicket(mergeBoard(), "T-4", { title: "x" }, "r").tickets.find((t) => t.id === "T-4")!.title).toBe("x");
+  const reviewing = transition(mergeBoard(), "T-4", "review");
+  expect(() => editTicket(reviewing, "T-4", { title: "x" }, "r")).toThrow(/in review/);
+  expect(() => deleteTicket(reviewing, "T-4", "r")).toThrow(/in review/);
   expect(() => editTicket(mergeBoard(), "T-2", { deps: ["T-3"] }, "r")).toThrow();
   expect(() => editTicket(mergeBoard(), "T-2", { deps: ["T-99"] }, "r")).toThrow();
   expect(() => deleteTicket(mergeBoard(), "T-2", "r", "T-99")).toThrow();
@@ -262,7 +264,7 @@ const sessionDir = async (state: "created" | "finished" = "created") => {
   return { root, id, paths, hub: new SessionHub(root) };
 };
 
-test("a terminal's token creates features into the backlog or, when asked, ready; it is refused requests, halts and claims", async () => {
+test("a terminal's token creates features into the backlog or, when asked, ready; it is refused requests, halts and moves", async () => {
   const s = await sessionDir();
   const tokens = new RunTokens();
   const token = tokens.issue({ sessionId: s.id, runId: 1, role: "terminal" });
@@ -285,8 +287,8 @@ test("a terminal's token creates features into the backlog or, when asked, ready
     const worker = tokens.issue({ sessionId: s.id, runId: 1, role: "worker" });
     const filed = await fetch(`http://127.0.0.1:${port}/agent/tickets`, { method: "POST", headers: { authorization: `Bearer ${worker}`, "content-type": "application/json" }, body: JSON.stringify({ title: "Sneaky", kind: "bug", spec: "…", state: "ready" }) });
     expect(((await filed.json()) as { state: string }).state).toBe("backlog");
-    // No unattended agent edits or deletes.
-    for (const role of ["worker", "lead", "planner"] as const) {
+    // Only the lead and the terminal agent edit or delete.
+    for (const role of ["worker", "planner"] as const) {
       const other = tokens.issue({ sessionId: s.id, runId: 1, role });
       const del = await fetch(`http://127.0.0.1:${port}/agent/tickets/${made.json.id}`, { method: "DELETE", headers: { authorization: `Bearer ${other}`, "content-type": "application/json" }, body: JSON.stringify({ reason: "x" }) });
       expect(del.status).toBe(403);
@@ -300,7 +302,7 @@ test("a terminal's token creates features into the backlog or, when asked, ready
     expect((await s.hub.get(s.id)).board.tickets.some((x) => x.id === "T-1")).toBe(false);
     expect((await call("POST", "/requests", { summary: "need a host", actions: [] })).status).toBe(403);
     expect((await call("POST", "/halt", { reason: "x", severity: "major" })).status).toBe(403);
-    expect((await call("POST", "/tickets/T-1/claim")).status).toBe(403);
+    expect((await call("POST", "/tickets/T-1/move", { to: "in_progress" })).status).toBe(403);
   } finally {
     await new Promise((r) => server.close(r));
     await fs.rm(s.root, { recursive: true, force: true });

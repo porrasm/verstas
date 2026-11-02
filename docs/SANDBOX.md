@@ -187,10 +187,11 @@ host.docker.internal:host-gateway`).
 - Every request carries a **run token**, random per worker, in an
   `Authorization` header, issued when the worker starts and revoked when
   it ends. A token grants access to one run's board, its notes and its
-  request inbox, nothing else. Its role limits it further: a worker
-  cannot move tickets at all; a lead may claim a ready ticket and submit
-  the one it holds, but never move one to `done`, which only the
-  harness's judge does after an independent reviewer. A ticket's review
+  request inbox, nothing else. Its role limits it further: a worker (the
+  reviewer, setup, a prompt) cannot move tickets at all; the lead moves
+  them (`POST /tickets/:id/move`), but never out of `review` and never to
+  `done` while the session has a reviewer: that move is the harness's
+  judge's, after the independent reviewer. A ticket's review
   mode (`full`, `none`), which decides whether that reviewer runs, is
   yours alone: the agent API strips it from tickets an agent files and no
   agent route changes it, so an agent cannot judge its own work by filing
@@ -198,14 +199,15 @@ host.docker.internal:host-gateway`).
   runs the repository's check script, which lives in the repository, so an
   agent can change that script in a ticket; the change is in the diff the
   reviewer reads.
-- An agent terminal's token (role `terminal`) plans like the planner: it
-  may create tickets of any kind, and, because you are at the keyboard, put
-  one straight into `ready` (every other agent files into `backlog`). It
-  is also the only agent that may edit a ticket's fields or delete a
-  ticket (`PATCH`/`DELETE /tickets/:id`, for merges), never one a worker
-  holds, with the reason in the notes of the tickets it touches. It
-  holds no ticket, so it cannot claim, submit or report, and it is refused
-  `request` and `halt`: it asks you in the terminal. Its page connection,
+- An agent terminal's token (role `terminal`) plans with you: it may
+  create tickets of any kind and, because you are at the keyboard, put one
+  straight into `ready`; the lead may also start one in `in_progress`;
+  every other agent files into `backlog`. The lead and the terminal agent
+  may edit a ticket's fields or delete a ticket (`PATCH`/`DELETE
+  /tickets/:id`, for merges), never one in review, with the reason in the
+  notes of the tickets they touch. The terminal agent cannot move tickets
+  or report, and it is refused `request` and `halt`: it asks you in the
+  terminal. Its page connection,
   `/ws/terminal` on the UI port, is accepted only from a loopback host
   name, from the same origin as the page, and with the per-terminal key
   that only the UI's own API hands out (a page on another site, or one

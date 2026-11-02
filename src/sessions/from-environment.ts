@@ -37,7 +37,7 @@ export const notesToCopy = (names: readonly string[], o: Pick<EnvironmentCopy, "
 
 /**
  * The settings a session started from `source` takes: the box (image,
- * recipes, root scripts, network), the limits, caps, agents, mode and setup
+ * recipes, root scripts, network), the limits, caps, agents and setup
  * instructions. The readiness comes along only when it was confirmed ready
  * and your requirements are the source's; changed requirements leave it out
  * so the setup worker checks the box against them. The board, inbox, runs,
@@ -47,7 +47,7 @@ export const environmentSettings = (
   source: Session,
   form: { requirements?: string },
   at: string,
-): Pick<Session, "image" | "setupScripts" | "rootScripts" | "allowlist" | "packs" | "preapprove" | "limits" | "caps" | "agents" | "model" | "requirements" | "setupMode" | "mode" | "environmentFrom"> & { readiness?: Readiness } => {
+): Pick<Session, "image" | "setupScripts" | "rootScripts" | "allowlist" | "packs" | "preapprove" | "limits" | "caps" | "agents" | "model" | "requirements" | "setupMode" | "environmentFrom"> & { readiness?: Readiness } => {
   const requirements = (form.requirements ?? source.requirements).trim();
   const carry = Boolean(source.readiness?.verdict === "ready" && source.readiness.confirmedAt) && requirements === source.requirements.trim();
   return {
@@ -63,7 +63,6 @@ export const environmentSettings = (
     model: source.model,
     requirements,
     setupMode: source.setupMode,
-    mode: source.mode,
     readiness: carry ? source.readiness : undefined,
     environmentFrom: { session: source.id, at, readinessCarried: carry },
   };

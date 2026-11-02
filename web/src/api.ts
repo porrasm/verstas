@@ -43,7 +43,7 @@ export const normalizeReviewMode = (m: ReviewMode): "full" | "none" => (m === "f
 
 /** How a ticket's time was spent, in seconds. Mirrors ticketTiming in src/core/types.ts. */
 export type TicketTiming = { working: number; judging: number; waitingOnYou: number; requeued: number; agent: number; total: number };
-export const ticketTiming = (t: Ticket, mode: "loop" | "lead" | "goal", now = Date.now()): TicketTiming | null => {
+export const ticketTiming = (t: Ticket, now = Date.now()): TicketTiming | null => {
   if (!t.firstClaimAt || !t.stateSince) return null;
   const since = new Date(t.stateSince).getTime();
   const timeIn: Partial<Record<string, number>> = { ...t.timeIn };
@@ -54,7 +54,7 @@ export const ticketTiming = (t: Ticket, mode: "loop" | "lead" | "goal", now = Da
     judging: timeIn.review ?? 0,
     waitingOnYou: timeIn.waiting ?? 0,
     requeued: Math.max(0, (timeIn.ready ?? 0) - (t.readyBeforeClaim ?? 0)),
-    agent: mode === "lead" ? working + (t.agentSeconds ?? 0) : (t.agentSeconds ?? 0),
+    agent: working + (t.agentSeconds ?? 0),
     total: Math.max(0, ((t.state === "done" ? since : now) - new Date(t.firstClaimAt).getTime()) / 1000),
   };
 };
@@ -85,11 +85,11 @@ export type Inbox = {
 export type Session = {
   id: string;
   name: string;
-  /** Goal mode: what the worker works toward, read fresh every round. Elsewhere a draft's goal, the first suggestion in the Plan tickets box. */
+  /** What the lead works toward beside the board, read fresh every lead life; empty when the board alone is the work. */
   goal: string;
   /** When the current goal text was set; absent when never revised. */
   goalSince?: string;
-  /** The goal worker's last claim that the goal is met; cleared when the goal changes. */
+  /** The lead's last claim that the goal is met; cleared when the goal changes. */
   goalMet?: { at: string; runId: number; note: string };
   /** Earlier goals, oldest first. */
   goals?: GoalRecord[];
@@ -104,9 +104,7 @@ export type Session = {
   attachments: { name: string; dir: string; bytes: number; skipped: string[]; description?: string }[];
   allowlist: string[];
   packs: string[];
-  caps: { workerMinutes: number; workerTurns: number; runTickets: number; budgetUsd: number; ticketAttempts: number; reviewer: boolean; resumeWorker?: boolean; leadMinutes?: number; leadTurns?: number; sweepMaxLines?: number; sweepMaxFiles?: number; choreApproval?: boolean; choreSweepAt?: number; goalRounds?: number; progressMinutes?: number };
-  /** loop: a fresh implementer per ticket. lead: one long-lived agent works the board. goal: no board; one long-lived worker works toward the goal text. */
-  mode?: "loop" | "lead" | "goal";
+  caps: { workerMinutes: number; workerTurns: number; runTickets: number; budgetUsd: number; ticketAttempts: number; reviewer: boolean; resumeWorker?: boolean; /** Optional liveness limits on one lead life; unset means none. */ leadMinutes?: number; leadTurns?: number; sweepMaxLines?: number; sweepMaxFiles?: number; choreApproval?: boolean; choreSweepAt?: number; goalRounds?: number; progressMinutes?: number };
   /** The ticket size planning agents aim for; absent, they choose. */
   planning?: { ticketSize?: "S" | "M" | "L"; guidance?: string };
   limits: { memory: string; cpus: number; pids: number; workspaceMb: number };
@@ -133,8 +131,8 @@ export type Readiness = { verdict: "ready" | "needs"; at: string; summary: strin
 export const isInitialized = (s: { initializedAt: string | null }): boolean => Boolean(s.initializedAt);
 export type NetworkPack = { name: string; title: string; hosts: string[]; /** Set on the packs that follow an agent choice instead of being ticked. */ agent?: DriverName };
 export type SetupScript = { name: string; description: string; hosts: string[]; note: string; script: string; runAs: "root" | "agent"; env: string };
-export type Run = { id: number; state: string; startedAt: string; endedAt?: string; currentTicket?: string; ticketsDone: number; /** Goal mode: worker lives this run has started. */ rounds?: number; cost: { usd?: number }; pauseReason?: string; resumeAt?: string; /** Set on an agent terminal's run. */ terminal?: { driver: DriverName } };
-/** One earlier goal of a goal-mode session. Mirrors goalRecordSchema in src/core/types.ts. */
+export type Run = { id: number; state: string; startedAt: string; endedAt?: string; currentTicket?: string; ticketsDone: number; /** Lead lives this run has started. */ rounds?: number; cost: { usd?: number }; pauseReason?: string; resumeAt?: string; /** Set on an agent terminal's run. */ terminal?: { driver: DriverName } };
+/** One earlier goal of the session. Mirrors goalRecordSchema in src/core/types.ts. */
 export type GoalRecord = { text: string; from: string; until: string; outcome: "met" | "revised" | "abandoned"; note?: string };
 export type VEvent = { kind: string; t: string; ticket?: string; [k: string]: unknown };
 export type Totals = { usd: number; runs: number; lastActivityAt: string };

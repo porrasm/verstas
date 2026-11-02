@@ -1,8 +1,8 @@
 /**
  * `verstas-board`: a stdio MCP server the worker's `claude -p` loads with
  * --mcp-config. Every tool is a thin call to the host's agent API, which
- * holds the rules (who may create what, pins, states). This file holds no
- * policy; it only shapes tool calls into HTTP and results into text.
+ * holds the rules (who moves what, which moves the harness owns). This file
+ * holds no policy; it only shapes tool calls into HTTP and results into text.
  *
  * Hand-rolled JSON-RPC over newline-delimited stdio: the protocol surface
  * MCP needs for a tools-only server is five methods, and the image stays
@@ -21,11 +21,9 @@ const PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"];
 
 type Tool = {
   name: string;
-  /** Shown only to a lead (VERSTAS_ROLE=lead); a worker's ticket is moved by the harness. */
+  /** Shown only to the lead (VERSTAS_ROLE=lead): it owns the board. */
   leadOnly?: boolean;
-  /** Shown only to the agent in the user's terminal (VERSTAS_ROLE=terminal): it edits the board with the user at the keyboard. */
-  terminalOnly?: boolean;
-  /** Only for these jobs (VERSTAS_ROLE: setup, implementer, lead, terminal…). */
+  /** Only for these jobs (VERSTAS_ROLE: setup, reviewer, lead, terminal…). */
   roles?: readonly string[];
   description: string;
   inputSchema: Record<string, unknown>;
@@ -76,26 +74,27 @@ export const readBudget = async (file = process.env.VERSTAS_BUDGET_FILE ?? ""): 
   };
 };
 
-/** How long `board_submit` waits for the verdict before it returns "still in review". */
+/** How long a move to review waits for the verdict before it returns "still in review". */
 const SUBMIT_WAIT_MS = Number(process.env.VERSTAS_SUBMIT_WAIT_MS) || 9 * 60_000;
 const SUBMIT_POLL_MS = Number(process.env.VERSTAS_SUBMIT_POLL_MS) || 3_000;
 
-type TicketView = { id: string; state: string; attempts?: number; notes?: { by: string; text: string; at: string }[] };
+type TicketView = { id: string; state: string; notes?: { by: string; text: string; at: string }[] };
 
-/** Submit, then wait for the judge: the verdict and the harness's notes since the submit. */
-export const submitAndWait = async (id: string, waitMs = SUBMIT_WAIT_MS, pollMs = SUBMIT_POLL_MS): Promise<unknown> => {
+/** Move a ticket; a move to review then waits for the judge and returns the verdict with the harness's notes since the move. */
+export const moveAndWait = async (id: string, to: string, note?: string, waitMs = SUBMIT_WAIT_MS, pollMs = SUBMIT_POLL_MS): Promise<unknown> => {
   const path = `/tickets/${encodeURIComponent(id)}`;
   const before = ((await api("GET", path)) as TicketView).notes?.length ?? 0;
-  await api("POST", `${path}/submit`, {});
+  const moved = (await api("POST", `${path}/move`, { to, ...(note ? { note } : {}) })) as Record<string, unknown>;
+  if (to !== "review") return moved;
   const until = Date.now() + waitMs;
   for (;;) {
     await new Promise((r) => setTimeout(r, pollMs));
     const t = (await api("GET", path)) as TicketView;
     if (t.state !== "review") {
-      const verdict = t.state === "done" ? "accepted" : t.state === "ready" ? "not done yet: read the notes, then claim it again or leave it for later" : t.state === "blocked" ? "blocked" : t.state;
-      return { id, state: t.state, verdict, attempts: t.attempts, notes: (t.notes ?? []).slice(before).filter((n) => n.by !== "agent").map((n) => n.text) };
+      const verdict = t.state === "done" ? "accepted" : t.state === "ready" ? "not done yet: read the notes, then move it to in_progress again or leave it for later" : t.state === "blocked" ? "blocked" : t.state;
+      return { id, state: t.state, verdict, notes: (t.notes ?? []).slice(before).filter((n) => n.by !== "agent").map((n) => n.text) };
     }
-    if (Date.now() >= until) return { id, state: "review", verdict: "still in review", note: "The reviewer is still working. Call board_get_ticket on it later; do not claim another ticket until it leaves review." };
+    if (Date.now() >= until) return { id, state: "review", verdict: "still in review", note: "The reviewer is still working. Carry on with other work and read the verdict from board_get_ticket later." };
   }
 };
 
@@ -118,23 +117,6 @@ export const submitSweepAndWait = async (results: unknown[], waitMs = SWEEP_WAIT
   }
 };
 
-/** Hand a ticket to its own agent, then wait until the harness settled it (done, back to ready, blocked or waiting). */
-export const runAndWait = async (id: string, waitMs = SUBMIT_WAIT_MS * 4, pollMs = SUBMIT_POLL_MS): Promise<unknown> => {
-  const path = `/tickets/${encodeURIComponent(id)}`;
-  const before = ((await api("GET", path)) as TicketView).notes?.length ?? 0;
-  const started = await api("POST", `${path}/run`, {});
-  const until = Date.now() + waitMs;
-  for (;;) {
-    await new Promise((r) => setTimeout(r, pollMs));
-    const t = (await api("GET", path)) as TicketView;
-    if (t.state !== "in_progress" && t.state !== "review") {
-      const verdict = t.state === "done" ? "accepted" : t.state === "ready" ? "not done yet: read the notes; run it again or leave it" : t.state === "waiting" ? "parked on a request to the user" : t.state;
-      return { id, state: t.state, verdict, attempts: t.attempts, agent: (started as { agent?: unknown }).agent, notes: (t.notes ?? []).slice(before).filter((n) => n.by !== "agent").map((n) => n.text) };
-    }
-    if (Date.now() >= until) return { id, state: t.state, verdict: "still being worked by its agent", note: "Call board_get_ticket on it later; claim nothing until it is settled." };
-  }
-};
-
 export const TOOLS: Tool[] = [
   {
     name: "budget",
@@ -144,48 +126,32 @@ export const TOOLS: Tool[] = [
     call: () => readBudget(),
   },
   {
-    name: "board_claim",
+    name: "board_move",
     leadOnly: true,
     description:
-      "Take a ready ticket whose dependencies are done: it moves to in_progress and is yours. Hold one ticket at a time: submit it (or park it with a request) before claiming the next. Claim before you change files for it.",
-    inputSchema: obj({ id: str("Ticket id", 20) }, ["id"]),
-    call: (a) => api("POST", `/tickets/${encodeURIComponent(String(a.id))}/claim`, {}),
-  },
-  {
-    name: "board_run",
-    leadOnly: true,
-    description:
-      "Hand a ready ticket that names its own agent (board_list_tickets shows `agent`) to that agent: a fresh worker on that driver and model does the ticket in the shared working tree, then the reviewer judges it as usual. You must hold no ticket and no sweep. Waits for the verdict and returns it with the harness's notes; claim nothing meanwhile. A ticket without an agent is yours to claim.",
-    inputSchema: obj({ id: str("Ticket id", 20) }, ["id"]),
-    call: (a) => runAndWait(String(a.id)),
-  },
-  {
-    name: "board_submit",
-    leadOnly: true,
-    description:
-      "Submit the ticket you hold for judgment once its work is finished and your report is filed with board_report. An independent reviewer runs the repository's checks and reads the change (when the session has one), then the harness commits and moves it to done, back to ready with notes, or to blocked. Waits for the verdict and returns it with the reviewer's notes.",
-    inputSchema: obj({ id: str("Ticket id", 20) }, ["id"]),
-    call: (a) => submitAndWait(String(a.id)),
+      "Move a ticket between columns: backlog, ready, in_progress, review, blocked, done. Move to in_progress before changing files for it (several tickets may be in progress at once); its baseline for review is recorded then. Move to review when the work is finished: the independent reviewer runs the repositories' checks and reads the change (the commits since the baseline that carry the ticket id, plus the working tree), then the harness moves the ticket to done, back to ready with the reviewer's notes, or to blocked; the call waits for the verdict and returns it. With no reviewer in the session, move to done yourself. Not into waiting (file a request for that) and not out of review.",
+    inputSchema: obj({ id: str("Ticket id", 20), to: { type: "string", enum: ["backlog", "ready", "in_progress", "review", "blocked", "done"] }, note: str("Why, in a line; it goes in the ticket's notes", 2000) }, ["id", "to"]),
+    call: (a) => moveAndWait(String(a.id), String(a.to), a.note === undefined ? undefined : String(a.note)),
   },
   {
     name: "handoff",
     leadOnly: true,
     description:
-      "End this conversation and hand the work to a fresh lead, whose context starts from your note, the notes directory and the board. Use it when your context has become noise: the session has moved on from what you first read, you keep re-reading the same files, or the budget tool shows a large context. The note says what is in flight, what you tried, what you learned that is not in the notes yet, and what to do next. Then stop.",
+      "End this conversation and hand the work to a fresh lead, whose context starts from your note, the notes directory, the goal and the board. Use it when your context has become noise: the session has moved on from what you first read, you keep re-reading the same files, or the budget tool shows a large context. The note says what is in flight, what you tried, what you learned that is not in the notes yet, and what to do next. Then stop.",
     inputSchema: obj({ note: str("The handoff note", 20_000) }, ["note"]),
     call: (a) => api("POST", `/handoff`, { note: a.note }),
   },
   {
-    name: "goal_done",
-    roles: ["goal"],
+    name: "done",
+    leadOnly: true,
     description:
-      "Say that the goal is met, with your assessment: what exists now, how you verified each part of the goal (commands run, what they showed), and what you knowingly left out. The run ends after this round and the user reads the assessment; if they start the run again without changing the goal, that means not yet. Call it only when every part of the goal holds and the checks pass; being out of ideas is a handoff, not a goal_done. Then stop.",
+      "Say that the work is done, with your assessment: what exists now, how you verified each part of the goal (commands run, what they showed), and what you knowingly left out. The run ends after you stop when no ticket is ready or in progress; otherwise the next lead works those first. If the user starts the run again without changing the goal, that means not yet. Being out of ideas is a handoff, not done. Then stop.",
     inputSchema: obj({ note: str("Your assessment", 8000) }, ["note"]),
-    call: (a) => api("POST", `/goal_done`, { note: a.note }),
+    call: (a) => api("POST", `/done`, { note: a.note }),
   },
   {
     name: "board_list_tickets",
-    description: "List the board's tickets (id, title, state, kind, size, priority, deps, expected repos, and `agent` when the ticket runs on its own agent instead of the session's worker). Optionally filter by state.",
+    description: "List the board's tickets (id, title, state, kind, size, priority, deps, expected repos). Optionally filter by state.",
     inputSchema: obj({ state: { type: "string", enum: ["backlog", "ready", "in_progress", "review", "waiting", "blocked", "done"] } }, []),
     call: (a) => api("GET", `/board${a.state ? `?state=${encodeURIComponent(String(a.state))}` : ""}`),
   },
@@ -204,31 +170,24 @@ export const TOOLS: Tool[] = [
   {
     name: "board_report",
     description:
-      "File your final report for the ticket you are working on: what you did, where, how you verified it, what is left. Required before you finish. Five to fifteen lines.",
+      "File a report on a ticket for the reviewer and the user: what you did, where, how you verified it, what is left. Optional, but worth it when the change does not speak for itself. Five to fifteen lines.",
     inputSchema: obj({ id: str("Ticket id", 20), report: str("The report") }, ["id", "report"]),
     call: (a) => api("POST", `/tickets/${encodeURIComponent(String(a.id))}/report`, { report: a.report }),
   },
   {
     name: "board_create_ticket",
     description:
-      "Create a ticket in the backlog for work you found but must not do now: a bug, a follow-up (missing test, doc gap) or a chore. Never a feature; file features as ideas. The user approves backlog tickets before they run.",
+      "Create a ticket in the backlog for work you found but do not do now: a feature, a bug, a follow-up (missing test, doc gap) or a chore. The user approves backlog tickets before they run.",
     inputSchema: obj(
       {
         title: str("Short title", 200),
-        kind: { type: "string", enum: ["bug", "followup", "chore"] },
+        kind: { type: "string", enum: ["feature", "bug", "followup", "chore"] },
         spec: str("What to do and where"),
         acceptance: { type: "array", items: str("One acceptance criterion", 2000), maxItems: 20 },
         size: { type: "string", enum: ["S", "M", "L"] },
         repos: { type: "array", items: str("Directory name under /workspace", 100), maxItems: 20, description: "The repositories you expect it to touch: a hint for the user and the worker, not a limit" },
         deps: { type: "array", items: str("Ticket id", 20), maxItems: 20 },
         priority: { type: "integer", minimum: 0, maximum: 1000 },
-        agent: {
-          type: "object",
-          description: "Optional: run this ticket's implementer on another agent (driver claude | codex | cursor, model any id that CLI accepts). Only when the work needs that agent's strength; the driver must have a credential in the user's Settings.",
-          properties: { driver: { type: "string", enum: ["claude", "codex", "cursor"] }, model: str("Model id", 100) },
-          required: ["driver"],
-          additionalProperties: false,
-        },
       },
       ["title", "kind", "spec"],
     ),
@@ -236,11 +195,11 @@ export const TOOLS: Tool[] = [
   },
   {
     name: "board_changes",
-    roles: ["implementer", "lead"],
+    leadOnly: true,
     description:
-      "What the judge would see if you submitted now: the repositories your change touches (whatever the ticket expected) and the review level. Use it before submitting to catch a stray edit or a repository you forgot.",
-    inputSchema: obj({}, []),
-    call: () => api("GET", "/changes"),
+      "What the reviewer would see if you moved a ticket to review now: per repository, the files changed since its baseline, this ticket's commits, other tickets' commits in the range and unlabelled ones, and the review level. Use it before the move to catch a stray edit, a commit without the ticket id, or a repository you forgot.",
+    inputSchema: obj({ id: str("Ticket id; defaults to the ticket you last moved into progress", 20) }, []),
+    call: (a) => api("GET", `/changes${a.id ? `?ticket=${encodeURIComponent(String(a.id))}` : ""}`),
   },
   {
     name: "chore",
@@ -266,7 +225,7 @@ export const TOOLS: Tool[] = [
     name: "chores_sweep",
     leadOnly: true,
     description:
-      "Take a batch of open chores to do in one go (you must hold no ticket): the given ids, or the oldest ones up to max. When the list is at the session's sweep line, board_claim and board_run are refused until a sweep (or chore_drop) brings it below. Returns the chores and the size limits of a sweep. Do them, run the repository's own checks yourself, then chores_submit. The batch becomes one commit (read by the session's reviewer first, when it has one), so stay within the limits and never touch the project's contract documents or fixtures from a sweep; make that a ticket instead.",
+      "Take a batch of open chores to do in one go (no ticket may be in progress or in review): the given ids, or the oldest ones up to max. Returns the chores and the size limits of a sweep. Do them, run the repository's own checks yourself, then chores_submit. The batch becomes one commit (read by the session's reviewer first, when it has one), so stay within the limits and never touch the project's contract documents or fixtures from a sweep; make that a ticket instead.",
     inputSchema: obj({ ids: { type: "array", items: str("Chore id, e.g. C-3", 20), maxItems: 50 }, max: { type: "integer", minimum: 1, maximum: 50 } }, []),
     call: (a) => api("POST", `/chores/sweep`, { ids: a.ids, max: a.max }),
   },
@@ -289,15 +248,15 @@ export const TOOLS: Tool[] = [
   },
   {
     name: "board_set_priority",
-    description: "Change a ticket's priority (lower runs first) with a reason. Pinned tickets cannot be changed.",
+    description: "Change a ticket's priority (lower first) with a reason.",
     inputSchema: obj({ id: str("Ticket id", 20), priority: { type: "integer", minimum: 0, maximum: 1000 }, reason: str("Why", 2000) }, ["id", "priority", "reason"]),
     call: (a) => api("POST", `/tickets/${encodeURIComponent(String(a.id))}/priority`, { priority: a.priority, reason: a.reason }),
   },
   {
     name: "board_update_ticket",
-    terminalOnly: true,
+    roles: ["lead", "terminal"],
     description:
-      "Change an existing ticket: title, kind, spec, acceptance criteria (replaces the list), size, expected repos, deps (replaces the list), priority, or state (backlog or ready). Fields left out stay as they are. Not for a ticket a worker holds. For a merge: update the ticket that stays with the combined spec and criteria, then board_delete_ticket the others with replacedBy.",
+      "Change an existing ticket: title, kind, spec, acceptance criteria (replaces the list), size, expected repos, deps (replaces the list), priority, or state (backlog or ready; other moves are board_move). Fields left out stay as they are. Not for a ticket in review. For a merge: update the ticket that stays with the combined spec and criteria, then board_delete_ticket the others with replacedBy.",
     inputSchema: obj(
       {
         id: str("Ticket id", 20),
@@ -318,25 +277,26 @@ export const TOOLS: Tool[] = [
   },
   {
     name: "board_delete_ticket",
-    terminalOnly: true,
+    roles: ["lead", "terminal"],
     description:
-      "Delete a ticket that was merged into another or no longer applies, when the user wants it gone. With replacedBy (the ticket it was merged into), tickets that depended on it depend on that one instead. Not for a ticket a worker holds.",
+      "Delete a ticket that was merged into another or no longer applies. With replacedBy (the ticket it was merged into), tickets that depended on it depend on that one instead. Not for a ticket in review.",
     inputSchema: obj({ id: str("Ticket id", 20), reason: str("Why, in a line", 2000), replacedBy: str("The ticket it was merged into", 20) }, ["id", "reason"]),
     call: ({ id, ...rest }) => api("DELETE", `/tickets/${encodeURIComponent(String(id))}`, rest),
   },
   {
     name: "board_add_dep",
-    description: "Declare that a ticket depends on another one, with a reason. Pinned tickets cannot be changed; cycles are rejected.",
+    description: "Declare that a ticket depends on another one, with a reason. Cycles are rejected.",
     inputSchema: obj({ id: str("Ticket id", 20), dep: str("Ticket id it depends on", 20), reason: str("Why", 2000) }, ["id", "dep", "reason"]),
     call: (a) => api("POST", `/tickets/${encodeURIComponent(String(a.id))}/deps`, { dep: a.dep, reason: a.reason }),
   },
   {
     name: "request",
     description:
-      "For what you cannot do yourself (you have sudo: install packages yourself). Ask the user for everything you need right now in ONE request, then STOP working on the ticket. Give a summary (what you need and why) and a list of actions. Kinds Verstas performs on approval: 'network' (a host to allow), 'pack' (a named bundle of hosts for a toolchain, e.g. 'playwright'; listed in /workspace/VERSTAS.md), 'resources' (more minutes/turns/memory). Kinds the user performs or answers: 'instruction' (something only a person can do), 'question' (a decision; offer options). Ask questions rarely: if a sensible choice exists, make it, note the assumption, and continue. The ticket parks until every action is decided; the next worker gets the outcomes.",
+      "For what you cannot do yourself (you have sudo: install packages yourself). Ask the user for everything you need right now in ONE request. Name the ticket it is about (`ticket`) when you have several in progress; that ticket parks until the user answers. Give a summary (what you need and why) and a list of actions. Kinds Verstas performs on approval: 'network' (a host to allow), 'pack' (a named bundle of hosts for a toolchain, e.g. 'playwright'; listed in /workspace/VERSTAS.md), 'resources' (more minutes/turns/memory). Kinds the user performs or answers: 'instruction' (something only a person can do), 'question' (a decision; offer options). Ask questions rarely: if a sensible choice exists, make it, note the assumption, and continue. The outcomes reach you when the user has decided every action.",
     inputSchema: obj(
       {
         summary: str("What you need and why, for the user. One paragraph.", 8000),
+        ticket: str("The ticket this request is about, when it is a ticket's; defaults to the one you last moved into progress", 20),
         actions: {
           type: "array",
           maxItems: 20,
@@ -359,7 +319,7 @@ export const TOOLS: Tool[] = [
       },
       ["summary"],
     ),
-    call: (a) => api("POST", `/requests`, { summary: a.summary, actions: a.actions ?? [] }),
+    call: (a) => api("POST", `/requests`, { summary: a.summary, actions: a.actions ?? [], ...(a.ticket ? { ticket: a.ticket } : {}) }),
   },
   {
     name: "halt",
@@ -398,43 +358,28 @@ const send = (msg: Rpc): void => {
 const reply = (id: Rpc["id"], result: unknown): void => send({ jsonrpc: "2.0", id, result });
 const fail = (id: Rpc["id"], code: number, message: string): void => send({ jsonrpc: "2.0", id, error: { code, message } });
 
-/** What the agent in your terminal does not get: it holds no ticket to report on and asks you directly instead of filing requests. */
+/** What the agent in your terminal does not get: it asks you directly instead of filing requests, and reports are the lead's. */
 const NOT_FOR_TERMINAL = new Set(["budget", "board_report", "request", "halt"]);
 
 /**
- * board_create_ticket for the agents that plan with you rather than work
- * unattended: the planner (your request) creates features into the
- * backlog; the agent in your terminal, with you at the keyboard, may also
- * put a ticket straight into ready. Unattended workers and leads keep the
- * narrow tool, so they cannot add features on their own.
+ * board_create_ticket's `state`: the lead owns the board and may start a
+ * ticket at once; the agent in your terminal, with you at the keyboard,
+ * may put one straight into ready; everyone else files into the backlog.
  */
-const forPlanning = (t: Tool, role: string): Tool => {
+const withState = (t: Tool, role: string): Tool => {
   const props = (t.inputSchema as { properties: Record<string, unknown> }).properties;
-  const terminal = role === "terminal";
+  const states = role === "lead" ? ["backlog", "ready", "in_progress"] : role === "terminal" ? ["backlog", "ready"] : undefined;
+  if (!states) return t;
   return {
     ...t,
-    description: terminal
-      ? "Create a ticket: a feature, a bug, a follow-up or a chore. It goes to the backlog unless the user asked for it to be ready to run (state ready)."
-      : "Create a ticket in the backlog: a feature, a bug, a follow-up (missing test, doc gap) or a chore. The user approves backlog tickets before they run.",
-    inputSchema: {
-      ...t.inputSchema,
-      properties: {
-        ...props,
-        kind: { type: "string", enum: ["feature", "bug", "followup", "chore"] },
-        ...(terminal ? { state: { type: "string", enum: ["backlog", "ready"], description: "backlog (the default) waits for the user's approval; ready runs in the next run. Use ready only when the user asked for it." } } : {}),
-      },
-    },
+    description: role === "lead" ? "Create a ticket: a feature, a bug, a follow-up or a chore. It goes to the backlog unless you say ready (the user sees it on the board) or in_progress (you start it now; its baseline is recorded)." : "Create a ticket: a feature, a bug, a follow-up or a chore. It goes to the backlog unless the user asked for it to be ready to run (state ready).",
+    inputSchema: { ...t.inputSchema, properties: { ...props, state: { type: "string", enum: states, description: role === "lead" ? "backlog (the default), ready, or in_progress to start it now" : "backlog (the default) waits for the user's approval; ready runs in the next run. Use ready only when the user asked for it." } } },
   };
 };
 
-/** The goal worker has no board: it keeps its plan in notes/state.md, so it gets only what reaches the user and the harness. */
-const FOR_GOAL = new Set(["budget", "handoff", "goal_done", "request", "halt", "message", "idea", "artifact"]);
-
-/** The tools for this worker's role: a lead also drives the board; the agent in your terminal plans and asks you; the goal worker has no board at all. */
+/** The tools for this worker's role: the lead drives the board; the agent in your terminal plans and asks you. */
 export const visibleTools = (role = process.env.VERSTAS_ROLE ?? ""): Tool[] =>
-  role === "goal"
-    ? TOOLS.filter((t) => FOR_GOAL.has(t.name))
-    : TOOLS.filter((t) => (!t.leadOnly || role === "lead") && (!t.terminalOnly || role === "terminal") && (!t.roles || t.roles.includes(role)) && !(role === "terminal" && NOT_FOR_TERMINAL.has(t.name))).map((t) => (t.name === "board_create_ticket" && (role === "planner" || role === "terminal") ? forPlanning(t, role) : t));
+  TOOLS.filter((t) => (!t.leadOnly || role === "lead") && (!t.roles || t.roles.includes(role)) && !(role === "terminal" && NOT_FOR_TERMINAL.has(t.name))).map((t) => (t.name === "board_create_ticket" ? withState(t, role) : t));
 
 export const handle = async (msg: Rpc): Promise<void> => {
   const { id, method, params = {} } = msg;

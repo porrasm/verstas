@@ -25,7 +25,6 @@ const source = (over: Partial<Session> = {}): Session =>
     image: "verstas-devbox:local",
     requirements: "  .NET 9 and Chromium  ",
     setupMode: "agentic",
-    mode: "lead",
     agents: { worker: { driver: "claude", model: "opus" } },
     packs: ["dotnet"],
     allowlist: ["api.nuget.org"],
@@ -41,7 +40,7 @@ const source = (over: Partial<Session> = {}): Session =>
 
 test("the settings carry over; the board, prompts, remote flag, id and name do not", () => {
   const s = environmentSettings(source(), {}, t);
-  expect(s).toMatchObject({ image: "verstas-devbox:local", mode: "lead", setupMode: "agentic", packs: ["dotnet"], allowlist: ["api.nuget.org"], agents: { worker: { driver: "claude", model: "opus" } } });
+  expect(s).toMatchObject({ image: "verstas-devbox:local", setupMode: "agentic", packs: ["dotnet"], allowlist: ["api.nuget.org"], agents: { worker: { driver: "claude", model: "opus" } } });
   expect(s.caps).toMatchObject({ workerMinutes: 50, choreSweepAt: 7 });
   expect(s.limits).toMatchObject({ cpus: 6 });
   expect(s.rootScripts.map((r) => r.script)).toEqual(["apt-get install -y fonts"]);

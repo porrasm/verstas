@@ -21,9 +21,9 @@ test("board MCP server speaks JSON-RPC and forwards tool calls with the run toke
       seen.push({ method: req.method ?? "", url: req.url ?? "", auth: req.headers.authorization, body });
       if (req.url === "/agent/tickets/T-1") {
         res.setHeader("content-type", "application/json").end(JSON.stringify({ id: "T-1", title: "Schema" }));
-      } else if (req.url === "/agent/tickets" && req.method === "POST") {
+      } else if (req.url === "/agent/tickets/T-9/move" && req.method === "POST") {
         res.statusCode = 403;
-        res.setHeader("content-type", "application/json").end(JSON.stringify({ error: "A worker may not create feature tickets; file an idea instead" }));
+        res.setHeader("content-type", "application/json").end(JSON.stringify({ error: "Only the lead moves tickets, sweeps and hands off" }));
       } else {
         res.setHeader("content-type", "application/json").end(JSON.stringify({ ok: true, url: req.url }));
       }
@@ -69,8 +69,9 @@ test("board MCP server speaks JSON-RPC and forwards tool calls with the run toke
     expect(req.result).toMatchObject({ content: [{ type: "text" }] });
     expect(JSON.parse(seen.at(-1)!.body)).toEqual({ summary: "fonts", actions: [{ kind: "network", host: "fonts.googleapis.com" }] });
 
-    const denied = await call("tools/call", { name: "board_create_ticket", arguments: { title: "x", kind: "feature", spec: "y" } });
-    expect(denied.result).toMatchObject({ isError: true, content: [{ type: "text", text: "Error: A worker may not create feature tickets; file an idea instead (HTTP 403)" }] });
+    const created = await call("tools/call", { name: "board_create_ticket", arguments: { title: "x", kind: "feature", spec: "y" } });
+    expect(created.result).toMatchObject({ content: [{ type: "text" }] });
+    expect(JSON.parse(seen.at(-1)!.body)).toEqual({ title: "x", kind: "feature", spec: "y" });
 
     const unknown = await call("tools/call", { name: "nope", arguments: {} });
     expect(unknown.error?.code).toBe(-32602);
@@ -101,29 +102,35 @@ test("the budget tool turns the worker's totals into what is left, and says so w
   }
 });
 
-test("claim, submit and handoff are shown to a lead only", async () => {
+test("board_move, done, handoff, the sweeps and the board edits are shown to the lead; the terminal agent edits too; the reviewer gets neither", async () => {
   const { visibleTools } = await import("../../src/worker/mcp-server.js");
   const lead = visibleTools("lead").map((t) => t.name);
-  const worker = visibleTools("implementer").map((t) => t.name);
-  for (const name of ["board_claim", "board_run", "board_submit", "handoff", "chores_sweep", "chores_submit"]) {
+  const reviewer = visibleTools("reviewer").map((t) => t.name);
+  const terminal = visibleTools("terminal").map((t) => t.name);
+  for (const name of ["board_move", "done", "handoff", "chores_sweep", "chores_submit", "board_changes"]) {
     expect(lead).toContain(name);
-    expect(worker).not.toContain(name);
+    expect(reviewer).not.toContain(name);
+    expect(terminal).not.toContain(name);
   }
-  for (const name of ["chore", "chores_list", "chore_drop"]) {
+  for (const name of ["board_update_ticket", "board_delete_ticket"]) {
     expect(lead).toContain(name);
-    expect(worker).toContain(name);
+    expect(terminal).toContain(name);
+    expect(reviewer).not.toContain(name);
   }
-  expect(worker).toContain("board_report");
-  expect(lead).toContain("board_report");
+  for (const name of ["chore", "chores_list", "chore_drop", "board_report", "board_create_ticket"]) {
+    expect(lead).toContain(name);
+    expect(reviewer).toContain(name);
+  }
+  for (const role of ["lead", "reviewer", "planner", "setup", "prompt", "terminal"]) expect(visibleTools(role).map((t) => t.name)).not.toContain("goal_done");
+  // board_create_ticket: every kind for everyone; the lead may start a ticket at once, the terminal agent may make one ready.
+  const props = (role: string) => (visibleTools(role).find((t) => t.name === "board_create_ticket")!.inputSchema as { properties: { kind: { enum: string[] }; state?: { enum: string[] } } }).properties;
+  for (const role of ["lead", "reviewer", "planner", "terminal"]) expect(props(role).kind.enum).toEqual(["feature", "bug", "followup", "chore"]);
+  expect(props("lead").state?.enum).toEqual(["backlog", "ready", "in_progress"]);
+  expect(props("terminal").state?.enum).toEqual(["backlog", "ready"]);
+  for (const role of ["planner", "reviewer"]) expect(props(role).state).toBeUndefined();
 });
 
-test("the goal worker gets no board tools: budget, handoff, goal_done and the ways to reach the user; nobody else gets goal_done", async () => {
-  const { visibleTools } = await import("../../src/worker/mcp-server.js");
-  expect(visibleTools("goal").map((t) => t.name).sort()).toEqual(["artifact", "budget", "goal_done", "halt", "handoff", "idea", "message", "request"]);
-  for (const role of ["lead", "implementer", "reviewer", "planner", "setup", "prompt", "terminal"]) expect(visibleTools(role).map((t) => t.name)).not.toContain("goal_done");
-});
-
-test("board_submit submits, waits for the verdict, and returns the harness's notes since the submit", async () => {
+test("a move to review waits for the verdict and returns the harness's notes since the move; other moves return at once", async () => {
   test.setTimeout(20_000);
   let state = "in_progress";
   let polls = 0;
@@ -133,34 +140,36 @@ test("board_submit submits, waits for the verdict, and returns the harness's not
     req.on("data", (d) => (body += d));
     req.on("end", () => {
       res.setHeader("content-type", "application/json");
-      if (req.url === "/agent/tickets/T-1/submit") {
-        state = "review";
-        notes.push({ by: "agent", text: "Submitted for review by the lead", at: "2" });
-        return res.end(JSON.stringify({ ok: true }));
+      if (req.url === "/agent/tickets/T-1/move") {
+        const to = (JSON.parse(body) as { to: string }).to;
+        state = to;
+        notes.push({ by: "agent", text: `Moved to ${to} by the lead`, at: "2" });
+        return res.end(JSON.stringify({ ok: true, id: "T-1", state: to }));
       }
       if (req.url === "/agent/tickets/T-1") {
         if (state === "review" && ++polls === 2) {
           state = "ready";
-          notes.push({ by: "harness", text: "Not done yet (missing test for the null case); attempt 1 of 2", at: "3" });
+          notes.push({ by: "harness", text: "Not done yet (missing test for the null case); the reviewer's notes are on the ticket", at: "3" });
         }
-        return res.end(JSON.stringify({ id: "T-1", state, attempts: polls >= 2 ? 1 : 0, notes }));
+        return res.end(JSON.stringify({ id: "T-1", state, notes }));
       }
       res.statusCode = 404;
       res.end(JSON.stringify({ error: "no" }));
     });
   });
   const port = await new Promise<number>((r) => api.listen(0, "127.0.0.1", () => r((api.address() as net.AddressInfo).port)));
-  const child = spawn(process.execPath, ["--import", "tsx", "-e", `import("./src/worker/mcp-server.ts").then(async (m) => { process.stdout.write(JSON.stringify(await m.submitAndWait("T-1", 5000, 20)) + "\\n"); const late = await m.submitAndWait("T-1", 60, 20); process.stdout.write(JSON.stringify(late) + "\\n"); })`], {
+  const child = spawn(process.execPath, ["--import", "tsx", "-e", `import("./src/worker/mcp-server.ts").then(async (m) => { process.stdout.write(JSON.stringify(await m.moveAndWait("T-1", "in_progress")) + "\\n"); process.stdout.write(JSON.stringify(await m.moveAndWait("T-1", "review", undefined, 5000, 20)) + "\\n"); const late = await m.moveAndWait("T-1", "review", undefined, 60, 20); process.stdout.write(JSON.stringify(late) + "\\n"); })`], {
     env: { ...process.env, VERSTAS_AGENT_API: `http://127.0.0.1:${port}/agent`, VERSTAS_RUN_TOKEN: "t", HTTP_PROXY: "", http_proxy: "" },
     stdio: ["ignore", "pipe", "inherit"],
   });
   try {
     const lines: string[] = [];
     for await (const line of readline.createInterface({ input: child.stdout })) lines.push(line);
-    const first = JSON.parse(lines[0]!) as Record<string, unknown>;
-    expect(first).toEqual({ id: "T-1", state: "ready", verdict: expect.stringContaining("not done yet"), attempts: 1, notes: ["Not done yet (missing test for the null case); attempt 1 of 2"] });
+    expect(JSON.parse(lines[0]!)).toEqual({ ok: true, id: "T-1", state: "in_progress" });
+    const verdict = JSON.parse(lines[1]!) as Record<string, unknown>;
+    expect(verdict).toEqual({ id: "T-1", state: "ready", verdict: expect.stringContaining("not done yet"), notes: ["Not done yet (missing test for the null case); the reviewer's notes are on the ticket"] });
     // A verdict that takes longer than the wait comes back as "still in review" (the fake judges only once).
-    expect(JSON.parse(lines[1]!)).toMatchObject({ id: "T-1", state: "review", verdict: "still in review" });
+    expect(JSON.parse(lines[2]!)).toMatchObject({ id: "T-1", state: "review", verdict: "still in review" });
   } finally {
     child.kill();
     api.close();

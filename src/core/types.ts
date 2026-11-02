@@ -135,8 +135,16 @@ export const ticketSchema = z.preprocess(legacyRepo, z.object({
   spec: z.string().max(50_000).default(""),
   acceptance: z.array(z.string().min(1).max(2000)).default([]),
   notes: z.array(noteSchema).default([]),
-  /** Judged implementer attempts: counted when a verdict is given, never when a ticket parks, is stopped or is rate limited. */
+  /** Judged attempts: counted when a verdict is given, never when a ticket parks, is stopped or is rate limited. */
   attempts: z.number().int().nonnegative().default(0),
+  /**
+   * Each repository's HEAD when the ticket entered in_progress, recorded by
+   * the harness. The reviewer reads the commits since then that carry the
+   * ticket's id, plus the working tree (docs/BOARD.md, Judging). Kept when
+   * the ticket is requeued, so earlier commits stay in the review; cleared
+   * when it is done.
+   */
+  baseline: z.record(z.string(), z.string()).optional(),
   /** The agent may not reprioritize or re-dep a pinned ticket. */
   pinned: z.boolean().default(false),
   /**
@@ -184,12 +192,11 @@ const secondsBetween = (from: string, to: string): number => Math.max(0, (Date.p
 /**
  * A ticket's time, split by what it waited on. Null for a ticket that was
  * never claimed or carries no timing (an old board). `total` runs from the
- * first claim to done, or to `at` while the ticket is open. A loop run's
- * agent time is what its workers reported; a lead does not report per
- * ticket, so in lead mode the lead's share is the time in in_progress, plus
- * the reviewer's (and an own-agent implementer's) reported seconds.
+ * first claim to done, or to `at` while the ticket is open. The lead does
+ * not report time per ticket, so its share is the time in in_progress,
+ * plus the reviewer's reported seconds.
  */
-export const ticketTiming = (t: Ticket, mode: "loop" | "lead" | "goal", at: string = now()): TicketTiming | null => {
+export const ticketTiming = (t: Ticket, at: string = now()): TicketTiming | null => {
   if (!t.firstClaimAt || !t.stateSince) return null;
   // The visit in progress counts too, up to `at`; a done ticket's clock stopped when it got there.
   const timeIn: Partial<Record<TicketState, number>> = { ...t.timeIn };
@@ -199,7 +206,7 @@ export const ticketTiming = (t: Ticket, mode: "loop" | "lead" | "goal", at: stri
   const waitingOnYou = timeIn.waiting ?? 0;
   // Time in ready before the first claim is queueing, not requeueing: `ready` counts only from the first claim on.
   const requeued = Math.max(0, (timeIn.ready ?? 0) - (t.readyBeforeClaim ?? 0));
-  const agent = mode === "lead" ? working + (t.agentSeconds ?? 0) : (t.agentSeconds ?? 0);
+  const agent = working + (t.agentSeconds ?? 0);
   const total = secondsBetween(t.firstClaimAt, t.state === "done" ? t.stateSince : at);
   return { working, judging, waitingOnYou, requeued, agent, total };
 };
@@ -532,9 +539,13 @@ export const capsSchema = z.object({
    * reviewer always starts fresh.
    */
   resumeWorker: z.boolean().default(false),
-  /** A lead lives much longer than a worker; at a cap it hands over to a fresh lead instead of failing a ticket. */
-  leadMinutes: z.number().int().min(10).max(1440).default(180),
-  leadTurns: z.number().int().min(20).max(5000).default(600),
+  /**
+   * Optional liveness limits on one lead life: at a cap the lead is stopped
+   * and a fresh lead continues from its note. Unset (the default), a life
+   * ends when the lead stops or hands off.
+   */
+  leadMinutes: z.number().int().min(10).max(1440).optional(),
+  leadTurns: z.number().int().min(20).max(5000).optional(),
   /** A chore sweep's commit may change at most this many lines (added plus removed) and files; over it, the sweep is refused and the work belongs in a ticket. */
   sweepMaxLines: z.number().int().min(10).max(100_000).default(400),
   sweepMaxFiles: z.number().int().min(1).max(1000).default(15),
@@ -548,16 +559,15 @@ export const capsSchema = z.object({
    */
   choreSweepAt: z.number().int().min(0).max(1000).default(10),
   /**
-   * Goal mode: rounds (one worker start to exit, then a commit) per run
-   * before it pauses for a look. A run that keeps going without a goal_done
-   * is bounded by this, the per-worker caps and the budget, nothing else.
+   * Lead lives (one start to exit, then the backup commit) per run before
+   * it pauses for a look. A run that keeps going without `done` is bounded
+   * by this and the budget, nothing else.
    */
   goalRounds: z.number().int().min(1).max(1000).default(25),
   /**
-   * Goal mode: every this many minutes of a run, the running worker is
-   * asked for a short progress update, which it posts as a `message` to
-   * the inbox (Claude Code workers only; the others cannot be reached
-   * mid-run). 0 turns the check off.
+   * Every this many minutes of a run, the running lead is asked for a short
+   * progress update, which it posts as a `message` to the inbox (Claude
+   * Code only; the others cannot be reached mid-run). 0 turns the check off.
    */
   progressMinutes: z.number().int().min(0).max(1440).default(30),
 });
@@ -666,19 +676,7 @@ export const isInitialized = (s: { initializedAt?: string | null }): boolean => 
 /** How the environment is set up at initialization: a setup worker, or nothing beyond the container and the recipes. */
 export const setupModeSchema = z.enum(["agentic", "skip"]);
 
-/**
- * How the tickets are worked. loop: the harness picks each ready ticket and
- * starts a fresh implementer for it. lead: one long-lived agent works the
- * board, claiming and submitting tickets itself; the harness keeps it alive
- * and still judges every ticket. goal: no board; one long-lived worker works
- * toward the session's goal text, the harness commits after every round and
- * keeps the worker alive (resume, handoff) until it says the goal is met,
- * you pause, or a cap is reached.
- */
-export const sessionModeSchema = z.enum(["loop", "lead", "goal"]);
-export type SessionMode = z.infer<typeof sessionModeSchema>;
-
-/** How an earlier goal of a goal-mode session ended: the worker said it was met, or you rewrote or dropped it. */
+/** How an earlier goal ended: the lead said it was met, or you rewrote or dropped it. */
 export const goalOutcomeSchema = z.enum(["met", "revised", "abandoned"]);
 /** One earlier goal of the session: its text, when it was current, how it ended, and the worker's assessment when it was met. */
 export const goalRecordSchema = z.object({
@@ -689,7 +687,7 @@ export const goalRecordSchema = z.object({
   note: z.string().max(8000).optional(),
 });
 export type GoalRecord = z.infer<typeof goalRecordSchema>;
-/** The goal worker's claim that the goal is met: when, in which run, and its assessment. Cleared when the goal changes. */
+/** The lead's claim that the goal is met: when, in which run, and its assessment. Cleared when the goal changes. */
 export const goalMetSchema = z.object({ at: z.string(), runId: z.number().int(), note: z.string().max(8000) });
 export type GoalMet = z.infer<typeof goalMetSchema>;
 export type SetupMode = z.infer<typeof setupModeSchema>;
@@ -707,22 +705,21 @@ export const sessionStateSchema = z.enum([
 ]);
 export type SessionState = z.infer<typeof sessionStateSchema>;
 
-/** Per-role agents. `worker` runs implementer, planner, setup and prompts; `reviewer` defaults to the worker's agent. */
+/** Per-role agents. `worker` runs the lead, the planner, setup and prompts; `reviewer` defaults to the worker's agent. */
 export const sessionAgentsSchema = z.object({
   worker: agentSpecSchema.optional(),
   reviewer: agentSpecSchema.optional(),
 });
 export type SessionAgents = z.infer<typeof sessionAgentsSchema>;
 
-export type WorkerRole = "implementer" | "reviewer" | "planner" | "setup" | "prompt" | "lead" | "goal";
+/** The jobs the harness starts. Logs of old runs also carry `implementer` and `goal`, from before one lead did everything. */
+export type WorkerRole = "reviewer" | "planner" | "setup" | "prompt" | "lead";
 
 /**
  * The agent for a role. Older sessions carry only `model`; that is the
  * worker's Claude model, so they keep running unchanged.
  */
-export const agentFor = (s: { model?: string; agents?: SessionAgents }, role: WorkerRole, ticket?: { agent?: AgentSpec }): AgentSpec => {
-  // A ticket's own agent applies to the implementer that works it; the reviewer stays the session's, so the review is independent of what wrote the code.
-  if (role === "implementer" && ticket?.agent) return ticket.agent;
+export const agentFor = (s: { model?: string; agents?: SessionAgents }, role: WorkerRole): AgentSpec => {
   const worker: AgentSpec = s.agents?.worker ?? { driver: "claude", model: s.model || undefined };
   if (role === "reviewer" && s.agents?.reviewer) return s.agents.reviewer;
   return worker;
@@ -733,7 +730,7 @@ export const boardDrivers = (board: { tickets: readonly { agent?: AgentSpec; sta
 
 /** Every driver a session uses, worker first; with the board, the tickets' own agents too. */
 export const sessionDrivers = (s: { model?: string; agents?: SessionAgents; caps?: { reviewer?: boolean } }, board?: { tickets: readonly { agent?: AgentSpec; state: TicketState }[] }): DriverName[] => {
-  const out = [agentFor(s, "implementer").driver];
+  const out = [agentFor(s, "lead").driver];
   if (s.caps?.reviewer !== false) {
     const r = agentFor(s, "reviewer").driver;
     if (!out.includes(r)) out.push(r);
@@ -749,17 +746,16 @@ export const sessionSchema = z.object({
   id: sessionIdSchema,
   name: z.string().min(1).max(200),
   /**
-   * In goal mode, what the worker works toward: anything from one line to a
-   * specification; read fresh every round, so it can be edited at any time
-   * (`reviseGoal`). In the board modes it is only a draft's goal, the first
-   * suggestion in the Plan tickets box.
+   * What the lead works toward, beside the board: anything from one line to
+   * a specification, or empty when the board alone is the work. Read fresh
+   * every lead life, so it can be edited at any time (`reviseGoal`).
    */
   goal: z.string().max(20_000).default(""),
   /** When the current goal text was set; absent for a goal that was never revised (the session's creation, then). */
   goalSince: z.string().optional(),
-  /** The goal worker's last claim that the goal is met, until the goal changes. Starting again with the same goal means "not yet". */
+  /** The lead's last claim that the goal is met, until the goal changes. Starting again with the same goal means "not yet". */
   goalMet: goalMetSchema.optional(),
-  /** Earlier goals of this session, oldest first: the project log a goal-mode session keeps across goals. */
+  /** Earlier goals of this session, oldest first: the project log a session keeps across goals. */
   goals: z.array(goalRecordSchema).default([]),
   createdAt: z.string(),
   /** When the environment came to exist (see `isInitialized`); null while the session is a plan. */
@@ -790,7 +786,6 @@ export const sessionSchema = z.object({
    */
   requirements: z.string().max(20_000).default(""),
   setupMode: setupModeSchema.default("agentic"),
-  mode: sessionModeSchema.default("loop"),
   /** Prompts you ran from the session page (one worker, no ticket) and planning requests, with their replies; newest last, at most 20. */
   prompts: z
     .array(z.object({ at: z.string(), runId: z.number().int(), kind: z.enum(["prompt", "plan"]).default("prompt"), text: z.string().max(20_000), reply: z.string().max(8000).default(""), stopReason: z.string().default("") }))
@@ -853,7 +848,7 @@ export const runSchema = z.object({
   state: runStateSchema,
   currentTicket: ticketIdSchema.optional(),
   ticketsDone: z.number().int().nonnegative().default(0),
-  /** Goal mode: rounds (worker lives) this run has started. */
+  /** Lead lives this run has started. */
   rounds: z.number().int().nonnegative().optional(),
   cost: costSchema.default({ inputTokens: 0, outputTokens: 0 }),
   /** Why it is paused: "user" | "rate_limit" | "workspace_size" | "requests"; free text for the UI. */
@@ -905,7 +900,7 @@ export const eventSchema = z.discriminatedUnion("kind", [
     seconds: z.number().int(),
     text: z.string(),
     stderr: z.string().default(""),
-    /** The agent conversation this worker ran in, when the harness kept one (caps.resumeWorker, lead mode). */
+    /** The agent conversation this worker ran in, when the harness kept one (the lead's). */
     agentSession: z.string().optional(),
   }),
 ]);

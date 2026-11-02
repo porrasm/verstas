@@ -101,7 +101,7 @@ const sessionStatus = (session: Session, run: Run | undefined, active: boolean):
     case "setup":
       return { label: "not started", tone: "quiet" };
     case "finished":
-      return { label: session.mode === "goal" ? (session.goalMet ? "goal met, says the worker" : "finished") : "finished", tone: "good" };
+      return { label: session.goalMet ? "goal met, says the lead" : "finished", tone: "good" };
     case "halted":
       return { label: "halted by the agent", tone: "warn" };
     case "waiting":
@@ -287,21 +287,19 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
   const counts: Record<string, number> = {};
   for (const t of board.tickets) counts[t.state] = (counts[t.state] ?? 0) + 1;
   const done = counts.done ?? 0;
-  const timings = board.tickets.map((t) => ticketTiming(t, session.mode ?? "loop", now)).filter((x) => x !== null);
+  const timings = board.tickets.map((t) => ticketTiming(t, now)).filter((x) => x !== null);
   const waitingOnYou = timings.length ? timings.reduce((sum, x) => sum + x.waitingOnYou, 0) : null;
   const status = sessionStatus(session, run, active);
   const sb = sandboxLabel(sandbox);
   const lastActivity = lastEventAt && lastEventAt > (totals?.lastActivityAt ?? "") ? lastEventAt : totals?.lastActivityAt;
   const pausedBanner = !active && run && (run.state === "paused" || run.state === "halted" || run.state === "failed") && session.state !== "finished";
   const initialized = isInitialized(session);
-  /** No board: the goal panel stands where the board would, and the ticket controls stay away. */
-  const goalMode = session.mode === "goal";
   const terminalActive = Boolean(active && run?.terminal);
   /** The setup worker left the box short of ready and nobody accepted it: the one state that needs a decision before anything else. */
   const initNeeds = !initialized && !active && session.readiness?.verdict === "needs" && !session.readiness.confirmedAt;
   const saveSettings = async (patch: SettingsPatch) => {
     if (patch.allowlist || patch.packs) await api("PUT", `${base}/allowlist`, { allowlist: patch.allowlist, packs: patch.packs });
-    if (patch.caps || patch.limits || patch.mode || patch.planning !== undefined) await api("PUT", `${base}/caps`, { caps: patch.caps, limits: patch.limits, mode: patch.mode, planning: patch.planning });
+    if (patch.caps || patch.limits || patch.planning !== undefined) await api("PUT", `${base}/caps`, { caps: patch.caps, limits: patch.limits, planning: patch.planning });
     await refreshRun();
   };
   /** Every ticket and chore off the board, after a confirm; Export board first keeps a copy. */
@@ -346,9 +344,9 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
           <h1>{session.name}</h1>
           <span className={`pill ${status.tone}`}>{active ? <span className="dot run" /> : null}{status.label}</span>
           <div className="actions">
-            {initialized && !active && <button className="pri" onClick={() => runAction("start")} disabled={Boolean(busy)} title={goalMode ? (session.goalMet ? "Start again with the same goal: the worker takes that as not yet and looks for what falls short" : "Work toward the goal; Verstas commits after every round") : "Work through the ready tickets"}>Start run</button>}
+            {initialized && !active && <button className="pri" onClick={() => runAction("start")} disabled={Boolean(busy)} title={session.goalMet ? "Start again with the same goal: the lead takes that as not yet and looks for what falls short" : "One lead works the goal and the board's ready tickets; Verstas judges what it moves to review and commits what it leaves"}>{session.goalMet ? "Start again" : "Start run"}</button>}
             {terminalActive && <ConfirmButton className="pri" label="Start run" confirm="End the terminal and start" onConfirm={() => runAction("start")} disabled={Boolean(busy)} />}
-            {initialized && !goalMode && (!active || terminalActive) && <button onClick={() => setPlanning(true)} disabled={Boolean(busy)} title={terminalActive ? "Planning ends the agent terminal first; its changes are committed" : "Describe what to build; a planner worker turns it into backlog tickets"}>Plan tickets…</button>}
+            {initialized && (!active || terminalActive) && <button onClick={() => setPlanning(true)} disabled={Boolean(busy)} title={terminalActive ? "Planning ends the agent terminal first; its changes are committed" : "Describe what to build; a planner worker turns it into backlog tickets"}>Plan tickets…</button>}
             {initialized && !active && (
               <MoreMenu
                 label="Agent terminal ▾"
@@ -359,14 +357,14 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
                 })}
               />
             )}
-            {active && !terminalActive && <button onClick={() => runAction("pause")} disabled={Boolean(busy)} title={goalMode ? "The worker is told to finish its step, update its note and stop; the round is committed" : "Finish the current ticket, then stop"}>{goalMode ? "Pause" : "Pause after ticket"}</button>}
-            {active && !terminalActive && <button className="warn" onClick={() => runAction("stop")} disabled={Boolean(busy)} title={goalMode ? "Stop the worker now; what it changed is committed" : "Stop the worker now; its ticket goes back to ready"}>Stop now</button>}
-            {initialized && !goalMode && <button onClick={() => setNewTicket(true)} disabled={Boolean(busy)} title="Write a ticket by hand">New ticket</button>}
+            {active && !terminalActive && <button onClick={() => runAction("pause")} disabled={Boolean(busy)} title="The lead is told to reach a sensible point, update its note and stop; what it leaves is committed">Pause</button>}
+            {active && !terminalActive && <button className="warn" onClick={() => runAction("stop")} disabled={Boolean(busy)} title="Stop the lead now; its tickets go back to ready with the work kept">Stop now</button>}
+            {initialized && <button onClick={() => setNewTicket(true)} disabled={Boolean(busy)} title="Write a ticket by hand">New ticket</button>}
             <MoreMenu
               items={[
                 { label: "Import board…", onClick: () => setImportText("") },
                 { label: "Export board (JSON)", href: `/api${base}/board/export` },
-                ...(!goalMode && (board.tickets.length > 0 || board.chores.length > 0) ? [{ label: active ? "Clear board (stop the run first)" : "Clear board…", onClick: clearBoard, disabled: active }] : []),
+                ...(board.tickets.length > 0 || board.chores.length > 0 ? [{ label: active ? "Clear board (stop the run first)" : "Clear board…", onClick: clearBoard, disabled: active }] : []),
                 { label: active ? "Export session (stop the run first)" : "Export session (.ver)…", onClick: doArchive, disabled: active },
                 ...(initialized
                   ? [
@@ -380,9 +378,9 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
           </div>
         </div>
         <div className="facts">
-          {initialized && !goalMode && <span><b>{done}/{board.tickets.length}</b> done</span>}
-          {initialized && goalMode && run?.rounds ? <span title="Rounds: one worker from start to exit, then a commit of what it changed"><b>{run.rounds}</b> round{run.rounds === 1 ? "" : "s"}{active ? " this run" : ` in run ${run.id}`}</span> : null}
-          {initialized && !goalMode && waitingOnYou !== null && <span title="Time tickets spent waiting for your answers, summed over the board: how unattended the loop is">waiting on you <b>{fmtSpan(waitingOnYou)}</b></span>}
+          {initialized && board.tickets.length > 0 && <span><b>{done}/{board.tickets.length}</b> done</span>}
+          {initialized && run?.rounds ? <span title="Lead lives: one lead from start to exit, then a commit of what it left"><b>{run.rounds}</b> {run.rounds === 1 ? "life" : "lives"}{active ? " this run" : ` in run ${run.id}`}</span> : null}
+          {initialized && waitingOnYou !== null && <span title="Time tickets spent waiting for your answers, summed over the board: how unattended the loop is">waiting on you <b>{fmtSpan(waitingOnYou)}</b></span>}
           {initialized && <span><b>{fmtUsd(totals?.usd ?? 0)}</b> spent{totals && totals.runs > 1 ? ` over ${totals.runs} runs` : ""}{active && run?.cost.usd ? ` · ${fmtUsd(run.cost.usd)} this run` : ""}</span>}
           {run && active && <span>running for <b>{fmtDuration(run.startedAt, undefined, now)}</b></span>}
           {initialized && lastActivity && !active && <span>last activity <b title={fmtDateTime(lastActivity)}>{fmtAgo(lastActivity, now)}</b></span>}
@@ -439,9 +437,9 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
         </section>
       )}
 
-      {!active && !goalMode && (counts.backlog ?? 0) > 0 && (
+      {!active && (counts.backlog ?? 0) > 0 && (
         <div className="banner signal">
-          <span><b>{counts.backlog}</b> ticket{counts.backlog === 1 ? "" : "s"} in the backlog wait for your approval. The run only takes ready tickets.</span>
+          <span><b>{counts.backlog}</b> ticket{counts.backlog === 1 ? "" : "s"} in the backlog wait for your approval. The lead works ready tickets.</span>
           <button className="pri sm end" onClick={() => tryAct("approving", () => api("POST", `${base}/tickets/approve-all`))} disabled={Boolean(busy)}>Approve all</button>
         </div>
       )}
@@ -602,16 +600,14 @@ const RunBody = (p: BodyProps) => {
   const { session, board, inbox, base, active, run, counts } = p;
   const env = useEnvironment(session, base, active, p.refreshRun);
   const { onRetry, onApprove } = useBoardActions(p);
-  const goalMode = session.mode === "goal";
   return (
     <div className="sess-body">
       <div className="main">
-        {goalMode ? (
-          <GoalPanel session={session} base={base} active={active} run={run} onDone={p.refreshRun} />
-        ) : board.tickets.length === 0 ? (
+        <GoalPanel session={session} base={base} active={active} run={run} onDone={p.refreshRun} />
+        {board.tickets.length === 0 ? (
           <div className="card empty-state">
-            <h3>No tickets yet</h3>
-            <p>Paste a board, write tickets by hand, or describe what to build and let the planner draft them from the repositories.</p>
+            <h3>No tickets</h3>
+            <p>The lead works toward the goal above and may write tickets of its own. Paste a board, write tickets by hand, or describe what to build and let the planner draft them from the repositories.</p>
             <div className="row">
               <button onClick={p.onImport}>Import board…</button>
               <button className="pri" onClick={p.onPlan} disabled={active || Boolean(p.busy)}>Plan tickets…</button>
@@ -624,7 +620,7 @@ const RunBody = (p: BodyProps) => {
       </div>
       <aside className="side">
         <InboxPanel inbox={inbox} onRead={(mid) => void p.tryAct("read", () => api("POST", `${base}/messages/${mid}/read`))} onPromote={(iid) => void p.tryAct("promote", () => api("POST", `${base}/ideas/${iid}/promote`))} onOpenTicket={p.openTicket} />
-        {!goalMode && <ChoresPanel board={board} base={base} tryAct={p.tryAct} onOpenTicket={p.openTicket} />}
+        <ChoresPanel board={board} base={base} tryAct={p.tryAct} onOpenTicket={p.openTicket} />
         <WorkPanel session={session} base={base} active={active} done={counts.done ?? 0} repoState={p.repoState} onExport={p.onExport} onPlan={p.onPlan} onDone={async () => { await p.refreshRun(); await p.repoState.refresh(); }} />
         <PromptBox session={session} base={base} active={active} onDone={p.refreshRun} />
         <EnvironmentPanel env={env} />
@@ -662,10 +658,8 @@ const PlanBody = (p: BodyProps) => {
               <RepoSection env={env} bare />
             </section>
 
-            {session.mode === "goal" ? (
-              <GoalPanel session={session} base={base} active={active} run={run} onDone={p.refreshRun} />
-            ) : (
-              <section className="stack tight">
+            <GoalPanel session={session} base={base} active={active} run={run} onDone={p.refreshRun} />
+            <section className="stack tight">
                 <SheetHead title="Board" mark={total ? `${total} ticket${total === 1 ? "" : "s"} · ${ready} ready` : "empty"} tone={ready ? "good" : total ? "info" : "quiet"}>
                   <button className="sm" onClick={p.onImport} disabled={Boolean(p.busy)}>Import board…</button>
                   <button className="sm" onClick={p.onNewTicket} disabled={Boolean(p.busy)}>New ticket</button>
@@ -673,13 +667,12 @@ const PlanBody = (p: BodyProps) => {
                 {total === 0 ? (
                   <div className="card empty-state">
                     <h3>No tickets yet</h3>
-                    <p>Paste a board or write tickets by hand. Or initialize first and let the planner draft them: it reads the repositories, so it needs the box. Working toward a goal instead of a board is a session setting (How tickets are worked, below).</p>
+                    <p>Paste a board or write tickets by hand. Or initialize first and let the planner draft them: it reads the repositories, so it needs the box. With a goal written above, the lead can also start without tickets.</p>
                   </div>
                 ) : (
                   <BoardView board={board} inbox={inbox} run={run} active={active} clock={ticketClock(session)} openId={p.ticketId} onOpen={p.openTicket} onRetry={onRetry} onApprove={onApprove} onShowLog={p.setLogTicket} />
                 )}
               </section>
-            )}
 
             <section className="card stack" style={{ gap: 10 }}>
               <SheetHead title="Environment" mark={worker ? `setup worker · ${session.setupScripts.length} recipe${session.setupScripts.length === 1 ? "" : "s"}` : `setup skipped · ${session.setupScripts.length} recipe${session.setupScripts.length === 1 ? "" : "s"}`} tone="quiet" />
@@ -1819,10 +1812,10 @@ const PlanDialog = ({ session, busy, onCancel, onPlan }: { session: Session; bus
 // --- goal mode ----------------------------------------------------------------
 
 /**
- * Goal mode's brief, where the board would be: the goal text (editable at
- * any time; the next round reads it, a running worker is told), the
- * worker's claim that it is met, its plan and progress note, and the
- * earlier goals this session worked.
+ * The goal above the board: the text the lead works toward beside the
+ * tickets (editable at any time; the next life reads it, a running lead is
+ * told), the lead's claim that it is met, its plan and progress note, and
+ * the earlier goals this session worked.
  */
 const GoalPanel = ({ session, base, active, run, onDone }: { session: Session; base: string; active: boolean; run?: Run; onDone: () => Promise<void> }) => {
   const [text, setText] = useState(session.goal);
@@ -1858,14 +1851,14 @@ const GoalPanel = ({ session, base, active, run, onDone }: { session: Session; b
   const written = Boolean(session.goal.trim());
   return (
     <section className="card stack" style={{ gap: 10 }}>
-      <SheetHead title="Goal" mark={session.goalMet ? "met, says the worker" : written ? (active ? "working" : "set") : "not written"} tone={session.goalMet ? "good" : written ? (active ? "sig" : "info") : "warn"} />
+      <SheetHead title="Goal" mark={session.goalMet ? "met, says the lead" : written ? (active ? "working" : "set") : "none"} tone={session.goalMet ? "good" : written ? (active ? "sig" : "info") : "quiet"} />
       <p className="lead" style={{ margin: 0 }}>
-        No board. One long-lived worker works toward this text, keeps its plan in <span className="mono">notes/state.md</span>, and Verstas commits after every round until the worker says the goal is met, you pause, or a cap is reached. Edit the goal at any time: a running worker is told, and the next round reads the new text. Start again after a met goal to say "not yet".
+        Optional. One lead works toward this text and the board's tickets, keeps its plan in <span className="mono">notes/state.md</span>, and Verstas commits whatever it leaves when a lead life ends. Edit the goal at any time: a running lead is told, and the next life reads the new text. Start again after a met goal to say "not yet". Without a goal, the board is the work.
       </p>
       {session.goalMet && (
         <div className="banner good" style={{ margin: 0 }}>
           <div>
-            <strong>The worker says the goal is met</strong> <span className="muted small">{fmtAgo(session.goalMet.at, now)} · run {session.goalMet.runId}</span>
+            <strong>The lead says the goal is met</strong> <span className="muted small">{fmtAgo(session.goalMet.at, now)} · run {session.goalMet.runId}</span>
             <div className="small" style={{ whiteSpace: "pre-wrap", marginTop: 4 }}>{session.goalMet.note}</div>
           </div>
         </div>
@@ -1877,8 +1870,8 @@ const GoalPanel = ({ session, base, active, run, onDone }: { session: Session; b
           setText(e.target.value);
           setDirty(true);
         }}
-        placeholder="A Mario Party clone running in the browser: four players on a board, dice, a dozen minigames, a results screen. Or paste a specification. Say what done looks like."
-        style={{ minHeight: 160 }}
+        placeholder="A Mario Party clone running in the browser: four players on a board, dice, a dozen minigames, a results screen. Or paste a specification. Say what done looks like. Leave empty to work the board alone."
+        style={{ minHeight: written ? 160 : 72 }}
       />
       <div className="row">
         <button className="pri sm" onClick={() => void save()} disabled={busy || !dirty}>Save goal</button>
@@ -1893,11 +1886,11 @@ const GoalPanel = ({ session, base, active, run, onDone }: { session: Session; b
             Discard
           </button>
         )}
-        <span className="muted small">{msg || (written ? `set ${fmtAgo(since, now)}${goals.length ? ` · ${goals.length} earlier goal${goals.length === 1 ? "" : "s"}` : ""}` : isInitialized(session) ? "Write the goal, then Start run." : "Write the goal; Initialize creates the box.")}</span>
+        <span className="muted small">{msg || (written ? `set ${fmtAgo(since, now)}${goals.length ? ` · ${goals.length} earlier goal${goals.length === 1 ? "" : "s"}` : ""}` : "No goal: the lead works the board's tickets.")}</span>
       </div>
       <div className="small">
         <span className={`dot ${note?.text ? "good" : ""}`} /> <strong>Plan and progress note</strong>{" "}
-        <span className="muted">{note?.text ? `notes/state.md · ${note.updatedAt ? fmtAgo(note.updatedAt, now) : ""}` : "none yet; the worker writes notes/state.md as it works"}</span>{" "}
+        <span className="muted">{note?.text ? `notes/state.md · ${note.updatedAt ? fmtAgo(note.updatedAt, now) : ""}` : "none yet; the lead writes notes/state.md as it works"}</span>{" "}
         {note?.text && <button className="quiet sm" onClick={() => setShowNote(!showNote)}>{showNote ? "hide" : "view"}</button>}
         {showNote && note?.text && <pre className="mono" style={{ whiteSpace: "pre-wrap", maxHeight: 420, overflow: "auto", marginTop: 6 }}>{note.text}</pre>}
       </div>
@@ -2198,19 +2191,19 @@ const RequestItem = ({ r, onDecide, onOpenTicket }: { r: AgentRequest; onDecide:
 
 // --- board ------------------------------------------------------------------
 
-/** "12m / 25m" against the worker cap, or the elapsed time alone in lead mode. Counted from the last state change, in the browser. */
-const inProgressClock = (t: Ticket, clock: TicketView, now: number): string => {
+/** The time a ticket has been in progress, counted from the last state change, in the browser. */
+const inProgressClock = (t: Ticket, now: number): string => {
   const secs = t.stateSince ? Math.max(0, (now - new Date(t.stateSince).getTime()) / 1000) : 0;
-  return clock.capMinutes ? `${fmtSpan(secs)} / ${clock.capMinutes}m` : fmtSpan(secs);
+  return fmtSpan(secs);
 };
 
 /** "Took 42m · agent 31m · judging 3m · waiting on you 6m · requeued 2m"; the parts that are zero are left out. */
 const timingLine = (x: { total: number; agent: number; judging: number; waitingOnYou: number; requeued: number }): string =>
   [`Took ${fmtSpan(x.total)}`, `agent ${fmtSpan(x.agent)}`, x.judging >= 1 ? `judging ${fmtSpan(x.judging)}` : "", x.waitingOnYou >= 1 ? `waiting on you ${fmtSpan(x.waitingOnYou)}` : "", x.requeued >= 1 ? `requeued ${fmtSpan(x.requeued)}` : ""].filter(Boolean).join(" · ");
 
-/** What a ticket's timer is measured against: in loop mode the worker cap applies to one ticket; a lead's cap spans tickets, so there is none. */
-type TicketView = { mode: "loop" | "lead"; capMinutes?: number; /** The session's review mode, for tickets that set none. */ review: ReviewMode };
-const ticketClock = (session: Session): TicketView => ({ ...(session.mode === "lead" ? { mode: "lead" as const } : { mode: "loop" as const, capMinutes: session.caps.workerMinutes }), review: session.caps.reviewer ? "full" : "none" });
+/** What the board's cards need from the session: the session's review mode, for tickets that set none. */
+type TicketView = { review: ReviewMode };
+const ticketClock = (session: Session): TicketView => ({ review: session.caps.reviewer ? "full" : "none" });
 
 const BoardView = ({ board, inbox, run, active, clock, openId, onOpen, onRetry, onApprove, onShowLog }: { board: Board; inbox: Inbox; run?: Run; active: boolean; clock: TicketView; openId: string | null; onOpen: (tid: string) => void; onRetry: (tid: string) => void; onApprove: (tid: string) => void; onShowLog: (tid: string) => void }) => {
   const doneIds = new Set(board.tickets.filter((t) => t.state === "done").map((t) => t.id));
@@ -2243,7 +2236,7 @@ const TicketCard = ({ t, clock, doneIds, request, active, open, onOpen, onRetry,
   const depsOk = depsDone === t.deps.length;
   const lastNote = t.notes[t.notes.length - 1];
   const now = useNow();
-  const timing = t.state === "done" || t.state === "in_progress" ? ticketTiming(t, clock.mode, now) : null;
+  const timing = t.state === "done" || t.state === "in_progress" ? ticketTiming(t, now) : null;
   return (
     <button className={`tk ${t.state} ${active ? "active" : ""} ${open ? "open" : ""}`} onClick={onOpen} aria-label={`${t.id} ${t.title}`}>
       <div className="id">
@@ -2259,7 +2252,7 @@ const TicketCard = ({ t, clock, doneIds, request, active, open, onOpen, onRetry,
       {(t.deps.length > 0 || t.attempts > 0 || t.diff || active || timing) && (
         <div className="meta">
           {active && <span className="pill sig">working</span>}
-          {timing && t.state === "in_progress" && <span className="pill quiet mono" title="Time on this ticket since it was claimed">{inProgressClock(t, clock, now)}</span>}
+          {timing && t.state === "in_progress" && <span className="pill quiet mono" title="Time on this ticket since it was claimed">{inProgressClock(t, now)}</span>}
           {timing && t.state === "done" && <span className="pill quiet mono" title={timingLine(timing)}>{fmtSpan(timing.total)}</span>}
           {t.deps.length > 0 && <span className={`pill ${depsOk ? "quiet" : t.state === "ready" ? "sig" : "quiet"}`} title={`Depends on ${t.deps.join(", ")}`}>deps {depsDone}/{t.deps.length}</span>}
           {t.attempts > 1 && <span className="pill quiet">attempt {t.attempts}</span>}
@@ -2686,7 +2679,7 @@ const requestSummary = (r: AgentRequest): string => r.summary.split("\n")[0]!.sl
 
 // --- settings --------------------------------------------------------------
 
-type SettingsPatch = { allowlist?: string[]; packs?: string[]; caps?: Partial<Session["caps"]>; limits?: Partial<Session["limits"]>; mode?: Session["mode"]; planning?: Session["planning"] | null };
+type SettingsPatch = { allowlist?: string[]; packs?: string[]; caps?: Partial<Omit<Session["caps"], "leadMinutes" | "leadTurns">> & { /** null clears the cap. */ leadMinutes?: number | null; leadTurns?: number | null }; limits?: Partial<Session["limits"]>; planning?: Session["planning"] | null };
 
 /** What each ticket size means; mirrors TICKET_SIZE_GUIDE in src/core/types.ts. */
 const TICKET_SIZE_HELP: Record<"S" | "M" | "L", string> = {
@@ -2695,18 +2688,17 @@ const TICKET_SIZE_HELP: Record<"S" | "M" | "L", string> = {
   L: "a whole feature one reviewer can still judge in one pass; ~800–2,000 lines, 45–120 min",
 };
 const CAP_HELP: Record<string, string> = {
-  workerMinutes: "Wall-clock cap for one worker",
-  workerTurns: "Model turns per worker",
-  budgetUsd: "Spend cap per worker",
+  workerMinutes: "Wall-clock cap for the reviewer of one ticket (and for setup and Ask the box)",
+  workerTurns: "Model turns for the reviewer of one ticket",
+  budgetUsd: "Spend cap per run",
   runTickets: "Tickets per run before it pauses",
-  ticketAttempts: "Tries before a ticket is blocked",
-  leadMinutes: "Wall-clock life of one lead; then a fresh one takes over",
-  leadTurns: "Model turns per lead; then a fresh one takes over",
+  leadMinutes: "Optional: wall-clock life of one lead; then a fresh one takes over from the note. Empty: no cap",
+  leadTurns: "Optional: model turns per lead life; then a fresh one takes over. Empty: no cap",
   sweepMaxLines: "A chore sweep's commit may change at most this many lines; over it the sweep is refused",
   sweepMaxFiles: "Files a chore sweep's commit may touch",
   choreSweepAt: "Open chores at which the lead must sweep before its next ticket (0: never forced)",
-  goalRounds: "Rounds (one worker, start to exit, then a commit) per run before it pauses for a look",
-  progressMinutes: "Every this many minutes the worker posts a short progress update to the inbox (Claude Code workers only; 0: never)",
+  goalRounds: "Lead lives (one lead, start to exit, then a commit of what it left) per run before it pauses for a look",
+  progressMinutes: "Every this many minutes the lead posts a short progress update to the inbox (Claude Code only; 0: never)",
 };
 
 /**
@@ -2722,12 +2714,9 @@ const SessionSettings = ({ session, onSave, part = "all" }: { session: Session; 
     workerTurns: String(session.caps.workerTurns),
     budgetUsd: String(session.caps.budgetUsd),
     runTickets: String(session.caps.runTickets),
-    ticketAttempts: String(session.caps.ticketAttempts),
     reviewer: session.caps.reviewer,
-    resumeWorker: session.caps.resumeWorker ?? false,
-    mode: session.mode ?? "loop",
-    leadMinutes: String(session.caps.leadMinutes ?? 180),
-    leadTurns: String(session.caps.leadTurns ?? 600),
+    leadMinutes: session.caps.leadMinutes ? String(session.caps.leadMinutes) : "",
+    leadTurns: session.caps.leadTurns ? String(session.caps.leadTurns) : "",
     sweepMaxLines: String(session.caps.sweepMaxLines ?? 400),
     sweepMaxFiles: String(session.caps.sweepMaxFiles ?? 15),
     choreSweepAt: String(session.caps.choreSweepAt ?? 10),
@@ -2750,7 +2739,7 @@ const SessionSettings = ({ session, onSave, part = "all" }: { session: Session; 
     setF(fromSession());
     setState("clean");
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [session.allowlist, session.packs, session.caps, session.limits, session.mode, session.planning]);
+  }, [session.allowlist, session.packs, session.caps, session.limits, session.planning]);
   const set = <K extends keyof ReturnType<typeof fromSession>>(k: K, v: ReturnType<typeof fromSession>[K]) => {
     setF({ ...f, [k]: v });
     setState("dirty");
@@ -2762,9 +2751,8 @@ const SessionSettings = ({ session, onSave, part = "all" }: { session: Session; 
         ...(part !== "caps" ? { allowlist: f.allow.split(/\n/).map((s) => s.trim()).filter(Boolean), packs: f.packs } : {}),
         ...(part !== "network"
           ? {
-              caps: { workerMinutes: Number(f.workerMinutes), workerTurns: Number(f.workerTurns), budgetUsd: Number(f.budgetUsd), runTickets: Number(f.runTickets), ticketAttempts: Number(f.ticketAttempts), reviewer: f.reviewer, resumeWorker: f.resumeWorker, leadMinutes: Number(f.leadMinutes), leadTurns: Number(f.leadTurns), sweepMaxLines: Number(f.sweepMaxLines), sweepMaxFiles: Number(f.sweepMaxFiles), choreApproval: f.choreApproval, choreSweepAt: Number(f.choreSweepAt), goalRounds: Number(f.goalRounds), progressMinutes: Number(f.progressMinutes) },
+              caps: { workerMinutes: Number(f.workerMinutes), workerTurns: Number(f.workerTurns), budgetUsd: Number(f.budgetUsd), runTickets: Number(f.runTickets), reviewer: f.reviewer, leadMinutes: f.leadMinutes.trim() ? Number(f.leadMinutes) : null, leadTurns: f.leadTurns.trim() ? Number(f.leadTurns) : null, sweepMaxLines: Number(f.sweepMaxLines), sweepMaxFiles: Number(f.sweepMaxFiles), choreApproval: f.choreApproval, choreSweepAt: Number(f.choreSweepAt), goalRounds: Number(f.goalRounds), progressMinutes: Number(f.progressMinutes) },
               limits: { memory: f.memory, cpus: Number(f.cpus) },
-              mode: f.mode,
               // Nothing chosen clears the block: planning agents then size tickets themselves, as before.
               planning: f.ticketSize || f.sizeGuidance.trim() ? { ticketSize: f.ticketSize || undefined, guidance: f.sizeGuidance.trim() || undefined } : null,
             }
@@ -2799,34 +2787,10 @@ const SessionSettings = ({ session, onSave, part = "all" }: { session: Session; 
         </label>
       )}
       {part !== "network" && (
-        <label>
-          How tickets are worked
-          <span className="help">{f.mode === "lead" ? "One lead agent works the board: it picks the order, claims and submits tickets, and hands over to a fresh lead when its context gets noisy. Every ticket is still judged and committed by Verstas." : f.mode === "goal" ? "No board and no reviewer: one long-lived worker works toward the session's goal text, keeps its plan in notes/state.md, hands over to a fresh worker when its context gets noisy, and Verstas commits after every round until the worker says the goal is met, you pause, or the round cap." : "Verstas picks each ready ticket and starts a fresh implementer for it."} Applies to the next run.</span>
-          <select value={f.mode} onChange={(e) => set("mode", e.target.value as "loop" | "lead" | "goal")}>
-            <option value="loop">One worker per ticket</option>
-            <option value="lead">A lead works the board</option>
-            <option value="goal">A worker works toward a goal</option>
-          </select>
-        </label>
-      )}
-      {part !== "network" && f.mode === "goal" && (
-        <div className="two">
-          {(["leadMinutes", "leadTurns", "goalRounds", "budgetUsd", "progressMinutes"] as const).map((k) => (
-            <label key={k}>
-              {{ leadMinutes: "Worker minutes", leadTurns: "Worker turns", goalRounds: "Rounds per run", budgetUsd: "Budget USD per worker", progressMinutes: "Progress update every (min)" }[k]}
-              <span className="help">{k === "leadMinutes" ? "Wall-clock life of one goal worker; then a fresh one takes over from the note" : k === "leadTurns" ? "Model turns per goal worker; then a fresh one takes over" : CAP_HELP[k]}</span>
-              <input type="number" min={k === "progressMinutes" ? 0 : 1} value={f[k]} onChange={(e) => set(k, e.target.value)} />
-            </label>
-          ))}
-          <label>Memory <span className="help">Container limit, e.g. 4g</span><input value={f.memory} onChange={(e) => set("memory", e.target.value)} /></label>
-          <label>CPUs<input type="number" step="0.5" min={0.5} value={f.cpus} onChange={(e) => set("cpus", e.target.value)} /></label>
-        </div>
-      )}
-      {part !== "network" && f.mode !== "goal" && (
         <div className="two">
           <label>
             Ticket size
-            <span className="help" title="Every ticket pays a fixed cost (a worker reads in, a reviewer runs the checks and reads in, a commit), so fewer, larger tickets run faster.">What the planner and agent terminals aim for. {f.ticketSize ? `${TICKET_SIZE_HELP[f.ticketSize]}.` : "Not set: they choose."}{f.ticketSize === "L" && f.mode !== "lead" && Number(f.workerMinutes) < 60 ? " Raise worker minutes to 60+ for L." : ""}</span>
+            <span className="help" title="Every ticket pays a fixed cost (a reviewer runs the checks and reads in, a commit), so fewer, larger tickets run faster.">What the planner and agent terminals aim for. {f.ticketSize ? `${TICKET_SIZE_HELP[f.ticketSize]}.` : "Not set: they choose."}</span>
             <select value={f.ticketSize} onChange={(e) => set("ticketSize", e.target.value as "" | "S" | "M" | "L")}>
               <option value="">Not set</option>
               <option value="S">S · small</option>
@@ -2838,25 +2802,23 @@ const SessionSettings = ({ session, onSave, part = "all" }: { session: Session; 
             How to cut the work <span className="help">Optional, in your words.</span>
             <input value={f.sizeGuidance} placeholder="e.g. one species per ticket" onChange={(e) => set("sizeGuidance", e.target.value)} />
           </label>
-          {f.mode === "lead" &&
-            (["leadMinutes", "leadTurns", "sweepMaxLines", "sweepMaxFiles", "choreSweepAt"] as const).map((k) => (
-              <label key={k}>
-                {{ leadMinutes: "Lead minutes", leadTurns: "Lead turns", sweepMaxLines: "Chore sweep: max lines", sweepMaxFiles: "Chore sweep: max files", choreSweepAt: "Chores: sweep at" }[k]}
-                <span className="help">{CAP_HELP[k]}</span>
-                <input type="number" min={k === "choreSweepAt" ? 0 : 1} value={f[k]} onChange={(e) => set(k, e.target.value)} />
-              </label>
-            ))}
-          {(["workerMinutes", "workerTurns", "budgetUsd", "runTickets", "ticketAttempts"] as const).map((k) => (
+          {(["leadMinutes", "leadTurns"] as const).map((k) => (
             <label key={k}>
-              {{ workerMinutes: "Worker minutes", workerTurns: "Worker turns", budgetUsd: "Budget USD per worker", runTickets: "Tickets per run", ticketAttempts: "Attempts per ticket" }[k]}
+              {{ leadMinutes: "Lead minutes (optional)", leadTurns: "Lead turns (optional)" }[k]}
               <span className="help">{CAP_HELP[k]}</span>
-              <input type="number" min={1} value={f[k]} onChange={(e) => set(k, e.target.value)} />
+              <input type="number" min={k === "leadMinutes" ? 10 : 20} placeholder="no cap" value={f[k]} onChange={(e) => set(k, e.target.value)} />
+            </label>
+          ))}
+          {(["budgetUsd", "goalRounds", "progressMinutes", "runTickets", "workerMinutes", "workerTurns", "sweepMaxLines", "sweepMaxFiles", "choreSweepAt"] as const).map((k) => (
+            <label key={k}>
+              {{ budgetUsd: "Budget USD per run", goalRounds: "Lead lives per run", progressMinutes: "Progress update every (min)", runTickets: "Tickets per run", workerMinutes: "Reviewer minutes", workerTurns: "Reviewer turns", sweepMaxLines: "Chore sweep: max lines", sweepMaxFiles: "Chore sweep: max files", choreSweepAt: "Chores: sweep at" }[k]}
+              <span className="help">{CAP_HELP[k]}</span>
+              <input type="number" min={k === "progressMinutes" || k === "choreSweepAt" ? 0 : 1} value={f[k]} onChange={(e) => set(k, e.target.value)} />
             </label>
           ))}
           <div style={{ alignSelf: "end", display: "grid", gap: 6 }}>
-          <label className="chk"><input type="checkbox" checked={f.reviewer} onChange={(e) => set("reviewer", e.target.checked)} /> Reviewer pass after each ticket</label>
-          <label className="chk" title="Chores filed by reviewers and workers wait for your approval before a sweep may take them. Off: they are swept as they come."><input type="checkbox" checked={f.choreApproval} onChange={(e) => set("choreApproval", e.target.checked)} /> Approve workers' chores before they are swept</label>
-          {f.mode !== "lead" && <label className="chk" title="Claude Code only. The next ticket's implementer continues the previous one's conversation instead of re-reading the repositories. The reviewer always starts fresh."><input type="checkbox" checked={f.resumeWorker} onChange={(e) => set("resumeWorker", e.target.checked)} /> Implementers continue one conversation</label>}
+            <label className="chk" title="An independent reviewer judges every ticket the lead moves to review; off, the lead moves tickets to done itself."><input type="checkbox" checked={f.reviewer} onChange={(e) => set("reviewer", e.target.checked)} /> Independent review of each ticket</label>
+            <label className="chk" title="Chores filed by reviewers and workers wait for your approval before a sweep may take them. Off: they are swept as they come."><input type="checkbox" checked={f.choreApproval} onChange={(e) => set("choreApproval", e.target.checked)} /> Approve workers' chores before they are swept</label>
           </div>
           <label>Memory <span className="help">Container limit, e.g. 4g</span><input value={f.memory} onChange={(e) => set("memory", e.target.value)} /></label>
           <label>CPUs<input type="number" step="0.5" min={0.5} value={f.cpus} onChange={(e) => set("cpus", e.target.value)} /></label>
@@ -2890,8 +2852,8 @@ const TicketDrawer = ({ ticket, board, repoNames, clock, held, sessionId, onClos
   const [note, setNote] = useState("");
   const neededBy = board.tickets.filter((t) => t.deps.includes(ticket.id));
   const now = useNow();
-  const timing = ticketTiming(ticket, clock.mode, now);
-  const drawerTiming = !timing ? "" : ticket.state === "done" ? timingLine(timing) : ticket.state === "in_progress" ? `Working for ${inProgressClock(ticket, clock, now)} · ${fmtSpan(timing.total)} since the first claim` : "";
+  const timing = ticketTiming(ticket, now);
+  const drawerTiming = !timing ? "" : ticket.state === "done" ? timingLine(timing) : ticket.state === "in_progress" ? `Working for ${inProgressClock(ticket, now)} · ${fmtSpan(timing.total)} since the first claim` : "";
   const [edit, setEdit] = useState(false);
   const toDraft = (t: Ticket) => ({ title: t.title, spec: t.spec, acceptance: t.acceptance.join("\n"), priority: t.priority, size: t.size, repos: t.repos, deps: t.deps.join(", "), agentDriver: t.agent?.driver ?? "", agentModel: t.agent?.model ?? "", review: t.review ?? "" });
   const [draft, setDraft] = useState(toDraft(ticket));

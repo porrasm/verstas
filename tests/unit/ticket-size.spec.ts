@@ -27,7 +27,7 @@ test("a ticket size steers the planner and the terminal agent; guidance alone ke
   expect(guidanceOnly).toContain("How the user wants the work cut: by module");
   expect(guidanceOnly).not.toContain("Aim for");
   // Other roles never carry it.
-  expect(systemMd("implementer", undefined, { ticketSize: "L" })).not.toContain("Ticket size for this session");
+  expect(systemMd("reviewer", undefined, { ticketSize: "L" })).not.toContain("Ticket size for this session");
   expect(terminalMd({ planning: { ticketSize: "M" } }, "claude")).toContain(`Aim for M: ${TICKET_SIZE_GUIDE.M}.`);
   expect(terminalMd({}, "codex")).not.toContain("Ticket size for this session");
 });

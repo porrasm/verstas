@@ -18,13 +18,13 @@ const base = { id: "s-1", name: "s", goal: "", createdAt: "2026-10-03T00:00:00.0
 
 test("agentFor: no agents means Claude with the legacy model for every role; a reviewer agent applies to the reviewer only", () => {
   const legacy = sessionSchema.parse({ ...base, model: "sonnet" });
-  expect(agentFor(legacy, "implementer")).toEqual({ driver: "claude", model: "sonnet" });
+  expect(agentFor(legacy, "lead")).toEqual({ driver: "claude", model: "sonnet" });
   expect(agentFor(legacy, "reviewer")).toEqual({ driver: "claude", model: "sonnet" });
   expect(agentFor(legacy, "planner")).toEqual({ driver: "claude", model: "sonnet" });
   expect(sessionDrivers(legacy)).toEqual(["claude"]);
 
   const mixed = sessionSchema.parse({ ...base, agents: { worker: { driver: "codex", model: "gpt-5.1-codex" }, reviewer: { driver: "claude" } } });
-  expect(agentFor(mixed, "implementer")).toEqual({ driver: "codex", model: "gpt-5.1-codex" });
+  expect(agentFor(mixed, "lead")).toEqual({ driver: "codex", model: "gpt-5.1-codex" });
   expect(agentFor(mixed, "setup").driver).toBe("codex");
   expect(agentFor(mixed, "reviewer")).toEqual({ driver: "claude", model: undefined });
   expect(sessionDrivers(mixed)).toEqual(["codex", "claude"]);
@@ -84,7 +84,7 @@ test("credential lines are stored, never logged; everything else flows as before
   stream.write(JSON.stringify({ kind: "status", t: "t", text: "hi" }) + "\n");
   stream.write(JSON.stringify({ kind: "credential", driver: "codex", value: '{"tokens":{"access_token":"new"}}' }) + "\n");
   stream.write(JSON.stringify({ kind: "credential", driver: "nope", value: "x" }) + "\n"); // unknown driver: dropped
-  stream.write(JSON.stringify({ kind: "worker_done", t: "t", role: "implementer", ok: true, stopReason: "success", rateLimited: false, costUsd: 0, turns: 1, seconds: 1, text: "", stderr: "" }) + "\n");
+  stream.write(JSON.stringify({ kind: "worker_done", t: "t", role: "lead", ok: true, stopReason: "success", rateLimited: false, costUsd: 0, turns: 1, seconds: 1, text: "", stderr: "" }) + "\n");
   stream.end();
   const done = await reading;
   expect(done?.ok).toBe(true);
@@ -101,7 +101,7 @@ test("codex driver: config.toml declares the board server with the env it needs,
   expect(toml).toContain("[mcp_servers.board]\ncommand = \"node\"\nargs = [\"/opt/verstas/mcp-server.js\"]");
   expect(toml).toContain("[mcp_servers.board.env]\nVERSTAS_AGENT_API = \"http://host.docker.internal:4701/agent\"\nVERSTAS_RUN_TOKEN = \"run-1\"\nHTTP_PROXY = \"http://proxy:3128\"");
   expect(toml).not.toContain("HOME");
-  const job: Job = { role: "implementer", driver: "codex", promptFile: "p", systemPromptFile: "s", caps: { minutes: 1, turns: 1, budgetUsd: 1 }, mcpConfigFile: "m", model: "gpt-5.1-codex" };
+  const job: Job = { role: "lead", driver: "codex", promptFile: "p", systemPromptFile: "s", caps: { minutes: 1, turns: 1, budgetUsd: 1 }, mcpConfigFile: "m", model: "gpt-5.1-codex" };
   expect(codexArgs(job)).toEqual(["exec", "--json", "--skip-git-repo-check", "-m", "gpt-5.1-codex", "-"]);
   expect(codexArgs({ ...job, model: undefined })).toEqual(["exec", "--json", "--skip-git-repo-check", "-"]);
   expect(cursorArgs({ ...job, driver: "cursor", model: "auto" }, "do it")).toEqual(["-p", "--output-format", "stream-json", "--force", "--model", "auto", "do it"]);
@@ -113,7 +113,7 @@ test("codex driver: writes the login into a private home, hands back a rotated o
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "verstas-drv-"));
   const mcp = path.join(dir, "mcp.json");
   await fs.writeFile(mcp, JSON.stringify({ mcpServers: { board: { command: "node", args: ["x.js"] } } }));
-  const job: Job = { role: "implementer", driver: "codex", promptFile: "p", systemPromptFile: "s", caps: { minutes: 1, turns: 1, budgetUsd: 1 }, mcpConfigFile: mcp, cwd: dir };
+  const job: Job = { role: "lead", driver: "codex", promptFile: "p", systemPromptFile: "s", caps: { minutes: 1, turns: 1, budgetUsd: 1 }, mcpConfigFile: mcp, cwd: dir };
   const before = process.env.VERSTAS_CODEX_AUTH;
   process.env.VERSTAS_CODEX_AUTH = '{"tokens":{"access_token":"old"}}';
   try {
@@ -206,7 +206,7 @@ test("worker: a driver whose CLI is not installed ends with driver_missing inste
 });
 
 test("claude keeps a conversation only when the job names one: a new id, or a resume", () => {
-  const base = { role: "implementer", promptFile: "/p", systemPromptFile: "/s", caps: { minutes: 1, turns: 1, budgetUsd: 1 }, mcpConfigFile: "/m" } as Job;
+  const base = { role: "lead", promptFile: "/p", systemPromptFile: "/s", caps: { minutes: 1, turns: 1, budgetUsd: 1 }, mcpConfigFile: "/m" } as Job;
   const throwaway = claudeArgs(base);
   expect(throwaway).toContain("--no-session-persistence");
   expect(throwaway).not.toContain("--resume");
@@ -231,7 +231,7 @@ test("worker: the budget file tracks turns and the context size, and the agent i
     `#!/bin/sh\nread -r first\necho '${assistant(1000)}'\necho '${assistant(4000)}'\necho "{\\"type\\":\\"result\\",\\"subtype\\":\\"success\\",\\"result\\":\\"$VERSTAS_BUDGET_FILE\\",\\"total_cost_usd\\":0.2,\\"num_turns\\":2}"\ncat >/dev/null\n`,
     { mode: 0o755 },
   );
-  const job: Job = { role: "implementer", ticket: "T-1", promptFile: path.join(dir, "p.md"), systemPromptFile: path.join(dir, "s.md"), caps: { minutes: 5, turns: 20, budgetUsd: 1 }, mcpConfigFile: path.join(dir, "m.json"), cwd: dir, binary: bin, budgetFile };
+  const job: Job = { role: "lead", ticket: "T-1", promptFile: path.join(dir, "p.md"), systemPromptFile: path.join(dir, "s.md"), caps: { minutes: 5, turns: 20, budgetUsd: 1 }, mcpConfigFile: path.join(dir, "m.json"), cwd: dir, binary: bin, budgetFile };
   const lines: string[] = [];
   const orig = process.stdout.write.bind(process.stdout);
   (process.stdout as unknown as { write: (s: string) => boolean }).write = (s: string) => {
@@ -241,7 +241,7 @@ test("worker: the budget file tracks turns and the context size, and the agent i
   try {
     const savedEnv = { role: process.env.VERSTAS_ROLE, budget: process.env.VERSTAS_BUDGET_FILE };
     expect(await runJob(job)).toBe(0);
-    expect(process.env.VERSTAS_ROLE).toBe("implementer");
+    expect(process.env.VERSTAS_ROLE).toBe("lead");
     if (savedEnv.role === undefined) delete process.env.VERSTAS_ROLE; else process.env.VERSTAS_ROLE = savedEnv.role;
     if (savedEnv.budget === undefined) delete process.env.VERSTAS_BUDGET_FILE; else process.env.VERSTAS_BUDGET_FILE = savedEnv.budget;
     const budget = JSON.parse(await fs.readFile(budgetFile, "utf8")) as Record<string, unknown>;
@@ -274,7 +274,7 @@ const captureRun = async (job: Job, io?: { input?: NodeJS.ReadableStream }) => {
 };
 
 test("claude streams its input: the prompt is the first user message and stdin stays open", async () => {
-  const job = { role: "implementer", promptFile: "/p", systemPromptFile: "/s", caps: { minutes: 1, turns: 1, budgetUsd: 1 }, mcpConfigFile: "/m" } as Job;
+  const job = { role: "lead", promptFile: "/p", systemPromptFile: "/s", caps: { minutes: 1, turns: 1, budgetUsd: 1 }, mcpConfigFile: "/m" } as Job;
   const args = claudeArgs(job);
   expect(args.slice(args.indexOf("--input-format"), args.indexOf("--input-format") + 2)).toEqual(["--input-format", "stream-json"]);
   const spawned = await DRIVER_IMPLS.claude.prepare(job, "do the ticket", "rules", "/usr/bin/claude");
@@ -357,7 +357,7 @@ echo '{"type":"assistant","message":{"content":[{"type":"text","text":"done"}]}}
 echo '{"type":"result","subtype":"success","result":"done","total_cost_usd":0.05,"num_turns":1}'
 cat >/dev/null
 `, { mode: 0o755 });
-  const job: Job = { role: "implementer", ticket: "T-1", promptFile: path.join(dir, "p.md"), systemPromptFile: path.join(dir, "s.md"), caps: { minutes: 5, turns: 20, budgetUsd: 1 }, mcpConfigFile: path.join(dir, "m.json"), cwd: dir, binary: bin };
+  const job: Job = { role: "lead", ticket: "T-1", promptFile: path.join(dir, "p.md"), systemPromptFile: path.join(dir, "s.md"), caps: { minutes: 5, turns: 20, budgetUsd: 1 }, mcpConfigFile: path.join(dir, "m.json"), cwd: dir, binary: bin };
   try {
     const t0 = Date.now();
     const { code, events } = await captureRun(job, { input: new PassThrough() });

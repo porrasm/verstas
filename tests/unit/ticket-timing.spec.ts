@@ -41,11 +41,10 @@ test("transition adds up the time of every visit to a state and remembers the fi
   expect(t.stateSince).toBe(plus(27));
   expect(t.timeIn).toEqual({ ready: 8 * 60, in_progress: 17 * 60, review: 2 * 60 });
   expect(t.readyBeforeClaim).toBe(5 * 60);
-  // A loop run: the workers reported 15 min between them.
-  const loop = ticketTiming({ ...t, agentSeconds: 15 * 60 }, "loop", plus(90))!;
-  expect(loop).toEqual({ working: 17 * 60, judging: 2 * 60, waitingOnYou: 0, requeued: 3 * 60, agent: 15 * 60, total: 22 * 60 });
-  // A lead: its time in in_progress, plus the reviewer's 2 min.
-  const lead = ticketTiming({ ...t, agentSeconds: 2 * 60 }, "lead", plus(90))!;
+  // The lead's time is its time in in_progress, plus what the reviewer reported (15 min here).
+  const x = ticketTiming({ ...t, agentSeconds: 15 * 60 }, plus(90))!;
+  expect(x).toEqual({ working: 17 * 60, judging: 2 * 60, waitingOnYou: 0, requeued: 3 * 60, agent: 32 * 60, total: 22 * 60 });
+  const lead = ticketTiming({ ...t, agentSeconds: 2 * 60 }, plus(90))!;
   expect(lead.agent).toBe(19 * 60);
   expect(lead.total).toBe(22 * 60);
 });
@@ -54,19 +53,19 @@ test("an open ticket counts its current visit up to now; waiting is time on you"
   let b: Board = at(t0, () => importBoard(emptyBoard(), { tickets: [{ id: "T-1", title: "Engine", state: "ready" }] }).board);
   b = at(t0, () => transition(b, "T-1", "in_progress"));
   b = at(plus(4), () => transition(b, "T-1", "waiting"));
-  const x = ticketTiming(getTicket(b, "T-1"), "loop", plus(64))!;
+  const x = ticketTiming(getTicket(b, "T-1"), plus(64))!;
   expect(x.waitingOnYou).toBe(60 * 60);
   expect(x.working).toBe(4 * 60);
   expect(x.total).toBe(64 * 60);
   // Never claimed: no timing yet.
   const fresh = at(t0, () => importBoard(emptyBoard(), { tickets: [{ id: "T-2", title: "x" }] }).board);
-  expect(ticketTiming(getTicket(fresh, "T-2"), "loop")).toBeNull();
+  expect(ticketTiming(getTicket(fresh, "T-2"))).toBeNull();
 });
 
 test("a ticket from before timing parses, shows nothing, and starts its clock at its next move", () => {
   const old = ticketSchema.parse({ id: "T-1", title: "Old", state: "ready", createdAt: t0, updatedAt: t0 });
   expect(old.stateSince).toBeUndefined();
-  expect(ticketTiming(old, "lead")).toBeNull();
+  expect(ticketTiming(old)).toBeNull();
   const b: Board = { ...emptyBoard(), tickets: [old] };
   const moved = getTicket(at(plus(3), () => transition(b, "T-1", "in_progress")), "T-1");
   expect(moved.stateSince).toBe(plus(3));

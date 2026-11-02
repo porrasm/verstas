@@ -5,7 +5,6 @@ import {
   actionDetailSchema,
   choreIdSchema,
   choreStateSchema,
-  describeAgent,
   ideaSchema,
   messageSchema,
   now,
@@ -16,6 +15,7 @@ import {
   ticketImportSchema,
   ticketKindSchema,
   ticketSizeSchema,
+  ticketStateSchema,
   importRepos,
   type AgentRequest,
   type Board,
@@ -23,7 +23,7 @@ import {
   type SweepResult,
   type Ticket,
 } from "../core/types.js";
-import { addChore, addNote, agentAddDep, agentSetPriority, beginSweep, BoardError, canStart, deleteTicket, editTicket, getTicket, importBoard, openChores, replaceTicket, setChoreState, sweepInFlight, sweepToJudging, transition, validateRepos, type AgentRole } from "../board/board.js";
+import { addChore, addNote, agentAddDep, agentSetPriority, beginSweep, BoardError, deleteTicket, editTicket, getTicket, importBoard, openChores, replaceTicket, setChoreState, sweepInFlight, sweepToJudging, transition, validateRepos, type AgentRole } from "../board/board.js";
 import type { SessionHub } from "../sessions/hub.js";
 import type { Artifact } from "../sessions/artifacts.js";
 
@@ -44,23 +44,23 @@ export type RunToken = {
 };
 
 /**
- * What the run behind a lead's token does when the lead drives the board
- * (src/harness/run.ts implements it). Without it, claim, submit and
+ * What the run behind the lead's token does when the lead drives the board
+ * (src/harness/run.ts implements it). Without it, moves, `done` and
  * handoff are refused: there is no run to judge or hand over.
  */
 export type AgentRunHooks = {
-  /** The lead submitted the ticket it holds; the run judges it (reviewer, commit, the move out of review). */
+  /** The lead moved a ticket to review; the run judges it (the reviewer, the move out of review). */
   submitted(run: RunToken, ticketId: string): void;
-  /** The lead (or the goal worker) asked to end its worker and hand over to a fresh one with this note. */
+  /** The lead asked to end its life and hand over to a fresh lead with this note. */
   handoff(run: RunToken, note: string): void;
-  /** The goal worker says the goal is met, with its assessment; the run ends after this round and the claim is kept on the session. */
-  goalDone?(run: RunToken, note: string): void;
-  /** Why the lead may not claim now (the run is pausing, the ticket cap is reached), or undefined. */
-  claimRefusal?(run: RunToken): string | undefined;
-  /** The lead filed a request or a halt on the ticket it holds; the run parks the ticket so the lead can move on. */
+  /** The lead says the goal is met (or the board is finished), with its assessment; the run ends after this life when nothing is left to start. */
+  done?(run: RunToken, note: string): void;
+  /** Why the lead may not start another ticket now (the run is pausing, it handed off), or undefined. */
+  moveRefusal?(run: RunToken): string | undefined;
+  /** The lead filed a request or a halt on a ticket in progress; the run parks that ticket so the lead can move on. */
   requested?(run: RunToken, ticketId: string): void;
-  /** The lead handed a ticket that names its own agent to the harness: a fresh implementer on that agent works it, then the judge. */
-  delegated?(run: RunToken, ticketId: string): void;
+  /** Each repository's HEAD now: the baseline of a ticket entering in_progress, which the review reads from. */
+  baseline?(sessionId: string): Promise<Record<string, string>>;
   /** The lead took a batch of chores (board.sweep is now `working`). */
   sweepStarted?(run: RunToken, ids: string[]): void;
   /** The lead submitted its sweep with one result per chore; the run judges it (size, the reviewer, commit) and settles the chores. */
@@ -71,14 +71,7 @@ export type AgentRunHooks = {
   publishArtifact?(run: RunToken, boxPath: string, name?: string): Promise<Artifact>;
 };
 
-/** The chore list at the session's sweep line: the lead sweeps (or drops) before it starts another ticket. */
-const choreBacklogRefusal = (d: { session: { caps: { choreSweepAt: number } }; board: Board }): void => {
-  const at = d.session.caps.choreSweepAt;
-  const n = openChores(d.board).length;
-  if (at > 0 && n >= at) throw new BoardError(`${n} chores are open and the session sweeps at ${at}: take a batch with chores_sweep (and chores_submit), or chore_drop what is not worth doing, before the next ticket`, "forbidden_move");
-};
-
-/** States in which a ticket still belongs to the lead that claimed it. */
+/** States in which a ticket is the lead's current one: what it files attaches to it. */
 const HELD = new Set(["in_progress", "review"]);
 
 export class RunTokens {
@@ -139,9 +132,9 @@ export const createAgentApi = (hub: SessionHub, tokens: RunTokens, hooks?: Agent
       next();
       return;
     }
-    // A lead's token keeps the last ticket it claimed. Once that ticket is
-    // settled (done, back to ready, parked, blocked) the lead holds nothing,
-    // and what it files next must not be attached to that ticket.
+    // The lead's token keeps the last ticket it moved into progress. Once
+    // that ticket is settled (done, back to ready, parked, blocked) what the
+    // lead files next must not be attached to it.
     hub
       .get(run.sessionId)
       .then((h) => {
@@ -155,10 +148,10 @@ export const createAgentApi = (hub: SessionHub, tokens: RunTokens, hooks?: Agent
   const r = express.Router();
   r.use(auth);
 
-  /** Claim, submit, handoff and sweeps are a lead's: a worker's ticket is chosen and judged by the loop. */
+  /** Moving tickets, handoff, done and sweeps are the lead's: nobody else works the board. */
   const leadOnly = (req: AgentRequestWithRun, res: Response): boolean => {
     if (req.run.role !== "lead") {
-      res.status(403).json({ error: "Only a lead claims, submits, sweeps and hands off; the harness moves your ticket for you" });
+      res.status(403).json({ error: "Only the lead moves tickets, sweeps and hands off" });
       return false;
     }
     if (!hooks) {
@@ -204,19 +197,24 @@ export const createAgentApi = (hub: SessionHub, tokens: RunTokens, hooks?: Agent
     "/tickets",
     wrap(async (req, res) => {
       const input = ticketImportSchema.omit({ id: true, state: true, pinned: true, review: true }).parse(req.body);
-      // Agents file into the backlog for your approval; the agent in your terminal works with you there, so it may make a ticket ready when you ask.
-      const asked = z.object({ state: z.enum(["backlog", "ready"]).optional() }).parse(req.body).state;
-      const state = req.run.role === "terminal" ? (asked ?? "backlog") : "backlog";
+      // The lead owns the board and may start a ticket at once; the agent in your terminal makes one ready when you ask; other workers file into the backlog.
+      const asked = z.object({ state: z.enum(["backlog", "ready", "in_progress"]).optional() }).parse(req.body).state;
+      const state = req.run.role === "lead" ? (asked ?? "backlog") : req.run.role === "terminal" && asked !== "in_progress" ? (asked ?? "backlog") : "backlog";
       const h = await hub.get(req.run.sessionId);
+      const baseline = state === "in_progress" ? await hooks?.baseline?.(req.run.sessionId).catch(() => undefined) : undefined;
       const result = await h.mutate((d) => {
-        const r = importBoard(d.board, { tickets: [input] }, { by: "agent", role: req.run.role, defaultState: state });
-        if (r.skipped.length) throw new BoardError(r.skipped[0]!.reason, "forbidden_kind");
+        const r = importBoard(d.board, { tickets: [input] }, { by: "agent", role: req.run.role, defaultState: state === "in_progress" ? "ready" : state });
         validateRepos(r.board.tickets, d.session.repos.map((x) => x.name), { ignoreDone: true });
         let board = r.board;
         const id = r.created[0]!;
         board = addNote(board, id, "harness", `Created by the ${req.run.role === "terminal" ? "agent in your terminal" : req.run.role}${req.run.currentTicket ? ` while on ${req.run.currentTicket}` : ""}`);
+        if (state === "in_progress") {
+          board = transition(board, id, "in_progress", { by: "agent", text: "Started by the lead as it was created" });
+          if (baseline) board = replaceTicket(board, { ...getTicket(board, id), baseline });
+        }
         return { next: { board }, result: id };
       });
+      if (state === "in_progress") tokens.update((req.headers.authorization ?? "").slice(7), { currentTicket: result });
       res.status(201).json({ ok: true, id: result, state });
     }),
   );
@@ -275,17 +273,17 @@ export const createAgentApi = (hub: SessionHub, tokens: RunTokens, hooks?: Agent
     return false;
   };
 
-  /** Editing and deleting tickets is yours, and the terminal agent's because you are at the keyboard with it; no unattended agent may. */
-  const terminalOnly = (req: AgentRequestWithRun, res: Response): boolean => {
-    if (req.run.role === "terminal") return true;
-    res.status(403).json({ error: "Only the agent in the user's terminal edits or deletes tickets; file a note, a chore or a ticket instead" });
+  /** Editing and deleting tickets is the lead's (it owns the board) and the terminal agent's (you are at the keyboard with it). */
+  const mayEdit = (req: AgentRequestWithRun, res: Response): boolean => {
+    if (req.run.role === "terminal" || req.run.role === "lead") return true;
+    res.status(403).json({ error: "Only the lead and the agent in the user's terminal edit or delete tickets; file a note or a ticket instead" });
     return false;
   };
 
   r.patch(
     "/tickets/:id",
     wrap(async (req, res) => {
-      if (!terminalOnly(req, res)) return;
+      if (!mayEdit(req, res)) return;
       const body = z
         .object({
           title: z.string().min(1).max(200).optional(),
@@ -318,7 +316,7 @@ export const createAgentApi = (hub: SessionHub, tokens: RunTokens, hooks?: Agent
   r.delete(
     "/tickets/:id",
     wrap(async (req, res) => {
-      if (!terminalOnly(req, res)) return;
+      if (!mayEdit(req, res)) return;
       const { reason, replacedBy } = z.object({ reason: z.string().min(1).max(2000), replacedBy: ticketIdSchema.optional() }).parse(req.body ?? {});
       const id = ticketIdSchema.parse(req.params.id);
       const h = await hub.get(req.run.sessionId);
@@ -336,12 +334,14 @@ export const createAgentApi = (hub: SessionHub, tokens: RunTokens, hooks?: Agent
         res.status(400).json({ error: "root_script is retired: you have passwordless sudo. Run the install yourself, append it to /workspace/notes/setup.sh, and note it in /workspace/notes/env.md." });
         return;
       }
-      const { summary, actions } = z.object({ summary: z.string().min(1).max(8000), actions: z.array(actionDetailSchema).max(20).default([]) }).parse(req.body);
+      const { summary, actions, ticket: named } = z.object({ summary: z.string().min(1).max(8000), actions: z.array(actionDetailSchema).max(20).default([]), ticket: ticketIdSchema.optional() }).parse(req.body);
       const h = await hub.get(req.run.sessionId);
+      // The lead names the ticket the request is about when it has several in progress; else the one it last started.
+      const ticketId = named && h.board.tickets.some((t) => t.id === named && HELD.has(t.state)) ? named : req.run.currentTicket;
       const created = await h.mutate((d) => {
         const request: AgentRequest = requestSchema.parse({
           id: nextId("R", d.inbox.requests),
-          ticketId: req.run.currentTicket,
+          ticketId,
           summary,
           actions: actions.map((detail, i) => ({ id: `a${i + 1}`, detail, state: "open" })),
           state: "open",
@@ -349,8 +349,8 @@ export const createAgentApi = (hub: SessionHub, tokens: RunTokens, hooks?: Agent
         });
         const inbox: Inbox = { ...d.inbox, requests: [...d.inbox.requests, request] };
         let board = d.board;
-        if (req.run.currentTicket) {
-          board = addNote(board, req.run.currentTicket, "agent", `Request ${request.id} (${request.actions.map((a) => a.detail.kind).join(", ") || "question"}): ${summary.slice(0, 500)}`);
+        if (ticketId) {
+          board = addNote(board, ticketId, "agent", `Request ${request.id} (${request.actions.map((a) => a.detail.kind).join(", ") || "question"}): ${summary.slice(0, 500)}`);
         }
         return { next: { inbox, board }, result: request };
       });
@@ -360,12 +360,12 @@ export const createAgentApi = (hub: SessionHub, tokens: RunTokens, hooks?: Agent
         actions: created.actions.map((a) => a.id),
         next:
           req.run.role === "lead"
-            ? "The ticket parks until the user has decided every action; claiming it again later gives you the outcomes. Leave it and claim another ticket."
-            : req.run.role === "goal"
-              ? "Write where you stand into notes/state.md, then stop and reply with a short status. The run pauses until the user has decided every action; the next round starts with the outcomes in the inbox."
-              : "Stop working on this ticket now and reply with a short status. The ticket resumes when the user has decided every action; the next worker gets the outcomes.",
+            ? ticketId
+              ? `${ticketId} parks until the user has decided every action; moving it to in_progress again later gives you the outcomes. Carry on with other work, or stop if nothing else can be done.`
+              : "Bring notes/state.md up to date, then carry on with other work, or stop and reply with one line if nothing else can be done; the run pauses until the user has decided every action, and the outcomes are in your next prompt."
+            : "Stop working now and reply with a short status. The run continues when the user has decided every action.",
       });
-      if (req.run.role === "lead" && req.run.currentTicket) hooks?.requested?.(req.run, req.run.currentTicket);
+      if (req.run.role === "lead" && ticketId) hooks?.requested?.(req.run, ticketId);
     }),
   );
 
@@ -373,12 +373,13 @@ export const createAgentApi = (hub: SessionHub, tokens: RunTokens, hooks?: Agent
     "/halt",
     wrap(async (req, res) => {
       if (!notFromTerminal(req, res)) return;
-      const { reason, severity } = z.object({ reason: z.string().min(1).max(5000), severity: z.enum(["major", "critical"]) }).parse(req.body);
+      const { reason, severity, ticket: named } = z.object({ reason: z.string().min(1).max(5000), severity: z.enum(["major", "critical"]), ticket: ticketIdSchema.optional() }).parse(req.body);
       const h = await hub.get(req.run.sessionId);
+      const ticketId = named && h.board.tickets.some((t) => t.id === named && HELD.has(t.state)) ? named : req.run.currentTicket;
       const created = await h.mutate((d) => {
         const request: AgentRequest = requestSchema.parse({
           id: nextId("R", d.inbox.requests),
-          ticketId: req.run.currentTicket,
+          ticketId,
           summary: `Halt (${severity}): ${reason}`,
           actions: [],
           halt: { reason, severity },
@@ -386,11 +387,11 @@ export const createAgentApi = (hub: SessionHub, tokens: RunTokens, hooks?: Agent
           createdAt: now(),
         });
         let board = d.board;
-        if (req.run.currentTicket) board = addNote(board, req.run.currentTicket, "agent", `Halt requested (${severity}): ${reason.slice(0, 500)}`);
+        if (ticketId) board = addNote(board, ticketId, "agent", `Halt requested (${severity}): ${reason.slice(0, 500)}`);
         return { next: { inbox: { ...d.inbox, requests: [...d.inbox.requests, request] }, board }, result: request };
       });
       res.status(201).json({ ok: true, id: created.id, next: "The run pauses after you finish. Stop now and reply with what you found." });
-      if (req.run.role === "lead" && req.run.currentTicket) hooks?.requested?.(req.run, req.run.currentTicket);
+      if (req.run.role === "lead" && ticketId) hooks?.requested?.(req.run, ticketId);
     }),
   );
 
@@ -401,7 +402,8 @@ export const createAgentApi = (hub: SessionHub, tokens: RunTokens, hooks?: Agent
         res.status(409).json({ error: "No run is attached to look at the working tree" });
         return;
       }
-      res.json(await hooks.previewJudging(req.run.sessionId, req.run.currentTicket));
+      const asked = typeof req.query.ticket === "string" ? ticketIdSchema.parse(req.query.ticket) : undefined;
+      res.json(await hooks.previewJudging(req.run.sessionId, asked ?? req.run.currentTicket));
     }),
   );
 
@@ -506,15 +508,15 @@ export const createAgentApi = (hub: SessionHub, tokens: RunTokens, hooks?: Agent
     wrap(async (req, res) => {
       if (!leadOnly(req, res)) return;
       const { ids, max } = z.object({ ids: z.array(choreIdSchema).max(50).optional(), max: z.number().int().min(1).max(50).optional() }).parse(req.body ?? {});
-      const refusal = hooks!.claimRefusal?.(req.run);
+      const refusal = hooks!.moveRefusal?.(req.run);
       if (refusal) {
         res.status(409).json({ error: refusal });
         return;
       }
       const h = await hub.get(req.run.sessionId);
       const out = await h.mutate((d) => {
-        const held = req.run.currentTicket ? d.board.tickets.find((t) => t.id === req.run.currentTicket && HELD.has(t.state)) : undefined;
-        if (held) throw new BoardError(`You hold ${held.id} (${held.state}); a sweep is its own commit, so submit the ticket first`, "forbidden_move");
+        const held = d.board.tickets.filter((t) => HELD.has(t.state));
+        if (held.length) throw new BoardError(`${held.map((t) => `${t.id} (${t.state})`).join(", ")} ${held.length === 1 ? "is" : "are"} in progress; a sweep is its own commit, so finish those first`, "forbidden_move");
         const r = beginSweep(d.board, { ids, max });
         return { next: { board: r.board }, result: r };
       });
@@ -547,128 +549,79 @@ export const createAgentApi = (hub: SessionHub, tokens: RunTokens, hooks?: Agent
     }),
   );
 
-  // --- A lead drives the board: claim, submit, hand off ----------------------
-  // Only a lead's token may; a worker's ticket is chosen and judged by the loop.
+  // --- The lead drives the board: move, hand off, done -----------------------
+  // Only the lead's token may; the harness moves a ticket only out of review
+  // (the verdict) and into waiting (a request).
 
-
+  /**
+   * A move the lead makes itself. Any transition the board allows, except:
+   * out of review (the reviewer is reading it), into waiting (that is what a
+   * request does), and into done while the session has a reviewer (done
+   * comes from the verdict). Into in_progress records the baseline the
+   * review reads from; into review hands the ticket to the judge.
+   */
   r.post(
-    "/tickets/:id/claim",
+    "/tickets/:id/move",
     wrap(async (req, res) => {
       if (!leadOnly(req, res)) return;
       const id = ticketIdSchema.parse(req.params.id);
+      const { to, note } = z.object({ to: ticketStateSchema, note: z.string().max(2000).optional() }).parse(req.body ?? {});
       const token = (req.headers.authorization ?? "").slice(7);
-      const refusal = hooks!.claimRefusal?.(req.run);
-      if (refusal) {
-        res.status(409).json({ error: refusal });
-        return;
+      if (to === "in_progress") {
+        const refusal = hooks!.moveRefusal?.(req.run);
+        if (refusal) {
+          res.status(409).json({ error: refusal });
+          return;
+        }
       }
       const h = await hub.get(req.run.sessionId);
+      const current = getTicket(h.board, id);
+      if (current.state === to) {
+        res.json({ ok: true, id, state: to, note: `${id} is already ${to}` });
+        return;
+      }
+      const reviewerOn = h.session.caps.reviewer;
+      // Read before the mutate (it asks the box); kept when the ticket already has one, so a requeued ticket's earlier commits stay in its review.
+      const baseline = to === "in_progress" && !current.baseline ? await hooks!.baseline?.(req.run.sessionId).catch(() => undefined) : undefined;
       await h.mutate((d) => {
-        const held = req.run.currentTicket ? d.board.tickets.find((t) => t.id === req.run.currentTicket && HELD.has(t.state)) : undefined;
-        if (held && held.id !== id) throw new BoardError(`You hold ${held.id} (${held.state}); submit it, or note why it is stuck, before claiming another`, "forbidden_move");
-        const sweeping = sweepInFlight(d.board);
-        if (sweeping) throw new BoardError(`Sweep ${sweeping.n} is ${sweeping.state}; finish it with chores_submit before claiming a ticket`, "forbidden_move");
-        if (!held) choreBacklogRefusal(d);
         const t = getTicket(d.board, id);
-        if (t.state !== "ready") throw new BoardError(`${id} is ${t.state}, not ready`, "illegal_transition");
-        if (!canStart(d.board, t)) {
-          const open = t.deps.filter((dep) => !d.board.tickets.some((x) => x.id === dep && x.state === "done"));
-          throw new BoardError(`${id} waits on ${open.join(", ")}, not done yet`, "illegal_transition");
-        }
-        if (t.agent) throw new BoardError(`${id} runs on its own agent (${describeAgent(t.agent)}): hand it over with board_run when you hold nothing, instead of claiming it`, "forbidden_move");
-        return { next: { board: transition(d.board, id, "in_progress", { by: "agent", text: `Claimed by the lead (judged attempts so far: ${t.attempts})` }) } };
+        if (t.state === "review") throw new BoardError(`${id} is in review: the reviewer is reading it; wait for the verdict`, "forbidden_move");
+        if (to === "waiting") throw new BoardError("A ticket goes to waiting when you file a request on it; file the request instead", "forbidden_move");
+        if (to === "done" && reviewerOn) throw new BoardError(`${id} reaches done through review: move it to review, and the reviewer's verdict moves it on`, "forbidden_move");
+        let board = transition(d.board, id, to, { by: "agent", text: `Moved to ${to} by the lead${note?.trim() ? `: ${note.trim()}` : ""}` });
+        if (baseline) board = replaceTicket(board, { ...getTicket(board, id), baseline });
+        return { next: { board } };
       });
-      tokens.update(token, { currentTicket: id });
+      if (to === "in_progress") tokens.update(token, { currentTicket: id });
+      if (to === "review") hooks!.submitted(req.run, id);
       // A ticket that waited on the user comes back with the outcome.
-      const answered = h.inbox.requests.filter((x) => x.ticketId === id && x.state !== "open").at(-1);
-      res.json({ ok: true, id, state: "in_progress", ...(answered ? { answer: requestOutcome(answered) } : {}) });
-    }),
-  );
-
-  /** A ticket with its own agent: the lead does not work it; the harness runs a fresh implementer on that agent, then the judge, while the lead waits. */
-  r.post(
-    "/tickets/:id/run",
-    wrap(async (req, res) => {
-      if (!leadOnly(req, res)) return;
-      const id = ticketIdSchema.parse(req.params.id);
-      const refusal = hooks!.claimRefusal?.(req.run);
-      if (refusal) {
-        res.status(409).json({ error: refusal });
-        return;
-      }
-      if (!hooks!.delegated) {
-        res.status(409).json({ error: "This run cannot hand tickets to another agent" });
-        return;
-      }
-      const h = await hub.get(req.run.sessionId);
-      const agent = await h.mutate((d) => {
-        const held = req.run.currentTicket ? d.board.tickets.find((t) => t.id === req.run.currentTicket && HELD.has(t.state)) : undefined;
-        if (held) throw new BoardError(`You hold ${held.id} (${held.state}); the other agent needs the working tree to itself, so submit first`, "forbidden_move");
-        const sweeping = sweepInFlight(d.board);
-        if (sweeping) throw new BoardError(`Sweep ${sweeping.n} is ${sweeping.state}; finish it with chores_submit first`, "forbidden_move");
-        choreBacklogRefusal(d);
-        const t = getTicket(d.board, id);
-        if (!t.agent) throw new BoardError(`${id} names no agent of its own; claim it and do it yourself`, "forbidden_move");
-        if (t.state !== "ready") throw new BoardError(`${id} is ${t.state}, not ready`, "illegal_transition");
-        if (!canStart(d.board, t)) {
-          const open = t.deps.filter((dep) => !d.board.tickets.some((x) => x.id === dep && x.state === "done"));
-          throw new BoardError(`${id} waits on ${open.join(", ")}, not done yet`, "illegal_transition");
-        }
-        return { next: { board: transition(d.board, id, "in_progress", { by: "agent", text: `Handed to its own agent (${describeAgent(t.agent)}) by the lead` }) }, result: t.agent };
-      });
-      hooks!.delegated(req.run, id);
-      res.json({ ok: true, id, state: "in_progress", agent, next: "A fresh worker on that agent does the ticket and the reviewer judges it. Wait for the verdict (board_run waits for you); claim nothing meanwhile." });
-    }),
-  );
-
-  r.post(
-    "/tickets/:id/submit",
-    wrap(async (req, res) => {
-      if (!leadOnly(req, res)) return;
-      const id = ticketIdSchema.parse(req.params.id);
-      if (req.run.currentTicket !== id) throw new BoardError(`You do not hold ${id}; claim it first`, "forbidden_move");
-      const h = await hub.get(req.run.sessionId);
-      await h.mutate((d) => {
-        const t = getTicket(d.board, id);
-        if (t.state !== "in_progress") throw new BoardError(`${id} is ${t.state}, not in progress`, "illegal_transition");
-        if (!t.report?.trim()) throw new BoardError(`File your report for ${id} with board_report before submitting`, "forbidden_move");
-        return { next: { board: transition(d.board, id, "review", { by: "agent", text: "Submitted for review by the lead" }) } };
-      });
-      hooks!.submitted(req.run, id);
-      res.json({ ok: true, id, state: "review" });
+      const answered = to === "in_progress" ? h.inbox.requests.filter((x) => x.ticketId === id && x.state !== "open").at(-1) : undefined;
+      res.json({ ok: true, id, state: to, ...(answered ? { answer: requestOutcome(answered) } : {}), ...(to === "review" ? { next: "The reviewer reads the change; the ticket leaves review when the verdict is in." } : {}) });
     }),
   );
 
   r.post(
     "/handoff",
     wrap(async (req, res) => {
-      // The goal worker hands off like a lead; it is the other long-lived role.
-      if (req.run.role !== "goal" && !leadOnly(req, res)) return;
-      if (req.run.role === "goal" && !hooks) {
-        res.status(409).json({ error: "No run is attached to this API; nothing can hand over" });
-        return;
-      }
+      if (!leadOnly(req, res)) return;
       const { note } = z.object({ note: z.string().min(1).max(20_000) }).parse(req.body);
       hooks!.handoff(req.run, note);
-      res.json({ ok: true, next: req.run.role === "goal" ? "Stop now: end your turn with one line. A fresh worker starts with your note (now notes/state.md), the notes directory and the goal." : "Stop now: end your turn with one line. A fresh lead starts with your note and the board." });
+      res.json({ ok: true, next: "Stop now: end your turn with one line. A fresh lead starts with your note (now notes/state.md), the notes directory, the goal and the board." });
     }),
   );
 
-  /** Goal mode only: the worker's claim that the goal is met. Recorded by the run; nothing on the board changes (there is none). */
+  /** The lead's claim that the goal is met and the board is finished. Recorded by the run; the run ends after this life when nothing is left to start. */
   r.post(
-    "/goal_done",
+    "/done",
     wrap(async (req, res) => {
-      if (req.run.role !== "goal") {
-        res.status(403).json({ error: "Only the goal worker of a goal-mode session says the goal is met" });
-        return;
-      }
-      if (!hooks?.goalDone) {
-        res.status(409).json({ error: "No run is attached to this API; nothing can record the goal as met" });
+      if (!leadOnly(req, res)) return;
+      if (!hooks!.done) {
+        res.status(409).json({ error: "This run cannot record the goal as met" });
         return;
       }
       const { note } = z.object({ note: z.string().min(1).max(8000) }).parse(req.body);
-      hooks.goalDone(req.run, note);
-      res.json({ ok: true, next: "Stop now: end your turn with one line. The run ends after this round and the user reads your assessment." });
+      hooks!.done(req.run, note);
+      res.json({ ok: true, next: "Stop now: end your turn with one line. The run ends after this life (unless tickets are still ready, in which case the next lead works them) and the user reads your assessment." });
     }),
   );
 

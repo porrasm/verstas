@@ -3,11 +3,12 @@ import { normalizeReviewMode, type Ticket } from "../core/types.js";
 /**
  * The rules of judging a change that may touch any subset of a session's
  * repositories (docs/BOARD.md, "Judging"). Pure: the harness gathers what
- * changed and runs what these decide. The harness runs no checks of its
- * own; the reviewer runs the repositories' checks.
+ * changed since the ticket's baseline and runs what these decide. The
+ * harness runs no checks of its own; the reviewer runs the repositories'
+ * checks.
  */
 
-/** What changed in one repository since the ticket started (or since HEAD, for a sweep). */
+/** What changed in one repository for a ticket (since its baseline) or for a sweep (the working tree). */
 export type RepoChange = {
   repo: string;
   added: number;
@@ -16,8 +17,8 @@ export type RepoChange = {
   stat: string;
   diff: string;
   paths: string[];
-  /** Commits of this ticket's earlier attempts that other work came after; the diff above does not include them. */
-  scattered: string[];
+  /** Commits since the ticket's baseline, as "sha subject": this ticket's, other tickets', and ones that name no ticket. Empty for a sweep or a ticket without a baseline. */
+  commits: { mine: string[]; others: string[]; unlabelled: string[] };
 };
 
 /** How much judging a ticket's change needs: your mode on the ticket, else the session's reviewer setting. */
@@ -26,24 +27,26 @@ export const reviewLevel = (ticket: Pick<Ticket, "review">, caps: { reviewer: bo
   return { mode: caps.reviewer ? "full" : "none", why: "the session's setting" };
 };
 
+const TICKET_IN_TEXT = /\bT-\d+\b/g;
+
 /**
- * This ticket's earlier attempts in one repository's history, newest first
- * (`git log --format=%H%x09%s`). `base` is the oldest of the attempts at the
- * top of the history (the ticket's commits since nothing else was
- * committed), so `git diff <base>^` is the whole ticket; `scattered` are
- * older attempts other commits came after.
+ * The commits in a ticket's range (`git log --format=%H%x09%s%x09%(trailers:key=Verstas-Ticket,valueonly,separator=%x2C) <base>..HEAD`)
+ * sorted into this ticket's (its id in the subject or a trailer), other
+ * tickets' (another id, not this one) and unlabelled (no id anywhere). Each
+ * as "shortsha subject", newest first.
  */
-export const earlierAttempts = (log: string, ticketId: string): { base?: string; scattered: string[] } => {
-  const mine = (subject: string) => subject.startsWith(`${ticketId} (`);
-  const rows = log
-    .split("\n")
-    .map((l) => l.split("\t"))
-    .filter((r): r is [string, string] => r.length >= 2 && /^[0-9a-f]{7,64}$/.test(r[0]!));
-  let i = 0;
-  let base: string | undefined;
-  while (i < rows.length && mine(rows[i]![1])) base = rows[i++]![0];
-  const scattered = rows.slice(i).filter((r) => mine(r[1])).map((r) => r[0].slice(0, 12));
-  return { base, scattered };
+export const classifyCommits = (log: string, ticketId: string): RepoChange["commits"] => {
+  const out: RepoChange["commits"] = { mine: [], others: [], unlabelled: [] };
+  for (const line of log.split("\n")) {
+    const [sha, subject = "", trailers = ""] = line.split("\t");
+    if (!sha || !/^[0-9a-f]{7,64}$/.test(sha)) continue;
+    const ids = new Set([...(subject.match(TICKET_IN_TEXT) ?? []), ...trailers.split(",").map((x) => x.trim()).filter(Boolean)]);
+    const entry = `${sha.slice(0, 12)} ${subject}`;
+    if (ids.has(ticketId)) out.mine.push(entry);
+    else if (ids.size) out.others.push(entry);
+    else out.unlabelled.push(entry);
+  }
+  return out;
 };
 
 /** "planned api; touched api, docs" when the ticket's expected repositories and the change differ, else undefined. */

@@ -25,15 +25,15 @@ a file. `job.json`:
 
 ```jsonc
 {
-  "role": "implementer",            // implementer | reviewer | planner | setup | prompt | lead
-  "ticket": "T-12",                 // absent for the planner and the lead
-  "promptFile": "/workspace/.verstas/jobs/4-7-implementer/prompt.md",   // the task
-  "systemPromptFile": "/workspace/.verstas/jobs/4-7-implementer/system.md", // the rules
+  "role": "lead",                   // lead | reviewer | planner | setup | prompt
+  "ticket": "T-12",                 // the reviewer's ticket; absent for the rest
+  "promptFile": "/workspace/.verstas/jobs/4-7-lead/prompt.md",   // the task
+  "systemPromptFile": "/workspace/.verstas/jobs/4-7-lead/system.md", // the rules
   "caps": { "minutes": 25, "turns": 60, "budgetUsd": 5 },
   "mcpConfigFile": "/workspace/.verstas/mcp.json",       // board tools
   "driver": "claude",               // claude | codex | cursor; absent means claude
   "model": "claude-fable-5-1",      // optional; any id the chosen CLI accepts
-  "budgetFile": "/workspace/.verstas/jobs/4-7-implementer/budget.json",  // optional
+  "budgetFile": "/workspace/.verstas/jobs/4-7-lead/budget.json",  // optional
   "agentSession": { "id": "…uuid…", "resume": false }   // optional
 }
 ```
@@ -78,7 +78,7 @@ The driver must:
 6. End with the `worker_done` line:
 
 ```json
-{"kind":"worker_done","t":"…","ticket":"T-12","role":"implementer","ok":true,
+{"kind":"worker_done","t":"…","ticket":"T-12","role":"reviewer","ok":true,
  "stopReason":"success","rateLimited":false,"costUsd":0.42,"turns":12,
  "seconds":380,"text":"final message","stderr":""}
 ```
@@ -86,19 +86,21 @@ The driver must:
 `rateLimited: true` makes the loop sleep instead of blaming the ticket.
 Exit code 0 means `ok`.
 
-The harness, not the driver, decides what happens to the ticket: it reads
-`worker_done`, runs the gates, starts the reviewer, commits, and moves the
-card. A lead submits its tickets itself (`board_submit`), and the harness
-judges each one the same way while the lead waits.
+The lead moves its tickets itself (`board_move`); the harness judges a
+ticket moved to review (the reviewer, the move out of review) and, when a
+lead life ends, commits whatever is left and starts the next life.
 
 ## The board MCP server
 
 `/opt/verstas/mcp-server.js` is a dependency-free stdio MCP server exposing
 the board tools: `board_list_tickets`, `board_get_ticket`, `board_add_note`,
-`board_report`, `board_create_ticket`, `chore`, `chores_list`, `board_set_priority`,
-`board_add_dep`, `request` (summary + actions: network, pack, resources,
-instruction, question), `halt`, `message`, `idea`. Each is one call to the
-agent API under `/agent/`; the API enforces every rule. A driver that
+`board_report`, `board_create_ticket`, `chore`, `chores_list`, `chore_drop`,
+`board_set_priority`, `board_add_dep`, `request` (summary + actions:
+network, pack, resources, instruction, question), `halt`, `message`,
+`idea`, `artifact`, `budget`; for the lead also `board_move`, `done`,
+`handoff`, `board_changes`, `board_update_ticket`, `board_delete_ticket`,
+`chores_sweep`, `chores_submit`. Each is one call to the agent API under
+`/agent/`; the API enforces every rule. A driver that
 speaks MCP can load it with:
 
 ```json

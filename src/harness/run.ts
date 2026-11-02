@@ -2,27 +2,29 @@ import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
-import { agentFor, boardDrivers, describeAgent, DRIVER_NAMES, eventSchema, isInitialized, matchesAnyGlob, now, requestOutcome, runSchema, SWEEP_PROTECTED_GLOBS, type AgentSpec, type TouchedRepo, type Board, type DriverName, type Readiness, type Run, type Session, type SweepResult, type Ticket, type TicketState, type VerstasEvent } from "../core/types.js";
-import { addNote, canStart, getTicket, hasOpenWork, nextReady, openChores, releaseSweep, replaceTicket, settleSweep, sweepInFlight, transition, unknownRepos } from "../board/board.js";
-import { earlierAttempts, plannedVsTouched, reviewLevel, type RepoChange } from "./judging.js";
+import { agentFor, DRIVER_NAMES, eventSchema, isInitialized, matchesAnyGlob, now, requestOutcome, runSchema, SWEEP_PROTECTED_GLOBS, type TouchedRepo, type Board, type DriverName, type Readiness, type Run, type Session, type SweepResult, type Ticket, type TicketState, type VerstasEvent } from "../core/types.js";
+import { addNote, getTicket, hasOpenWork, openChores, releaseSweep, replaceTicket, settleSweep, sweepInFlight, transition } from "../board/board.js";
+import { classifyCommits, plannedVsTouched, reviewLevel, type RepoChange } from "./judging.js";
 import { writeJsonAtomic } from "../board/store.js";
 import type { SessionHandle, SessionHub } from "../sessions/hub.js";
 import type { AgentRunHooks, RunToken, RunTokens } from "../agent-api/agent-api.js";
-import { withAgentPacks, workspaceSizeMb } from "../sessions/sessions.js";
+import { workspaceSizeMb } from "../sessions/sessions.js";
 import { addArtifact, ARTIFACT_MAX_BYTES, type Artifact } from "../sessions/artifacts.js";
 import { allowlistFor } from "../network/packs.js";
-import { goalContinuePrompt, goalPrompt, implementerPrompt, leadContinuePrompt, leadPrompt, mcpConfig, readGoalRules, readLeadRules, notesIndexMd, plannerPrompt, reviewerPrompt, setupPrompt, sweepReviewerPrompt, systemMd, terminalMd, userPrompt, verstasMd, withContext, workspaceClaudeMd, type GoalPromptOptions } from "./prompts.js";
+import { leadContinuePrompt, leadPrompt, mcpConfig, readLeadRules, notesIndexMd, plannerPrompt, reviewerPrompt, setupPrompt, sweepReviewerPrompt, systemMd, terminalMd, userPrompt, verstasMd, withContext, workspaceClaudeMd, type LeadPromptOptions } from "./prompts.js";
 import { driverInfo, missingCredentialError } from "./drivers.js";
 import { LiveTerminal, type TerminalRunner } from "./terminal.js";
 import type { Job } from "../worker/worker.js";
 import type { TerminalJob } from "../worker/terminal.js";
 
 /**
- * The loop. Deterministic TypeScript: picks tickets, starts workers,
- * runs the reviewer, commits, moves cards. Models only ever run as
+ * The loop. Deterministic TypeScript that keeps one lead alive: starts it,
+ * resumes or replaces it, judges the tickets it submits, commits what it
+ * leaves, and stops when it says it is done. Models only ever run as
  * workers, and the harness runs no checks of its own: the reviewer runs
- * the repositories' checks (docs/BOARD.md, "Judging"). Everything that touches Docker is behind two small
- * interfaces so the loop is unit-tested with fakes.
+ * the repositories' checks (docs/BOARD.md, "Judging"). Everything that
+ * touches Docker is behind two small interfaces so the loop is unit-tested
+ * with fakes.
  */
 
 export type WorkerDone = Extract<VerstasEvent, { kind: "worker_done" }>;
@@ -97,8 +99,8 @@ type LeadContext = {
   /** Judging and parking, one at a time, in the order the lead asked. */
   queue: Promise<void>;
   handoff?: string;
-  /** Goal mode: the worker's assessment that the goal is met (the goal_done hook). */
-  goalDone?: string;
+  /** The lead's assessment that the goal is met and the board finished (the `done` hook). */
+  done?: string;
   rateLimited: boolean;
   halted: boolean;
   /** Stops the current lead only (a handoff it does not follow), not the run. */
@@ -127,18 +129,21 @@ export type RunControl = {
 };
 
 const WORKSPACE_FILES = ".verstas";
-/** What a goal worker is told when you press pause while it runs. */
-const PAUSE_NUDGE = "The user asked the run to pause. Finish the step you are in (do not start another), make sure its tests pass, bring notes/state.md up to date, then reply with one line and stop. The harness commits what you leave.";
-/** What a goal worker is told every `caps.progressMinutes`: the user wants to know where the work stands. */
-const PROGRESS_NUDGE = "Progress check. Post a short update for the user with the `message` tool, 2 to 8 sentences: first how far the goal is (just started, well under way, nearly complete, or stuck and why), then what is done since your last update, what you are on now, and what comes next. Then carry on with your step; this changes nothing about the goal and does not end your round.";
-/** Commits per repository in a goal worker's prompt. */
-const GOAL_LOG_LINES = 15;
+/** What the lead is told when you press pause while it runs. */
+const PAUSE_NUDGE = "The user asked the run to pause. Reach a sensible point (start no new ticket), bring notes/state.md up to date, then reply with one line and stop. The harness commits what you leave.";
+/** What the lead is told every `caps.progressMinutes`: the user wants to know where the work stands. */
+const PROGRESS_NUDGE = "Progress check. Post a short update for the user with the `message` tool, 2 to 8 sentences: how far the work is, what is done since your last update, what you are on now, and what comes next. Then carry on; this does not end your turn.";
+/** Commits per repository in a fresh lead's prompt. */
+const LOG_LINES = 15;
+/** The lead's caps when the session sets none: far enough away that only the budget, a handoff or the user ends a life (the time cap is a setTimeout, so under 24 days). */
+const NO_CAP_MINUTES = 20 * 24 * 60;
+const NO_CAP_TURNS = 1_000_000;
 /** The setup worker's floor on the worker caps: it waits on installs and on every repository's check, so it needs time more than turns. */
 const SETUP_MIN_MINUTES = 60;
 const SETUP_MIN_TURNS = 120;
 
 /** What a worker of this role may do through the agent API (src/agent-api/agent-api.ts). */
-const tokenRole = (role: Job["role"]): "worker" | "planner" | "lead" | "goal" => (role === "planner" ? "planner" : role === "lead" ? "lead" : role === "goal" ? "goal" : "worker");
+const tokenRole = (role: Job["role"]): "worker" | "planner" | "lead" => (role === "planner" ? "planner" : role === "lead" ? "lead" : "worker");
 
 export class RunManager implements AgentRunHooks {
   private active = new Map<string, RunControl>();
@@ -167,7 +172,7 @@ export class RunManager implements AgentRunHooks {
     const w = this.workers.get(sessionId);
     if (!w) return { ok: false, error: "No worker is running right now (the run is between workers); try again in a moment" };
     if (w.driver !== "claude") return { ok: false, error: `The ${w.role} runs on ${w.driver}, which cannot take a message mid-run` };
-    const to = `${w.role === "goal" ? "goal worker" : w.role}${w.ticket ? ` on ${w.ticket}` : ""}`;
+    const to = `${w.role}${w.ticket ? ` on ${w.ticket}` : ""}`;
     if (!w.send(text.trim())) return { ok: false, error: `The ${to} just ended; the next worker will not see this` };
     await w.log({ kind: "status", t: (this.deps.now ?? now)(), ticket: w.ticket, text: `message from the user to the ${to}: ${text.trim().slice(0, 500)}` });
     return { ok: true, to };
@@ -193,10 +198,11 @@ export class RunManager implements AgentRunHooks {
   /**
    * init: initialize the environment (the container, the recipes, and the
    * setup worker unless the session's setup mode skips it); with `start`,
-   * go on to the tickets when it succeeds. plan: run the planner with your
+   * go on to the lead when it succeeds. plan: run the planner with your
    * request first. brief: refresh the brief and stop. setup: run the setup
    * worker again and stop. prompt: run one worker with your text, no
-   * ticket, and stop. Without any of them this is a work run. Everything
+   * ticket, and stop. Without any of them this is a work run: one lead on
+   * the goal and the board, which needs one of them to exist. Everything
    * but init is refused while the session is not initialized: there is no
    * environment to run in.
    */
@@ -206,9 +212,9 @@ export class RunManager implements AgentRunHooks {
     if (opts.prompt !== undefined && !opts.prompt.trim()) throw new Error("The prompt is empty");
     if (opts.plan !== undefined && !opts.plan.trim()) throw new Error("Say what to plan");
     if (!opts.init && !isInitialized(h.session)) throw new Error("This session is not initialized: press Initialize on the session page first.");
-    // A goal-mode work run has nothing to work toward without the text.
-    const worksTheGoal = h.session.mode === "goal" && ((opts.init && opts.start) || (!opts.init && opts.plan === undefined && !opts.brief && !opts.setup && opts.prompt === undefined && !opts.terminal));
-    if (worksTheGoal && !h.session.goal.trim()) throw new Error("Write the goal first: this session works toward a goal, and it is empty.");
+    // A work run has nothing to do without a goal or tickets.
+    const works = (opts.init && opts.start) || (!opts.init && opts.plan === undefined && !opts.brief && !opts.setup && opts.prompt === undefined && !opts.terminal);
+    if (works && !h.session.goal.trim() && !h.board.tickets.length) throw new Error("Nothing to work on: write a goal or add tickets to the board first.");
     if (opts.terminal) {
       if (!this.deps.terminal) throw new Error("Agent terminals need the Docker sandbox");
       if (opts.terminal.driver === "cursor") throw new Error("Agent terminals run Claude Code or Codex");
@@ -221,15 +227,6 @@ export class RunManager implements AgentRunHooks {
           return { next: { session: { ...docs.session, packs, allowlist: [...new Set([...docs.session.allowlist, ...allowlistFor(packs)])] } } };
         });
       }
-    }
-    // A ticket's own agent needs its backend on the allowlist, like a session agent does.
-    if (boardDrivers(h.board).length) {
-      await h.mutate((docs) => {
-        const packs = withAgentPacks(docs.session.packs, docs.session, docs.board);
-        if (packs.length === docs.session.packs.length) return {};
-        const allowlist = [...new Set([...docs.session.allowlist, ...allowlistFor(packs)])];
-        return { next: { session: { ...docs.session, packs, allowlist } } };
-      });
     }
     const id = (await nextRunId(h.paths.runs)) ?? 1;
     const run: Run = runSchema.parse({ id, sessionId, startedAt: (this.deps.now ?? now)(), state: "running", terminal: opts.terminal ? { driver: opts.terminal.driver } : undefined });
@@ -270,9 +267,9 @@ export class RunManager implements AgentRunHooks {
     const c = this.active.get(sessionId);
     if (!c) return false;
     c.pauseAfterTicket();
-    // A goal worker has no board call to learn of the pause from (a lead hears it at its next claim), so it is told now, when it can take a message.
+    // The lead is told now, when it can take a message; a move into in_progress is refused from here on too.
     const w = this.workers.get(sessionId);
-    if (w?.role === "goal" && w.driver === "claude" && w.send(PAUSE_NUDGE, "verstas")) void w.log({ kind: "status", t: (this.deps.now ?? now)(), text: "pause: the goal worker was asked to finish its step, update its note and stop" }).catch(() => undefined);
+    if (w?.role === "lead" && w.driver === "claude" && w.send(PAUSE_NUDGE, "verstas")) void w.log({ kind: "status", t: (this.deps.now ?? now)(), text: "pause: the lead was asked to reach a sensible point, update its note and stop" }).catch(() => undefined);
     return true;
   }
 
@@ -309,7 +306,7 @@ export class RunManager implements AgentRunHooks {
     c.queue = c.queue.then(async () => {
       c.run.currentTicket = ticketId;
       try {
-        const out = await this.judge(c.h, c.run, ticketId, { ok: true, stopReason: "submitted", costUsd: 0 }, c.log, c.signal);
+        const out = await this.judge(c.h, c.run, ticketId, c.log, c.signal);
         if (out === "rate_limited") c.rateLimited = true;
       } catch (e) {
         await c.log({ kind: "error", t: (this.deps.now ?? now)(), ticket: ticketId, text: `judging failed: ${(e as Error).message}` });
@@ -331,35 +328,6 @@ export class RunManager implements AgentRunHooks {
       if (parked === "halted") c.halted = true;
     })
       .catch((e: Error) => c.log({ kind: "error", t: (this.deps.now ?? now)(), ticket: ticketId, text: `parking failed: ${e.message}` }))
-      .catch(() => undefined);
-  }
-
-  /** The lead handed a ticket to its own agent: the loop-style worker and judge run while the lead waits. */
-  delegated(r: RunToken, ticketId: string): void {
-    const c = this.leadFor(r);
-    if (!c) {
-      void this.deps.hub
-        .get(r.sessionId)
-        .then((h) => h.mutate((docs) => (getTicket(docs.board, ticketId).state === "in_progress" ? { next: { board: transition(docs.board, ticketId, "ready", { by: "harness", text: "Handed over after the run ended; requeued" }) } } : {})))
-        .catch(() => undefined);
-      return;
-    }
-    c.queue = c.queue
-      .then(async () => {
-        const t = getTicket(c.h.board, ticketId);
-        if (t.state !== "in_progress") return;
-        c.run.currentTicket = ticketId;
-        try {
-          const out = await this.workTicket(c.h, c.run, t, c.log, c.signal, {}, { claimed: true });
-          if (out === "rate_limited") c.rateLimited = true;
-          if (out === "halted") c.halted = true;
-        } catch (e) {
-          await c.log({ kind: "error", t: (this.deps.now ?? now)(), ticket: ticketId, text: `the ticket's agent failed to run: ${(e as Error).message}` });
-          await c.h.mutate((docs) => (["in_progress", "review"].includes(getTicket(docs.board, ticketId).state) ? { next: { board: transition(docs.board, ticketId, "ready", { by: "harness", text: `Its agent could not run (${(e as Error).message.slice(0, 200)}); requeued` }) } } : {})).catch(() => undefined);
-        } finally {
-          if (!c.signal.aborted) c.run.currentTicket = undefined;
-        }
-      })
       .catch(() => undefined);
   }
 
@@ -391,11 +359,11 @@ export class RunManager implements AgentRunHooks {
       .catch(() => undefined);
   }
 
-  /** Goal mode: the worker says the goal is met. The round ends (after a grace period, by force) and the goal loop records the claim. */
-  goalDone(r: RunToken, note: string): void {
+  /** The lead says the goal is met and the board is finished. Its life ends (after a grace period, by force) and the loop records the claim. */
+  done(r: RunToken, note: string): void {
     const c = this.leadFor(r);
     if (!c) return;
-    c.goalDone = note;
+    c.done = note;
     const worker = c.leadAbort;
     setTimeout(() => worker?.abort(), this.deps.handoffGraceMs ?? 120_000).unref();
   }
@@ -409,15 +377,29 @@ export class RunManager implements AgentRunHooks {
     setTimeout(() => lead?.abort(), this.deps.handoffGraceMs ?? 120_000).unref();
   }
 
-  claimRefusal(r: RunToken): string | undefined {
+  /** Why the lead may not start another ticket now. */
+  moveRefusal(r: RunToken): string | undefined {
     const c = this.leadFor(r);
     if (!c) return "This run has ended; stop.";
     if (c.handoff) return "You handed off; stop now and reply with one line.";
     if (c.halted) return "The run halts after you finish; stop now and reply with what you found.";
     if (c.rateLimited) return "The reviewer is rate limited: stop now and reply with one line. The run sleeps and a lead continues afterwards.";
-    if (c.isPause()) return "The user asked the run to pause: do not claim another ticket. Submit or park what you hold, then reply with one line and stop.";
+    if (c.isPause()) return "The user asked the run to pause: start no new ticket. Reach a sensible point, bring notes/state.md up to date, then reply with one line and stop.";
     if (c.run.ticketsDone >= c.h.session.caps.runTickets) return `This run's cap of ${c.h.session.caps.runTickets} tickets is reached; reply with one line and stop.`;
     return undefined;
+  }
+
+  /** Each repository's HEAD now: the baseline a ticket's review reads from (docs/BOARD.md, Judging). */
+  async baseline(sessionId: string): Promise<Record<string, string>> {
+    const h = await this.deps.hub.get(sessionId);
+    const sh = this.deps.shell(sessionId);
+    const out: Record<string, string> = {};
+    for (const repo of h.session.repos) {
+      const r = await sh.exec(["git", "rev-parse", "HEAD"], { workdir: `/workspace/${repo.name}`, timeoutMs: 30_000 }).catch(() => null);
+      const sha = r?.code === 0 ? r.stdout.trim() : "";
+      if (/^[0-9a-f]{7,64}$/.test(sha)) out[repo.name] = sha;
+    }
+    return out;
   }
 
   /** Every active run finishes its current ticket, then stops. */
@@ -629,83 +611,12 @@ export class RunManager implements AgentRunHooks {
         run.state = ctl.signal.aborted ? "stopped" : "finished";
       }
 
-      let lastDenialCheck = clock();
-      // Read once: the setting may change while the run is on, and the stop below must match how it ran.
-      const mode = h.session.mode;
-      if (proceed && mode === "lead") {
-        await this.leadLoop(h, run, ctl, log, saveRun, setSessionState);
-        proceed = false;
-      }
-      if (proceed && mode === "goal") {
-        await this.goalLoop(h, run, ctl, log, saveRun, setSessionState);
-        proceed = false;
-      }
-      // With caps.resumeWorker, the implementers of this run share one agent conversation.
-      const convo: { id?: string } = {};
-      while (proceed && !ctl.isStop()) {
-        if (ctl.isPause()) {
-          run.state = "paused";
-          run.pauseReason = "user";
-          break;
-        }
-        const sizeMb = await workspaceSizeMb(h.paths).catch(() => 0);
-        if (sizeMb > h.session.limits.workspaceMb) {
-          run.state = "paused";
-          run.pauseReason = `workspace is ${sizeMb} MB, over the ${h.session.limits.workspaceMb} MB limit`;
-          break;
-        }
-        if (run.ticketsDone >= h.session.caps.runTickets) {
-          run.state = "finished";
-          await status(`run ticket cap of ${h.session.caps.runTickets} reached`);
-          break;
-        }
-        if (d.healSandbox) {
-          const healed = await d.healSandbox(h.id).catch((e: Error) => [`heal failed: ${e.message}`]);
-          for (const line of healed) await status(line);
-        }
-        const ticket = nextReady(h.board);
-        if (!ticket) {
-          const open = h.inbox.requests.some((r) => r.state === "open");
-          run.state = hasOpenWork(h.board) || open ? "paused" : "finished";
-          const blockers = describeBlockers(h.board);
-          run.pauseReason = open ? "requests" : hasOpenWork(h.board) ? blockers || "waiting on dependencies" : undefined;
-          await status(open ? "nothing ready; waiting for your answers in the inbox" : run.state === "finished" ? "no ready tickets left" : `nothing can run: ${blockers}`);
-          break;
-        }
-
-        const outcome = await this.workTicket(h, run, ticket, log, ctl.signal, convo);
-        await saveRun();
-        if (outcome === "rate_limited") {
-          run.state = "paused";
-          run.pauseReason = "rate_limit";
-          const sleep = d.rateLimitSleepMs ?? 60 * 60_000;
-          run.resumeAt = new Date(Date.now() + sleep).toISOString();
-          await log({ kind: "run", t: clock(), state: "paused", reason: `rate limited; sleeping until ${run.resumeAt}` });
-          await saveRun();
-          await setSessionState("paused");
-          await waitOrAbort(sleep, ctl.signal);
-          if (ctl.isStop()) break;
-          run.state = "running";
-          run.pauseReason = undefined;
-          run.resumeAt = undefined;
-          await setSessionState("running");
-          continue;
-        }
-        if (outcome === "halted") {
-          run.state = "halted";
-          break;
-        }
-        if (d.proxyDenials) {
-          const denials = await d.proxyDenials(h.id, lastDenialCheck).catch(() => []);
-          lastDenialCheck = clock();
-          for (const den of denials) await log({ kind: "denied_network", t: clock(), host: den.host, port: den.port });
-        }
-      }
+      // The work run: one lead on the goal and the board.
+      if (proceed) await this.leadLoop(h, run, ctl, log, saveRun, setSessionState);
       if (ctl.isStop()) {
         run.state = "stopped";
-        // A stopped worker leaves its ticket in progress; put it back. A lead
-        // may have claimed tickets the run never saw; every held one goes back.
-        const held = mode === "lead" ? h.board.tickets.filter((t) => t.state === "in_progress" || t.state === "review").map((t) => t.id) : run.currentTicket ? [run.currentTicket] : [];
+        // A stopped lead leaves its tickets in progress; put every one back, with the work kept.
+        const held = h.board.tickets.filter((t) => t.state === "in_progress" || t.state === "review").map((t) => t.id);
         for (const id of held) {
           await h.mutate((docs) => {
             const t = getTicket(docs.board, id);
@@ -736,12 +647,18 @@ export class RunManager implements AgentRunHooks {
   }
 
   /**
-   * Lead mode: keep one lead working the board until nothing it can start
-   * is left. The lead claims and submits tickets through the agent API; the
-   * hooks above judge and park them. When a lead ends, the next one
-   * continues its conversation, or starts fresh from its handoff note (or
-   * from its last words when it hit a cap). Two leads in a row that move
-   * nothing pause the run instead of spending more.
+   * The one loop: keep one lead working the session (the goal, the board,
+   * or both) until nothing it can start is left. The lead moves tickets
+   * through the agent API; the hooks above judge a ticket it moves to
+   * review and park one it files a request on. When a lead life ends, the
+   * harness commits whatever is left uncommitted, then the next life
+   * continues the conversation, or starts fresh from the handoff note (or
+   * from the last words when the lead hit a cap). The run ends when the
+   * lead says `done` and no ticket is ready, when you pause, when a request
+   * waits on you and nothing else can go on, when two lives in a row change
+   * nothing, or at the session's cap on lives per run. The goal text is
+   * read again every life, so an edit lands in the next one (a running
+   * Claude lead is told in its conversation).
    */
   private async leadLoop(
     h: SessionHandle,
@@ -754,15 +671,33 @@ export class RunManager implements AgentRunHooks {
     const d = this.deps;
     const clock = d.now ?? now;
     const status = (text: string, ticket?: string) => log({ kind: "status", t: clock(), ticket, text });
+    const firstLine = (text: string) => (text.trim().split("\n").find((l) => l.trim()) ?? "").trim();
     const ctx: LeadContext = { runId: run.id, h, run, log, signal: ctl.signal, isPause: ctl.isPause, queue: Promise.resolve(), rateLimited: false, halted: false };
     this.leads.set(h.id, ctx);
     let convoId: string | undefined;
     let handoffNote = (await this.readNote(h, "state.md", 16_000)) ?? undefined;
+    /** A lead stopped at a cap before it could update its note: its last words go into the next fresh prompt. */
+    let lastWords: string | undefined;
+    let round = 0;
     let idle = 0;
-    /** A lead that was given only chores and swept none: the next round finishes instead of spending another lead. */
+    /** A lead that was given only chores and swept none: the next life finishes instead of spending another lead. */
     let choresIdle = false;
+    let lastCommitted: string[] = [];
+    /** The goal the previous life was given; a different text now means it was revised meanwhile. */
+    let lastGoal: string | undefined;
     let lastDenialCheck = clock();
-    const fingerprint = () => JSON.stringify([h.board.tickets.map((t) => [t.id, t.state, t.attempts]), h.board.chores.map((c) => [c.id, c.state]), h.inbox.requests.length]);
+    const inProgress = () => h.board.tickets.filter((t) => t.state === "in_progress");
+    const ready = () => h.board.tickets.filter((t) => t.state === "ready");
+    const fingerprint = () => JSON.stringify([h.board.tickets.map((t) => [t.id, t.state]), h.board.chores.map((c) => [c.id, c.state]), h.inbox.requests.length, h.inbox.messages.length]);
+    // A continuing conversation hears only outcomes decided since its last life; a fresh lead, which remembers nothing, gets the recent ones.
+    const answersSeen = new Set(h.inbox.requests.filter((r) => r.state !== "open").map((r) => r.id));
+    const newAnswers = (): string[] => {
+      const fresh = h.inbox.requests.filter((r) => r.state !== "open" && !answersSeen.has(r.id));
+      for (const r of fresh) answersSeen.add(r.id);
+      return fresh.map(requestOutcome);
+    };
+    const recentAnswers = (): string[] => h.inbox.requests.filter((r) => r.state !== "open").slice(-5).map(requestOutcome);
+    const progressTimer = this.progressChecks(h, ctl.signal, log);
     try {
       while (!ctl.isStop()) {
         if (ctl.isPause()) {
@@ -776,53 +711,79 @@ export class RunManager implements AgentRunHooks {
           run.pauseReason = `workspace is ${sizeMb} MB, over the ${h.session.limits.workspaceMb} MB limit`;
           break;
         }
-        if (run.ticketsDone >= h.session.caps.runTickets) {
-          run.state = "finished";
-          await status(`run ticket cap of ${h.session.caps.runTickets} reached`);
+        if (round >= h.session.caps.goalRounds) {
+          run.state = "paused";
+          run.pauseReason = `${round} lead ${round === 1 ? "life" : "lives"} this run, the session's cap; look at the work, then start again`;
+          await status(run.pauseReason);
           break;
         }
         if (d.healSandbox) {
           const healed = await d.healSandbox(h.id).catch((e: Error) => [`heal failed: ${e.message}`]);
           for (const line of healed) await status(line);
         }
-        const holds = h.board.tickets.find((t) => t.state === "in_progress");
-        const startable = h.board.tickets.some((t) => canStart(h.board, t));
+        const goal = h.session.goal.trim();
+        const holds = inProgress();
+        const startable = ready();
         const sweeping = Boolean(sweepInFlight(h.board));
         const choresOpen = openChores(h.board).length;
-        // Only chores left: one lead gets them; if it sweeps none, the run finishes rather than spend another.
-        const onlyChores = !holds && !startable && !sweeping && choresOpen > 0;
-        if (!holds && !startable && !sweeping && (!choresOpen || choresIdle)) {
-          const open = h.inbox.requests.some((r) => r.state === "open");
-          run.state = hasOpenWork(h.board) || open ? "paused" : "finished";
+        const openRequests = h.inbox.requests.filter((r) => r.state === "open");
+        // Only chores left on the board: one lead gets them; if it sweeps none, the run finishes rather than spend another.
+        const onlyChores = !holds.length && !startable.length && !sweeping && choresOpen > 0;
+        const boardWork = holds.length > 0 || startable.length > 0 || sweeping || (choresOpen > 0 && !choresIdle);
+        if (!goal && !boardWork) {
+          run.state = hasOpenWork(h.board) || openRequests.length ? "paused" : "finished";
           const blockers = describeBlockers(h.board);
-          run.pauseReason = open ? "requests" : hasOpenWork(h.board) ? blockers || "waiting on dependencies" : undefined;
-          await status(open ? "nothing ready; waiting for your answers in the inbox" : run.state === "finished" ? (choresOpen ? `no ready tickets left; ${choresOpen} ${choresOpen === 1 ? "chore stays" : "chores stay"} open (the lead did not sweep them)` : "no ready tickets left") : `nothing can run: ${blockers}`);
+          run.pauseReason = openRequests.length ? "requests" : hasOpenWork(h.board) ? blockers || "waiting on dependencies" : undefined;
+          await status(openRequests.length ? "nothing to work on; waiting for your answers in the inbox" : run.state === "finished" ? (choresOpen ? `no ready tickets left; ${choresOpen} ${choresOpen === 1 ? "chore stays" : "chores stay"} open (the lead did not sweep them)` : "no ready tickets left") : `nothing can run: ${blockers}`);
+          break;
+        }
+        // A request about the work itself (not a ticket) waits on you; the lead goes on only while tickets can.
+        if (openRequests.some((r) => !r.ticketId) && !holds.length && !startable.length) {
+          run.state = "paused";
+          run.pauseReason = "requests";
+          await status("the lead needs you; waiting for your answers in the inbox");
           break;
         }
 
+        round++;
+        run.rounds = round;
         const before = fingerprint();
+        const noteBefore = await this.readNote(h, "state.md", 16_000);
         const agent = agentFor(h.session, "lead");
         const resume = Boolean(convoId) && agent.driver === "claude";
         const agentSession = agent.driver === "claude" ? (resume ? { id: convoId!, resume: true } : { id: randomUUID(), resume: false }) : undefined;
+        const revised = lastGoal !== undefined && lastGoal !== goal;
+        const sinceLastLife = newAnswers();
         const sweepAt = h.session.caps.choreSweepAt;
-        const freshPrompt = () => this.withNotes(h, leadPrompt(h.board, { holds, handoff: handoffNote, onlyChores, sweepAt }));
-        const promptText = resume ? leadContinuePrompt(h.board, holds, { onlyChores, sweepAt }) : await freshPrompt();
+        const freshPrompt = async () => this.withNotes(h, leadPrompt(h.board, await this.leadPromptOptions(h, { round, goal, holds, handoff: handoffNote, lastWords, onlyChores, sweepAt, answers: recentAnswers() })));
+        const promptText = resume ? leadContinuePrompt(h.board, { round, committed: lastCommitted, holds, goal: revised ? goal : undefined, goalChangedAt: h.session.goalSince, answers: sinceLastLife, onlyChores, sweepAt }) : await freshPrompt();
+        lastGoal = goal;
         const leadAbort = new AbortController();
         const onStop = () => leadAbort.abort();
         ctl.signal.addEventListener("abort", onStop, { once: true });
         if (ctl.signal.aborted) break;
         ctx.leadAbort = leadAbort;
         ctx.handoff = undefined;
-        run.currentTicket = holds?.id;
-        await status(resume ? "lead: continuing its conversation" : handoffNote ? "lead: a fresh lead starts from the handoff note" : "lead: started");
-        const lead = await this.runJob(h, run, { role: "lead", holds: holds?.id, agentSession, promptText, freshPrompt }, log, leadAbort.signal);
+        ctx.done = undefined;
+        run.currentTicket = holds[0]?.id;
+        await status(resume ? `life ${round}: the lead continues its conversation` : handoffNote || lastWords ? `life ${round}: a fresh lead starts from the note` : `life ${round}: the lead starts`);
+        const lead = await this.runJob(h, run, { role: "lead", holds: holds[0]?.id, agentSession, promptText, freshPrompt }, log, leadAbort.signal);
         ctl.signal.removeEventListener("abort", onStop);
         await ctx.queue;
         addCost(run, lead.costUsd);
+
+        // Whatever the life left uncommitted is committed, labelled with the tickets in progress; the lead's own commits carry their ids already.
+        const summary = firstLine(lead.text) || "work in progress";
+        const { committed, leaked } = await this.commitAll(h, `Lead ${run.id}.${round}: ${summary.slice(0, 72)}`, inProgress().map((t) => t.id));
+        if (leaked.length) await log({ kind: "error", t: clock(), text: `An agent credential appears in the changes to ${leaked.join(", ")}; nothing was committed there. Remove it from the files.` });
+        lastCommitted = committed;
         await saveRun();
+        await status(`life ${round} ended (${lead.stopReason}): ${committed.length ? `committed ${committed.join(", ")}` : "nothing to commit"}`);
         if (ctl.isStop()) break;
-        if (ctx.halted) {
+        if (ctx.halted || h.inbox.requests.some((r) => r.state === "open" && r.halt)) {
           run.state = "halted";
+          const halt = h.inbox.requests.find((r) => r.state === "open" && r.halt);
+          if (halt) await status(`halted by the lead: ${halt.halt!.reason.slice(0, 300)}`);
           break;
         }
         if (lead.rateLimited || ctx.rateLimited) {
@@ -844,27 +805,49 @@ export class RunManager implements AgentRunHooks {
           continue;
         }
 
+        // Set by the done hook while the lead ran (read through a cast: the assignment above narrowed the field).
+        const claimed = ctx.done as string | undefined;
+        if (claimed) {
+          const note = claimed.trim().slice(0, 8000);
+          const at = clock();
+          if (goal) await h.mutate((docs) => ({ next: { session: { ...docs.session, goalMet: { at, runId: run.id, note } } } }));
+          const left = ready().length + inProgress().length;
+          if (!left) {
+            run.state = "finished";
+            run.pauseReason = `done: ${firstLine(note).slice(0, 200)}`;
+            await status(`the lead says the work is done: ${note.slice(0, 300)}`);
+            break;
+          }
+          await status(`the lead says the goal is met, but ${left} ticket${left === 1 ? " is" : "s are"} still ready or in progress; the next lead works them`);
+        }
+
+        const noteAfter = await this.readNote(h, "state.md", 16_000);
         // Set by the handoff hook while the lead ran.
         const handedOff = ctx.handoff as string | undefined;
         if (handedOff) {
           handoffNote = handedOff;
+          lastWords = undefined;
           convoId = undefined;
           await fs.writeFile(path.join(h.paths.notes, "state.md"), `# Handoff note\n\nWritten by the lead at ${clock()}, for the next lead.\n\n${handoffNote.trim()}\n`);
-          await status(`lead handed off: ${handoffNote.trim().split("\n")[0]!.slice(0, 160)}`);
+          await status(`the lead handed off: ${firstLine(handoffNote).slice(0, 160)}`);
         } else if (lead.stopReason === "time_cap" || lead.stopReason === "turn_cap" || leadAbort.signal.aborted) {
-          handoffNote = `The previous lead was stopped (${lead.stopReason}) before it handed off. Its last message:\n${lead.text.trim().slice(0, 3000) || "(none)"}`;
+          lastWords = `(stopped at ${lead.stopReason}) ${lead.text.trim().slice(0, 3000) || "(no last message)"}`;
+          handoffNote = (await this.readNote(h, "state.md", 16_000)) ?? undefined;
           convoId = undefined;
-          await status(`lead stopped at ${lead.stopReason}; a fresh lead takes over`);
+          await status(`the lead stopped at ${lead.stopReason}; a fresh lead takes over from the note`);
         } else {
+          lastWords = undefined;
           convoId = lead.agentSession && lead.turns > 0 ? lead.agentSession : undefined;
         }
 
-        const moved = fingerprint() !== before;
-        if (onlyChores) choresIdle = !moved;
+        const boardMoved = fingerprint() !== before;
+        const moved = committed.length > 0 || boardMoved || noteAfter !== noteBefore || Boolean(handedOff);
+        // Given only chores, a lead that swept none is done with them whatever else it committed.
+        if (onlyChores) choresIdle = !boardMoved;
         idle = moved ? 0 : idle + 1;
         if (idle >= 2) {
           run.state = "paused";
-          run.pauseReason = "the lead ended twice without moving a ticket";
+          run.pauseReason = "the lead ended twice without a commit, a board change or a change to notes/state.md";
           await status(`${run.pauseReason}; its last message: ${lead.text.trim().slice(0, 300)}`);
           break;
         }
@@ -875,15 +858,15 @@ export class RunManager implements AgentRunHooks {
         }
       }
     } finally {
+      clearInterval(progressTimer);
       await ctx.queue;
       this.leads.delete(h.id);
-      // A pause, a halt or an idle lead can end the run while the lead holds
-      // a ticket it never submitted. Put it back so any later run, in either
-      // mode, can take it; its changes stay in the working tree. A stop
-      // requeues in the caller.
+      // A pause, a halt or an idle lead can end the run while tickets are in
+      // progress. Put them back so the next run's lead takes them up again;
+      // their changes and baselines stay. A stop requeues in the caller.
       if (!ctl.isStop()) {
         for (const t of h.board.tickets.filter((x) => x.state === "in_progress")) {
-          await h.mutate((docs) => (getTicket(docs.board, t.id).state === "in_progress" ? { next: { board: transition(docs.board, t.id, "ready", { by: "harness", text: "The lead's run ended while it held this ticket; requeued with the work kept" }) } } : {})).catch(() => undefined);
+          await h.mutate((docs) => (getTicket(docs.board, t.id).state === "in_progress" ? { next: { board: transition(docs.board, t.id, "ready", { by: "harness", text: "The lead's run ended while it worked this ticket; requeued with the work kept" }) } } : {})).catch(() => undefined);
         }
         if (sweepInFlight(h.board)) await h.mutate((docs) => ({ next: { board: releaseSweep(docs.board, "The lead's run ended during this sweep; the chores are open again and the changes stay in the working tree") } })).catch(() => undefined);
       }
@@ -891,197 +874,13 @@ export class RunManager implements AgentRunHooks {
   }
 
   /**
-   * Goal mode: keep one worker working toward the session's goal. There is
-   * no board: the worker keeps its plan in notes/state.md, the harness
-   * commits whatever a round (one worker, start to exit) left in the
-   * repositories, then starts the next round, which continues the
-   * conversation, or starts a fresh worker from the note after a handoff or
-   * a cap. The run ends when the worker says the goal is met (goal_done,
-   * kept on the session), when you pause, when a request waits on you, when
-   * two rounds in a row change nothing, or at the session's round cap. The
-   * goal text is read again every round, so an edit lands in the next one.
-   */
-  private async goalLoop(
-    h: SessionHandle,
-    run: Run,
-    ctl: { isPause: () => boolean; isStop: () => boolean; signal: AbortSignal },
-    log: (e: VerstasEvent) => Promise<void>,
-    saveRun: () => Promise<void>,
-    setSessionState: (state: Session["state"]) => Promise<unknown>,
-  ): Promise<void> {
-    const d = this.deps;
-    const clock = d.now ?? now;
-    const status = (text: string) => log({ kind: "status", t: clock(), text });
-    const firstLine = (text: string) => (text.trim().split("\n").find((l) => l.trim()) ?? "").trim();
-    const ctx: LeadContext = { runId: run.id, h, run, log, signal: ctl.signal, isPause: ctl.isPause, queue: Promise.resolve(), rateLimited: false, halted: false };
-    this.leads.set(h.id, ctx);
-    let convoId: string | undefined;
-    /** A worker stopped at a cap before it could update its note: its last words go into the next fresh prompt. */
-    let lastWords: string | undefined;
-    let round = 0;
-    let idle = 0;
-    let lastCommitted: string[] = [];
-    /** The goal the previous round was given; a different text now means it was revised meanwhile. */
-    let lastGoal: string | undefined;
-    let lastDenialCheck = clock();
-    // A continuing conversation hears only outcomes decided since its last round; a fresh worker, which remembers nothing, gets the recent ones.
-    const answersSeen = new Set(h.inbox.requests.filter((r) => r.state !== "open").map((r) => r.id));
-    const newAnswers = (): string[] => {
-      const fresh = h.inbox.requests.filter((r) => r.state !== "open" && !answersSeen.has(r.id));
-      for (const r of fresh) answersSeen.add(r.id);
-      return fresh.map(requestOutcome);
-    };
-    const recentAnswers = (): string[] => h.inbox.requests.filter((r) => r.state !== "open" && !r.ticketId).slice(-5).map(requestOutcome);
-    const progressTimer = this.progressChecks(h, ctl.signal, log);
-    try {
-      while (!ctl.isStop()) {
-        if (ctl.isPause()) {
-          run.state = "paused";
-          run.pauseReason = "user";
-          break;
-        }
-        const sizeMb = await workspaceSizeMb(h.paths).catch(() => 0);
-        if (sizeMb > h.session.limits.workspaceMb) {
-          run.state = "paused";
-          run.pauseReason = `workspace is ${sizeMb} MB, over the ${h.session.limits.workspaceMb} MB limit`;
-          break;
-        }
-        if (h.inbox.requests.some((r) => r.state === "open")) {
-          run.state = "paused";
-          run.pauseReason = "requests";
-          await status("the worker needs you; waiting for your answers in the inbox");
-          break;
-        }
-        if (round >= h.session.caps.goalRounds) {
-          run.state = "paused";
-          run.pauseReason = `${round} round${round === 1 ? "" : "s"} this run, the session's cap; look at the work, then start again`;
-          await status(run.pauseReason);
-          break;
-        }
-        const goal = h.session.goal.trim();
-        if (!goal) {
-          run.state = "paused";
-          run.pauseReason = "the goal is empty; write one and start again";
-          await status(run.pauseReason);
-          break;
-        }
-        if (d.healSandbox) {
-          const healed = await d.healSandbox(h.id).catch((e: Error) => [`heal failed: ${e.message}`]);
-          for (const line of healed) await status(line);
-        }
-
-        round++;
-        run.rounds = round;
-        const agent = agentFor(h.session, "goal");
-        const resume = Boolean(convoId) && agent.driver === "claude";
-        const agentSession = agent.driver === "claude" ? (resume ? { id: convoId!, resume: true } : { id: randomUUID(), resume: false }) : undefined;
-        const revised = lastGoal !== undefined && lastGoal !== goal;
-        const sinceLastRound = newAnswers();
-        const freshPrompt = async () => this.withNotes(h, goalPrompt(await this.goalPromptOptions(h, round, goal, lastWords, recentAnswers())));
-        const promptText = resume ? goalContinuePrompt({ round, committed: lastCommitted, goal: revised ? goal : undefined, goalChangedAt: h.session.goalSince, answers: sinceLastRound }) : await freshPrompt();
-        lastGoal = goal;
-        const workerAbort = new AbortController();
-        const onStop = () => workerAbort.abort();
-        ctl.signal.addEventListener("abort", onStop, { once: true });
-        if (ctl.signal.aborted) break;
-        ctx.leadAbort = workerAbort;
-        ctx.handoff = undefined;
-        ctx.goalDone = undefined;
-        const noteBefore = await this.readNote(h, "state.md", 16_000);
-        const requestsBefore = h.inbox.requests.length;
-        await status(resume ? `round ${round}: the worker continues its conversation` : round === 1 && !lastWords ? `round ${round}: a worker starts toward the goal` : `round ${round}: a fresh worker starts from the note`);
-        const w = await this.runJob(h, run, { role: "goal", agentSession, promptText, freshPrompt }, log, workerAbort.signal);
-        ctl.signal.removeEventListener("abort", onStop);
-        addCost(run, w.costUsd);
-
-        // Whatever the round left in the repositories is committed, finished or not: git is the record, and the next worker's starting point.
-        const summary = firstLine(w.text) || "work in progress";
-        const { committed, leaked } = await this.commitAll(h, `Goal round ${run.id}.${round}: ${summary.slice(0, 72)}`);
-        if (leaked.length) await log({ kind: "error", t: clock(), text: `An agent credential appears in the changes to ${leaked.join(", ")}; nothing was committed there. Remove it from the files.` });
-        lastCommitted = committed;
-        await saveRun();
-        await status(`round ${round} ended (${w.stopReason}): ${committed.length ? `committed ${committed.join(", ")}` : "nothing to commit"}`);
-        if (ctl.isStop()) break;
-
-        const halt = h.inbox.requests.find((r) => r.state === "open" && r.halt);
-        if (halt) {
-          run.state = "halted";
-          await status(`halted by the worker: ${halt.halt!.reason.slice(0, 300)}`);
-          break;
-        }
-        if (w.rateLimited) {
-          run.state = "paused";
-          run.pauseReason = "rate_limit";
-          const sleep = d.rateLimitSleepMs ?? 60 * 60_000;
-          run.resumeAt = new Date(Date.now() + sleep).toISOString();
-          await log({ kind: "run", t: clock(), state: "paused", reason: `rate limited; sleeping until ${run.resumeAt}` });
-          await saveRun();
-          await setSessionState("paused");
-          await waitOrAbort(sleep, ctl.signal);
-          if (ctl.isStop()) break;
-          run.state = "running";
-          run.pauseReason = undefined;
-          run.resumeAt = undefined;
-          await setSessionState("running");
-          if (w.agentSession && w.turns > 0) convoId = w.agentSession;
-          continue;
-        }
-        // Set by the goal_done hook while the worker ran (read through a cast: the assignment above narrowed the field).
-        const claimed = ctx.goalDone as string | undefined;
-        if (claimed) {
-          const note = claimed.trim().slice(0, 8000);
-          const at = clock();
-          await h.mutate((docs) => ({ next: { session: { ...docs.session, goalMet: { at, runId: run.id, note } } } }));
-          run.state = "finished";
-          run.pauseReason = `goal met: ${firstLine(note).slice(0, 200)}`;
-          await status(`the worker says the goal is met: ${note.slice(0, 300)}`);
-          break;
-        }
-
-        const noteAfter = await this.readNote(h, "state.md", 16_000);
-        const handedOff = ctx.handoff as string | undefined;
-        if (handedOff) {
-          await fs.writeFile(path.join(h.paths.notes, "state.md"), `# Handoff note\n\nWritten by the worker at ${clock()}, for the next worker.\n\n${handedOff.trim()}\n`);
-          lastWords = undefined;
-          convoId = undefined;
-          await status(`the worker handed off: ${firstLine(handedOff).slice(0, 160)}`);
-        } else if (w.stopReason === "time_cap" || w.stopReason === "turn_cap" || workerAbort.signal.aborted) {
-          lastWords = `(stopped at ${w.stopReason}) ${w.text.trim().slice(0, 3000) || "(no last message)"}`;
-          convoId = undefined;
-          await status(`the worker stopped at ${w.stopReason}; a fresh worker takes over from the note`);
-        } else {
-          lastWords = undefined;
-          convoId = w.agentSession && w.turns > 0 ? w.agentSession : undefined;
-        }
-
-        const moved = committed.length > 0 || Boolean(handedOff) || noteAfter !== noteBefore || h.inbox.requests.length !== requestsBefore;
-        idle = moved ? 0 : idle + 1;
-        if (idle >= 2) {
-          run.state = "paused";
-          run.pauseReason = "the worker ended twice without a commit or a change to notes/state.md";
-          await status(`${run.pauseReason}; its last message: ${w.text.trim().slice(0, 300)}`);
-          break;
-        }
-        if (d.proxyDenials) {
-          const denials = await d.proxyDenials(h.id, lastDenialCheck).catch(() => []);
-          lastDenialCheck = clock();
-          for (const den of denials) await log({ kind: "denied_network", t: clock(), host: den.host, port: den.port });
-        }
-      }
-    } finally {
-      clearInterval(progressTimer);
-      this.leads.delete(h.id);
-    }
-  }
-
-  /**
-   * The progress checks of a goal run: every `caps.progressMinutes` of the
-   * run, the worker running then is asked for a short update, which it
-   * posts as a `message` to the inbox. A check that falls between workers,
-   * or on a driver that cannot take a message, goes to the next worker
-   * that can; a worker is not asked twice within one interval. Nothing is
-   * enforced: the worker's rules tell it to answer. The returned timer is
-   * cleared when the run ends.
+   * The progress checks of a run: every `caps.progressMinutes` of the run,
+   * the lead running then is asked for a short update, which it posts as a
+   * `message` to the inbox. A check that falls between lives, or on a
+   * driver that cannot take a message, goes to the next lead that can; a
+   * lead is not asked twice within one interval. Nothing is enforced: the
+   * lead's facts tell it to answer. The returned timer is cleared when the
+   * run ends.
    */
   private progressChecks(h: SessionHandle, signal: AbortSignal, log: (e: VerstasEvent) => Promise<void>): ReturnType<typeof setInterval> | undefined {
     const minutes = h.session.caps.progressMinutes;
@@ -1092,34 +891,34 @@ export class RunManager implements AgentRunHooks {
     const tick = () => {
       if (signal.aborted || Date.now() < due) return;
       const w = this.workers.get(h.id);
-      if (!w || w.role !== "goal" || w.driver !== "claude") return;
+      if (!w || w.role !== "lead" || w.driver !== "claude") return;
       if (!w.send(PROGRESS_NUDGE, "verstas")) return;
       due = Date.now() + interval;
-      void log({ kind: "status", t: (this.deps.now ?? now)(), text: `progress check: the goal worker was asked for a short update (every ${minutes} min, to the inbox)` }).catch(() => undefined);
+      void log({ kind: "status", t: (this.deps.now ?? now)(), text: `progress check: the lead was asked for a short update (every ${minutes} min, to the inbox)` }).catch(() => undefined);
     };
     const timer = setInterval(tick, Math.min(minuteMs, interval));
     timer.unref?.();
     return timer;
   }
 
-  /** What a fresh goal worker is told besides the goal: the note it inherits, what changed since the note was written, and the recent commits. */
-  private async goalPromptOptions(h: SessionHandle, round: number, goal: string, lastWords: string | undefined, answers: readonly string[]): Promise<GoalPromptOptions> {
+  /** What a fresh lead is told besides the board: the note it inherits, what changed since the note was written, and the recent commits. */
+  private async leadPromptOptions(h: SessionHandle, base: Omit<LeadPromptOptions, "stateNote" | "history" | "goalChange" | "metBefore">): Promise<LeadPromptOptions> {
     const sh = this.deps.shell(h.id);
     const history: { repo: string; log: string }[] = [];
     for (const repo of h.session.repos) {
-      const r = await sh.exec(["git", "log", "--oneline", "-n", String(GOAL_LOG_LINES)], { workdir: `/workspace/${repo.name}`, timeoutMs: 30_000 }).catch(() => null);
+      const r = await sh.exec(["git", "log", "--oneline", "-n", String(LOG_LINES)], { workdir: `/workspace/${repo.name}`, timeoutMs: 30_000 }).catch(() => null);
       history.push({ repo: repo.name, log: r?.code === 0 ? r.stdout : "" });
     }
     const s = h.session;
     const stateNote = await this.readNote(h, "state.md", 16_000);
     // The note was written for an earlier goal when it predates the current text (or does not exist yet and an earlier goal ended).
     const last = s.goals.at(-1);
-    let goalChange: GoalPromptOptions["goalChange"];
-    if (last && s.goalSince) {
+    let goalChange: LeadPromptOptions["goalChange"];
+    if (base.goal && last && s.goalSince) {
       const noteAt = await fs.stat(path.join(h.paths.notes, "state.md")).then((st) => st.mtime.toISOString()).catch(() => null);
       if (!noteAt || noteAt < s.goalSince) goalChange = { kind: last.outcome === "met" ? "next" : "revised", at: last.until, previous: last.text, note: last.note };
     }
-    return { goal, round, stateNote, lastWords, goalChange, metBefore: s.goalMet ? { at: s.goalMet.at, note: s.goalMet.note } : undefined, history, answers };
+    return { ...base, stateNote, goalChange, metBefore: base.goal && s.goalMet ? { at: s.goalMet.at, note: s.goalMet.note } : undefined, history };
   }
 
   /**
@@ -1191,67 +990,11 @@ export class RunManager implements AgentRunHooks {
     return "accepted";
   }
 
-  /** One ticket, start to finish: the implementer, then the judge. Returns how it ended for the loop's bookkeeping. */
-  private async workTicket(
-    h: SessionHandle,
-    run: Run,
-    ticket: Ticket,
-    log: (e: VerstasEvent) => Promise<void>,
-    signal: AbortSignal,
-    convo: { id?: string } = {},
-    opts: { /** The ticket is already in progress (a lead handed it over). */ claimed?: boolean } = {},
-  ): Promise<"done" | "requeued" | "waiting" | "blocked" | "rate_limited" | "halted"> {
-    const d = this.deps;
-    const clock = d.now ?? now;
-    const caps = h.session.caps;
-
-    const answer = latestAnswer(h, ticket.id);
-    if (!opts.claimed) {
-      await h.mutate((docs) => ({ next: { board: transition(docs.board, ticket.id, "in_progress", { by: "harness", text: `Implementer started (judged attempts so far: ${ticket.attempts})` }) } }));
-      await log({ kind: "ticket", t: clock(), ticket: ticket.id, from: "ready", to: "in_progress" });
-    }
-    run.currentTicket = ticket.id;
-    const unknown = unknownRepos(ticket, h.session.repos.map((r) => r.name));
-    if (unknown.length) await h.mutate((docs) => ({ next: { board: addNote(docs.board, ticket.id, "harness", `Expected repositories ${unknown.join(", ")} are not in this session (it has ${h.session.repos.map((r) => r.name).join(", ") || "none"}); the list is a hint, so the work goes on`) } }));
-
-    // A ticket with its own agent gets a fresh conversation on that agent; the session's shared conversation (caps.resumeWorker) is for the session's worker only.
-    const own = ticket.agent;
-    if (own) await log({ kind: "status", t: clock(), ticket: ticket.id, text: `implementer on the ticket's own agent: ${describeAgent(own)}` });
-    const agentSession = caps.resumeWorker && !own ? (convo.id ? { id: convo.id, resume: true } : { id: randomUUID(), resume: false }) : undefined;
-    const freshPrompt = () => this.withNotes(h, implementerPrompt(h.board, getTicket(h.board, ticket.id), answer));
-    const promptText = agentSession?.resume ? implementerPrompt(h.board, getTicket(h.board, ticket.id), answer, true) : await freshPrompt();
-    const impl = await this.runJob(h, run, { role: "implementer", ticket: ticket.id, agentSession, promptText, freshPrompt, agent: own }, log, signal);
-    if (impl.agentSession && impl.turns > 0 && !own) convo.id = impl.agentSession;
-    addCost(run, impl.costUsd);
-    await this.writeTicketReport(h, run, ticket.id, "implementer", impl);
-
-    if (signal.aborted) return "requeued";
-    if (impl.rateLimited) {
-      // A rate limit is not the ticket's fault and gives no verdict, so it costs no attempt.
-      await h.mutate((docs) => ({ next: { board: transition(docs.board, ticket.id, "ready", { by: "harness", text: "Rate limited; requeued" }) } }));
-      run.currentTicket = undefined;
-      return "rate_limited";
-    }
-
-    const parked = await this.parkOnRequests(h, ticket.id, log);
-    if (parked) {
-      run.currentTicket = undefined;
-      return parked;
-    }
-
-    const outcome = await this.judge(h, run, ticket.id, impl, log, signal);
-    // A stopped run requeues the ticket it was on; anything else is settled.
-    if (!signal.aborted) run.currentTicket = undefined;
-    return outcome;
-  }
-
-  /** A ticket with open requests waits for them (or halts the run); the work so far is committed. */
+  /** A ticket with open requests waits for them (or halts the run); its changes stay in the working tree and in the lead's commits. */
   private async parkOnRequests(h: SessionHandle, ticketId: string, log: (e: VerstasEvent) => Promise<void>): Promise<"waiting" | "halted" | undefined> {
     const openForTicket = h.inbox.requests.filter((r) => r.state === "open" && r.ticketId === ticketId);
     if (!openForTicket.length) return undefined;
     const halt = openForTicket.find((r) => r.halt);
-    const t = getTicket(h.board, ticketId);
-    await this.commitInContainer(h, `${t.id} (waiting): ${t.title}`, t.id);
     await this.move(h, ticketId, "waiting", halt ? `Halt requested: ${halt.halt?.reason ?? ""}` : `Waiting on ${openForTicket.map((r) => `${r.id} (${r.actions.map((a) => a.detail.kind).join(", ") || "question"})`).join(", ")}`, log);
     return halt ? "halted" : "waiting";
   }
@@ -1263,18 +1006,17 @@ export class RunManager implements AgentRunHooks {
   }
 
   /**
-   * The verdict on a ticket whose work is finished: the diff, the reviewer
-   * (who runs the repositories' checks; without one the implementer's word
-   * is the verdict), one judged attempt, the commit, and the move out of
-   * review to done, back to ready, or to blocked. Only this moves a ticket
-   * to done. The work may come from an implementer the loop started or from
-   * an agent that submitted it; `impl` says how that worker ended.
+   * The verdict on a ticket the lead moved to review: the change since the
+   * ticket's baseline (docs/BOARD.md, "Judging"), the reviewer (who runs the
+   * repositories' checks; without one the lead's word is the verdict), and
+   * the move out of review to done, back to ready with the notes, or to
+   * blocked. Only this moves a ticket to done while the session has a
+   * reviewer.
    */
   async judge(
     h: SessionHandle,
     run: Run,
     ticketId: string,
-    impl: { ok: boolean; stopReason: string; costUsd: number },
     log: (e: VerstasEvent) => Promise<void>,
     signal: AbortSignal,
   ): Promise<"done" | "requeued" | "blocked" | "rate_limited"> {
@@ -1286,8 +1028,7 @@ export class RunManager implements AgentRunHooks {
 
     if (signal.aborted) return "requeued";
     // What changed, in every repository: the ticket's expected list is a
-    // hint, the change decides what is checked and how it is judged
-    // (docs/BOARD.md, "Judging").
+    // hint, the change decides what is judged (docs/BOARD.md, "Judging").
     const changes = await this.collectChanges(h, ticketId);
     const names = changes.map((c) => c.repo);
     const numstat = { added: sum(changes, "added"), removed: sum(changes, "removed"), files: sum(changes, "files") };
@@ -1296,31 +1037,25 @@ export class RunManager implements AgentRunHooks {
     const mode = level.mode;
     const touched: TouchedRepo[] = changes.map((c) => ({ repo: c.repo, added: c.added, removed: c.removed, files: c.files }));
     const planned = plannedVsTouched(ticket.repos, names);
-    const perRepo = changes.length ? changes.map((c) => `${c.repo} ${c.files} files, +${c.added} −${c.removed}`).join("; ") : "0 files, +0 −0";
-    const summary = `Implementer ${impl.ok ? "finished" : `stopped (${impl.stopReason})`}; ${perRepo}${planned ? ` (${planned})` : ""}; judged: ${mode} (${level.why})`;
+    const perRepo = changes.length ? changes.map((c) => `${c.repo} ${c.files} files, +${c.added} −${c.removed}${c.commits.mine.length ? `, ${c.commits.mine.length} commit${c.commits.mine.length === 1 ? "" : "s"}` : ""}`).join("; ") : "0 files, +0 −0";
+    const summary = `Submitted by the lead; ${perRepo}${planned ? ` (${planned})` : ""}; judged: ${mode} (${level.why})`;
     if (getTicket(h.board, ticketId).state !== "review") await move("review", summary);
     else await h.mutate((docs) => ({ next: { board: addNote(docs.board, ticketId, "harness", summary) } }));
 
     // Who decides. With a reviewer: the reviewer, always, including when no
     // files changed (a report or an investigation can be the deliverable);
-    // it runs the repositories' checks itself. With "none" the
-    // implementer's word is the verdict: it finished, or it gets another
-    // attempt.
+    // it runs the repositories' checks itself. Without one the lead's word
+    // is the verdict.
     let verdict: "ok" | "fixable" | "blocked";
     let verdictNote = "";
     if (mode === "none") {
-      const report = getTicket(h.board, ticketId).report;
-      if (!impl.ok) verdictNote = `implementer stopped (${impl.stopReason})`;
-      else if (!changed && !report) verdictNote = "no files changed and no report was filed";
-      verdict = verdictNote ? "fixable" : "ok";
+      verdict = "ok";
     } else {
       if (signal.aborted) return "requeued";
-      const rev = await this.runJob(h, run, { role: "reviewer", ticket: ticketId, promptText: await this.withNotes(h, reviewerPrompt(getTicket(h.board, ticketId), changes, { ok: impl.ok, stopReason: impl.stopReason }, { why: level.why, planned })) }, log, signal);
+      const rev = await this.runJob(h, run, { role: "reviewer", ticket: ticketId, promptText: await this.withNotes(h, reviewerPrompt(getTicket(h.board, ticketId), changes, { why: level.why, planned })) }, log, signal);
       addCost(run, rev.costUsd);
       await this.writeTicketReport(h, run, ticketId, "reviewer", rev);
       if (rev.rateLimited) {
-        // Keep the work; the loop sleeps and the ticket goes back to ready for a fresh review next time.
-        await this.commitInContainer(h, `${ticketId} (wip): ${ticket.title}`, ticketId);
         await move("ready", "Reviewer was rate limited; requeued with the work kept");
         return "rate_limited";
       }
@@ -1331,32 +1066,39 @@ export class RunManager implements AgentRunHooks {
     }
 
     // One judged attempt, whatever the verdict.
-    const attempts = getTicket(h.board, ticketId).attempts + 1;
-    await h.mutate((docs) => ({ next: { board: replaceTicket(docs.board, { ...getTicket(docs.board, ticketId), attempts, touched }) } }));
+    await h.mutate((docs) => {
+      const t = getTicket(docs.board, ticketId);
+      return { next: { board: replaceTicket(docs.board, { ...t, attempts: t.attempts + 1, touched }) } };
+    });
 
     if (verdict === "ok") {
-      const leaked = await this.commitInContainer(h, `${ticketId}: ${ticket.title}`, ticketId);
-      if (leaked.length) {
-        const note = `The Claude token appears in the changes to ${leaked.join(", ")}; nothing was committed in any repository. Remove it from the files (the changes are still in the working tree) and move the ticket back to ready.`;
-        await log({ kind: "error", t: clock(), ticket: ticketId, text: note });
-        await move("blocked", note);
-        return "blocked";
+      // The lead's commits carry the ticket; what is still uncommitted is
+      // committed under the ticket when no other ticket is in flight (its
+      // edits could be in the working tree too; the backup commit at the end
+      // of the life takes those, labelled with every ticket in progress).
+      const others = h.board.tickets.filter((t) => t.id !== ticketId && (t.state === "in_progress" || t.state === "review"));
+      if (!others.length) {
+        const leaked = await this.commitInContainer(h, `${ticketId}: ${ticket.title}`, [ticketId]);
+        if (leaked.length) {
+          const note = `The Claude token appears in the changes to ${leaked.join(", ")}; nothing was committed in any repository. Remove it from the files (the changes are still in the working tree) and move the ticket back to ready.`;
+          await log({ kind: "error", t: clock(), ticket: ticketId, text: note });
+          await move("blocked", note);
+          return "blocked";
+        }
       }
       await h.mutate((docs) => {
-        const t = getTicket(docs.board, ticketId);
-        return { next: { board: replaceTicket(docs.board, { ...t, diff: numstat, touched, cost: { ...(t.cost ?? { inputTokens: 0, outputTokens: 0 }), usd: (t.cost?.usd ?? 0) + impl.costUsd } }) } };
+        const { baseline: _b, ...t } = getTicket(docs.board, ticketId);
+        return { next: { board: replaceTicket(docs.board, { ...t, diff: numstat, touched }) } };
       });
-      await move("done", `${mode === "full" ? "Reviewed ok" : "Accepted without review"}${changed ? "" : " (no files changed)"}${verdictNote ? `: ${verdictNote}` : ""}`);
+      await move("done", `${mode === "full" ? "Reviewed ok" : "Accepted on the lead's word"}${changed ? "" : " (no files changed)"}${verdictNote ? `: ${verdictNote}` : ""}`);
       run.ticketsDone++;
       return "done";
     }
-    if (verdict === "fixable" && attempts < caps.ticketAttempts) {
-      await this.commitInContainer(h, `${ticketId} (wip attempt ${attempts}): ${ticket.title}`, ticketId);
-      await move("ready", `Not done yet (${verdictNote || "see reviewer notes"}); attempt ${attempts} of ${caps.ticketAttempts}`);
+    if (verdict === "fixable") {
+      await move("ready", `Not done yet (${verdictNote || "see reviewer notes"}); the reviewer's notes are on the ticket`);
       return "requeued";
     }
-    await this.commitInContainer(h, `${ticketId} (blocked): ${ticket.title}`, ticketId);
-    await move("blocked", verdict === "blocked" ? `Reviewer: blocked. ${verdictNote}` : `Gave up after ${attempts} attempts: ${verdictNote || "not accepted"}`);
+    await move("blocked", `Reviewer: blocked. ${verdictNote}`);
     return "blocked";
   }
 
@@ -1379,7 +1121,7 @@ export class RunManager implements AgentRunHooks {
     const level = ticket ? reviewLevel(ticket, h.session.caps) : { mode: h.session.caps.reviewer ? ("full" as const) : ("none" as const), why: "a sweep takes the session's setting" };
     return {
       ticket: ticket?.id,
-      touched: changes.map((c) => ({ repo: c.repo, files: c.files, added: c.added, removed: c.removed, paths: c.paths.slice(0, 50), ...(c.scattered.length ? { earlierAttemptsNotInDiff: c.scattered } : {}) })),
+      touched: changes.map((c) => ({ repo: c.repo, files: c.files, added: c.added, removed: c.removed, paths: c.paths.slice(0, 50), commits: c.commits })),
       planned: ticket?.repos ?? [],
       plannedVsTouched: ticket ? plannedVsTouched(ticket.repos, changes.map((c) => c.repo)) : undefined,
       review: level,
@@ -1402,10 +1144,8 @@ export class RunManager implements AgentRunHooks {
       agentSession?: Job["agentSession"];
       /** The prompt for a fresh conversation when a resume fails. */
       freshPrompt?: () => Promise<string>;
-      /** The ticket a lead already holds; its token starts with it. */
+      /** A ticket the lead already has in progress; its token starts with it. */
       holds?: string;
-      /** The ticket's own agent, when it names one; else the session's agent for the role. */
-      agent?: AgentSpec;
     },
     log: (e: VerstasEvent) => Promise<void>,
     signal: AbortSignal,
@@ -1422,9 +1162,9 @@ export class RunManager implements AgentRunHooks {
     const dir = path.join(h.paths.workspace, rel);
     await fs.mkdir(dir, { recursive: true });
     await fs.writeFile(path.join(dir, "prompt.md"), job.promptText);
-    await fs.writeFile(path.join(dir, "system.md"), systemMd(job.role, job.role === "lead" ? await readLeadRules() : job.role === "goal" ? await readGoalRules() : undefined, h.session.planning));
-    // The reviewer may be a different agent than the worker (session.agents), and a ticket may name its own; everything else about the job is the same.
-    const agent = job.agent ?? agentFor(h.session, job.role);
+    await fs.writeFile(path.join(dir, "system.md"), systemMd(job.role, job.role === "lead" ? await readLeadRules() : undefined, h.session.planning));
+    // The reviewer may be a different agent than the worker (session.agents); everything else about the job is the same.
+    const agent = agentFor(h.session, job.role);
     const spec: Job = {
       role: job.role,
       ticket: job.ticket,
@@ -1432,9 +1172,9 @@ export class RunManager implements AgentRunHooks {
       promptFile: `/workspace/${rel}/prompt.md`,
       systemPromptFile: `/workspace/${rel}/system.md`,
       caps:
-        // The goal worker lives as long as a lead: it spans the whole goal, not one ticket.
-        job.role === "lead" || job.role === "goal"
-          ? { minutes: h.session.caps.leadMinutes, turns: h.session.caps.leadTurns, budgetUsd: h.session.caps.budgetUsd }
+        // The lead's caps are optional liveness limits; unset, only the budget, a handoff or the user ends a life.
+        job.role === "lead"
+          ? { minutes: h.session.caps.leadMinutes ?? NO_CAP_MINUTES, turns: h.session.caps.leadTurns ?? NO_CAP_TURNS, budgetUsd: h.session.caps.budgetUsd }
           : job.role === "setup"
             ? // Setup installs toolchains and runs every repository's check once; most of its time is waiting on those, not model turns.
               { minutes: Math.max(h.session.caps.workerMinutes, SETUP_MIN_MINUTES), turns: Math.max(h.session.caps.workerTurns, SETUP_MIN_TURNS), budgetUsd: h.session.caps.budgetUsd }
@@ -1490,7 +1230,7 @@ export class RunManager implements AgentRunHooks {
     await fs.mkdir(dir, { recursive: true });
     await fs.writeFile(path.join(dir, "rules.md"), terminalMd(h.session, spec.driver));
     // The session's worker model when the worker runs on the same driver; else the CLI's default.
-    const worker = agentFor(h.session, "implementer");
+    const worker = agentFor(h.session, "lead");
     const job: TerminalJob = {
       driver: spec.driver === "codex" ? "codex" : "claude",
       model: worker.driver === spec.driver ? worker.model || undefined : undefined,
@@ -1572,54 +1312,84 @@ export class RunManager implements AgentRunHooks {
   private async writeTicketReport(h: SessionHandle, run: Run, ticketId: string, role: string, done: WorkerDone): Promise<void> {
     const file = path.join(h.paths.runs, String(run.id), "tickets", `${ticketId}.md`);
     const t = getTicket(h.board, ticketId);
-    const block = `\n## ${role} · ${done.t} · ${done.stopReason} · ${done.turns} turns · ${done.seconds}s · $${done.costUsd.toFixed(2)}\n\n${role === "implementer" ? (t.report ?? "(no report)") : done.text}\n`;
+    const block = `\n## lead's report\n\n${t.report ?? "(no report)"}\n\n## ${role} · ${done.t} · ${done.stopReason} · ${done.turns} turns · ${done.seconds}s · $${done.costUsd.toFixed(2)}\n\n${done.text}\n`;
     await fs.appendFile(file, block);
   }
 
   /**
-   * Stages everything and reads what changed in every repository: since the
-   * ticket's earliest attempt still at the top of the history (its earlier
-   * attempts were committed as wip), or since HEAD without a ticket. Only
-   * repositories with a change are returned.
+   * Stages everything and reads what changed in every repository for a
+   * ticket, as the review boundary defines it (docs/BOARD.md, "Judging"):
+   * since the ticket's baseline, the commits that carry its id (subject or
+   * Verstas-Ticket trailer) plus the working tree; commits of other tickets
+   * in the range are left out, unlabelled ones are listed. Without a
+   * baseline (a ticket from before baselines, or no ticket at all) it is
+   * the working tree against HEAD. Only repositories with a change are
+   * returned.
    */
   private async collectChanges(h: SessionHandle, ticketId?: string): Promise<RepoChange[]> {
     const sh = this.deps.shell(h.id);
+    const ticket = ticketId ? h.board.tickets.find((t) => t.id === ticketId) : undefined;
     const out: RepoChange[] = [];
     for (const repo of h.session.repos) {
       const workdir = `/workspace/${repo.name}`;
-      await sh.exec(["git", "add", "-A"], { workdir, timeoutMs: 60_000 });
+      const git = (args: string[], timeoutMs = 60_000) => sh.exec(["git", ...args], { workdir, timeoutMs });
+      await git(["add", "-A"]);
+      const base = ticket?.baseline?.[repo.name];
+      let commits: RepoChange["commits"] = { mine: [], others: [], unlabelled: [] };
       let ref: string[] = [];
-      let scattered: string[] = [];
-      if (ticketId) {
-        const lg = await sh.exec(["git", "log", "--format=%H%x09%s", "-n", "200"], { workdir, timeoutMs: 60_000 });
-        const e = earlierAttempts(lg.code === 0 ? lg.stdout : "", ticketId);
-        scattered = e.scattered;
-        if (e.base) ref = [`${e.base}^`];
-      }
-      let num = await sh.exec(["git", "diff", "--cached", "--numstat", ...ref], { workdir, timeoutMs: 60_000 });
-      if (num.code !== 0 && ref.length) {
-        // The first attempt was the repository's first commit: there is no parent to diff from.
-        ref = [];
-        num = await sh.exec(["git", "diff", "--cached", "--numstat"], { workdir, timeoutMs: 60_000 });
+      if (base && ticketId) {
+        const lg = await git(["log", "--format=%H%x09%s%x09%(trailers:key=Verstas-Ticket,valueonly,separator=%x2C)", `${base}..HEAD`]);
+        if (lg.code === 0) commits = classifyCommits(lg.stdout, ticketId);
+        // Nothing else in the range: one diff from the baseline covers the commits and the working tree.
+        if (lg.code === 0 && !commits.others.length) ref = [base];
       }
       let added = 0;
       let removed = 0;
       let files = 0;
       const paths: string[] = [];
-      for (const line of num.stdout.split("\n")) {
-        const [a, r, ...rest] = line.split("\t");
-        if (a === undefined || r === undefined) continue;
-        files++;
-        added += Number(a) || 0;
-        removed += Number(r) || 0;
-        // A rename shows as "old => new" or "{a => b}/file"; the new name is what the rules apply to.
-        const p = rest.join("\t").trim().replace(/\{[^}]* => ([^}]*)\}/g, "$1").replace(/^.* => /, "");
-        if (p) paths.push(p);
+      const take = (numstat: string) => {
+        for (const line of numstat.split("\n")) {
+          const [a, r, ...rest] = line.split("\t");
+          if (a === undefined || r === undefined) continue;
+          files++;
+          added += Number(a) || 0;
+          removed += Number(r) || 0;
+          // A rename shows as "old => new" or "{a => b}/file"; the new name is what the rules apply to.
+          const p = rest.join("\t").trim().replace(/\{[^}]* => ([^}]*)\}/g, "$1").replace(/^.* => /, "");
+          if (p) paths.push(p);
+        }
+      };
+      let stat = "";
+      let diff = "";
+      if (commits.others.length) {
+        // Other tickets' commits sit in the range: this ticket's commits are shown one by one, then the working tree against HEAD.
+        for (const c of commits.mine) {
+          const sha = c.split(" ")[0]!;
+          const num = await git(["show", "--numstat", "--format=", sha]);
+          take(num.stdout);
+          const patch = await git(["show", "--format=## %h %s", sha]);
+          diff += `${patch.stdout}\n`;
+        }
+        const num = await git(["diff", "--cached", "--numstat"]);
+        take(num.stdout);
+        const wt = await git(["diff", "--cached"]);
+        if (wt.stdout.trim()) diff += `## working tree (uncommitted)\n${wt.stdout}\n`;
+        stat = (await git(["diff", "--cached", "--stat"])).stdout.trim();
+      } else {
+        let num = await git(["diff", "--cached", "--numstat", ...ref]);
+        if (num.code !== 0 && ref.length) {
+          // The baseline is gone (a reclone, a rewritten history): fall back to the working tree.
+          ref = [];
+          num = await git(["diff", "--cached", "--numstat"]);
+        }
+        take(num.stdout);
+        if (files) {
+          stat = (await git(["diff", "--cached", "--stat", ...ref])).stdout.trim();
+          diff = (await git(["diff", "--cached", ...ref])).stdout;
+        }
       }
-      if (!files && !scattered.length) continue;
-      const stat = await sh.exec(["git", "diff", "--cached", "--stat", ...ref], { workdir, timeoutMs: 60_000 });
-      const diff = await sh.exec(["git", "diff", "--cached", ...ref], { workdir, timeoutMs: 60_000 });
-      out.push({ repo: repo.name, added, removed, files, stat: stat.stdout.trim(), diff: diff.stdout, paths, scattered });
+      if (!files && !commits.mine.length) continue;
+      out.push({ repo: repo.name, added, removed, files, stat, diff, paths, commits });
     }
     return out;
   }
@@ -1629,16 +1399,17 @@ export class RunManager implements AgentRunHooks {
    * (docs/SANDBOX.md Boundary 5), all or nothing: every repository's staged
    * diff is searched for secrets first, and if one has a secret nothing is
    * committed anywhere (the changes are unstaged and stay in the working
-   * tree) and the names are returned so the caller can refuse. A ticket's
-   * commits carry `Verstas-Ticket` and `Verstas-Repos` trailers, so the
-   * commits of one change across repositories can be found together.
+   * tree) and the names are returned so the caller can refuse. The commit
+   * carries a `Verstas-Ticket` trailer per ticket it belongs to and a
+   * `Verstas-Repos` trailer when it spans repositories, so the commits of
+   * one change can be found together.
    */
-  private async commitInContainer(h: SessionHandle, message: string, ticketId?: string): Promise<string[]> {
-    return (await this.commitAll(h, message, ticketId)).leaked;
+  private async commitInContainer(h: SessionHandle, message: string, ticketIds: readonly string[] = []): Promise<string[]> {
+    return (await this.commitAll(h, message, ticketIds)).leaked;
   }
 
   /** Every repository with staged changes is committed with the message, or none when a secret is in any of them: the committed names and the leaking ones. */
-  private async commitAll(h: SessionHandle, message: string, ticketId?: string): Promise<{ committed: string[]; leaked: string[] }> {
+  private async commitAll(h: SessionHandle, message: string, ticketIds: readonly string[] = []): Promise<{ committed: string[]; leaked: string[] }> {
     const sh = this.deps.shell(h.id);
     const secrets = ((await this.deps.secrets?.().catch(() => [])) ?? []).filter((x) => x.length >= 16);
     const leaked: string[] = [];
@@ -1659,7 +1430,7 @@ export class RunManager implements AgentRunHooks {
       for (const name of staged) await sh.exec(["git", "reset", "-q"], { workdir: `/workspace/${name}`, timeoutMs: 60_000 });
       return { committed: [], leaked };
     }
-    const trailers = ticketId ? ["--trailer", `Verstas-Ticket: ${ticketId}`, ...(staged.length > 1 ? ["--trailer", `Verstas-Repos: ${staged.join(", ")}`] : [])] : [];
+    const trailers = [...ticketIds.flatMap((id) => ["--trailer", `Verstas-Ticket: ${id}`]), ...(ticketIds.length && staged.length > 1 ? ["--trailer", `Verstas-Repos: ${staged.join(", ")}`] : [])];
     for (const name of staged) await sh.exec(["git", "-c", "core.hooksPath=/dev/null", "commit", "-q", "--no-verify", ...trailers, "-m", message], { workdir: `/workspace/${name}`, timeoutMs: 60_000 });
     return { committed: staged, leaked };
   }
@@ -1712,13 +1483,6 @@ export const describeBlockers = (board: Board): string => {
   return [...byDep.entries()]
     .map(([dep, ids]) => `${ids.length > 3 ? `${ids.slice(0, 3).join(", ")} and ${ids.length - 3} more` : ids.join(", ")} wait on ${dep}`)
     .join("; ");
-};
-
-/** The most recent resolved request on this ticket, as the outcome block for the next worker. */
-const latestAnswer = (h: SessionHandle, ticketId: string): string | undefined => {
-  const decided = h.inbox.requests.filter((r) => r.ticketId === ticketId && r.state !== "open").sort((a, b) => (b.decidedAt ?? "").localeCompare(a.decidedAt ?? ""));
-  const r = decided[0];
-  return r ? requestOutcome(r) : undefined;
 };
 
 /** "SETUP: ready|needs", then "- [x] requirement (how)" lines, then a summary. */

@@ -12,7 +12,6 @@ import {
   reviewModeSchema,
   capsSchema,
   choreIdSchema,
-  sessionModeSchema,
   planningSchema,
   type Planning,
   DEFAULT_ALLOWLIST,
@@ -1051,11 +1050,10 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
   );
 
   /**
-   * The goal (goal mode's brief; the Plan tickets suggestion elsewhere).
-   * Saved at any time: the next round reads it fresh, the goal it replaces
-   * goes to the session's history, and a goal worker running now is told
-   * in its conversation so a small correction steers it instead of
-   * stopping it.
+   * The goal the lead works toward beside the board. Saved at any time: the
+   * next lead life reads it fresh, the goal it replaces goes to the
+   * session's history, and a lead running now is told in its conversation
+   * so a small correction steers it instead of stopping it.
    */
   api.put(
     "/sessions/:id/goal",
@@ -1070,7 +1068,7 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
       });
       const changed = h.session.goal.trim() !== before;
       let told: string | undefined;
-      if (changed && h.session.mode === "goal" && d.runs.status(id)) {
+      if (changed && d.runs.status(id)) {
         const r = await d.runs.message(id, `The goal was revised. It now reads:\n\n${h.session.goal.trim()}\n\nReconcile notes/state.md with it before you continue; earlier work may have aimed at the old text.`);
         told = r.ok ? r.to : undefined;
       }
@@ -1248,7 +1246,7 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
     }),
   );
 
-  /** The goal worker's plan and progress note (notes/state.md; a lead's handoff note in lead mode), with its age. */
+  /** The lead's plan and progress note (notes/state.md), with its age. */
   api.get(
     "/sessions/:id/state-note",
     wrap(async (req, res) => {
@@ -2204,14 +2202,13 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
     wrap(async (req, res) => {
       const body = z
         .object({
-          caps: capsSchema.partial().optional(),
+          /** null on leadMinutes or leadTurns clears the cap. */
+          caps: capsSchema.partial().extend({ leadMinutes: capsSchema.shape.leadMinutes.nullable(), leadTurns: capsSchema.shape.leadTurns.nullable() }).optional(),
           limits: limitsSchema.partial().optional(),
           /** Legacy: sets the worker's model and keeps its driver. */
           model: z.string().max(100).nullable().optional(),
           /** Replaces the agents block. Applies to the next worker that starts. */
           agents: sessionAgentsSchema.optional(),
-          /** How tickets are worked; applies to the next run. */
-          mode: sessionModeSchema.optional(),
           /** How planning agents size tickets; replaces the block, null (or nothing set) clears it. Applies to the next planner or terminal. */
           planning: planningSchema.nullable().optional(),
         })
@@ -2222,16 +2219,15 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
         const planning = body.planning === undefined ? s.planning : cleanPlanning(body.planning);
         let agents = body.agents ?? s.agents;
         if (body.model !== undefined && !body.agents) {
-          const worker = agentFor(s, "implementer");
+          const worker = agentFor(s, "lead");
           agents = { ...s.agents, worker: { driver: worker.driver, model: body.model?.trim() || undefined } };
         }
         const next = {
           ...s,
-          caps: capsSchema.parse({ ...s.caps, ...body.caps }),
+          caps: capsSchema.parse(Object.fromEntries(Object.entries({ ...s.caps, ...body.caps }).filter(([, v]) => v !== null && v !== undefined))),
           limits: limitsSchema.parse({ ...s.limits, ...body.limits }),
           model: body.model === undefined ? s.model : body.model?.trim() || undefined,
           agents,
-          mode: body.mode ?? s.mode,
           planning,
         };
         // A newly chosen agent's backend joins the allowlist; the proxy picks it up before the next worker.

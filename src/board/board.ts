@@ -47,9 +47,10 @@ export class BoardError extends Error {
 
 /** Transitions the harness and the user may make. */
 const TRANSITIONS: Record<TicketState, readonly TicketState[]> = {
-  backlog: ["ready"],
+  backlog: ["ready", "in_progress"],
   ready: ["in_progress", "backlog"],
-  in_progress: ["review", "waiting", "blocked", "ready"],
+  // done straight from in_progress is for a session without a reviewer (and for you); with one, done comes from review.
+  in_progress: ["review", "waiting", "blocked", "ready", "done"],
   review: ["done", "ready", "blocked", "waiting"],
   waiting: ["ready", "blocked", "backlog"],
   blocked: ["ready", "backlog"],
@@ -199,30 +200,15 @@ export const validateRepos = (tickets: readonly Pick<Ticket, "id" | "repos" | "s
 // --- The agent's limited powers --------------------------------------------
 
 /**
- * Who is calling the agent API: a worker on a ticket, the planner, a lead
- * that works the board, or the agent in your terminal (you are typing to
- * it, so it plans like the planner and holds no ticket).
+ * Who is calling the agent API: a worker on a job (the reviewer, setup, a
+ * prompt), the planner, the lead that works the board, or the agent in
+ * your terminal (you are typing to it, so it plans with you).
  */
-export type AgentRole = "worker" | "planner" | "lead" | "terminal" | "goal";
+export type AgentRole = "worker" | "planner" | "lead" | "terminal";
 
-export const AGENT_TICKET_KINDS: readonly TicketKind[] = ["bug", "followup", "chore"];
-
-/** Workers create tickets of these kinds only; the planner, a lead and a terminal agent may also create features (into the backlog, for your approval). */
-export const assertAgentMayCreate = (kind: TicketKind, role: AgentRole): void => {
-  if (role === "planner" || role === "lead" || role === "terminal") return;
-  if (!AGENT_TICKET_KINDS.includes(kind)) {
-    throw new BoardError(`A worker may not create ${kind} tickets; file an idea instead`, "forbidden_kind");
-  }
-};
-
-/**
- * Reprioritizing by the agent: never a pinned ticket, and never a move that
- * takes a ticket out of ready (that is the user's call). A reason is
- * mandatory and lands in the notes.
- */
+/** Reprioritizing by an agent. The reason is mandatory and lands in the notes. */
 export const agentSetPriority = (board: Board, id: string, priority: number, reason: string): Board => {
   const t = getTicket(board, id);
-  if (t.pinned) throw new BoardError(`${id} is pinned`, "pinned");
   const at = now();
   return replaceTicket(board, {
     ...t,
@@ -234,7 +220,6 @@ export const agentSetPriority = (board: Board, id: string, priority: number, rea
 
 export const agentAddDep = (board: Board, id: string, dep: string, reason: string): Board => {
   const t = getTicket(board, id);
-  if (t.pinned) throw new BoardError(`${id} is pinned`, "pinned");
   getTicket(board, dep);
   if (t.deps.includes(dep)) return board;
   const at = now();
@@ -248,20 +233,17 @@ export const agentAddDep = (board: Board, id: string, dep: string, reason: strin
   return next;
 };
 
-/** What the agent in your terminal may change on a ticket. */
+/** What the lead or the agent in your terminal may change on a ticket. */
 export type TicketEdit = Partial<Pick<Ticket, "title" | "kind" | "spec" | "acceptance" | "size" | "repos" | "deps" | "priority">> & { state?: "backlog" | "ready" };
 
-const HELD_BY_WORKER: readonly TicketState[] = ["in_progress", "review"];
-
 /**
- * An edit by the agent in your terminal. You are at the keyboard, so it may
- * change a ticket as you would (pinned ones too), except one a worker holds;
- * no run is active while a terminal is open, so that is a leftover. A state
- * change follows the same transitions as yours. The reason lands in the notes.
+ * An edit by the lead or the agent in your terminal: any ticket but one in
+ * review, which the reviewer is reading. A state change follows the same
+ * transitions as yours. The reason lands in the notes.
  */
 export const editTicket = (board: Board, id: string, patch: TicketEdit, reason: string): Board => {
   const t = getTicket(board, id);
-  if (HELD_BY_WORKER.includes(t.state)) throw new BoardError(`${id} is ${t.state}: a worker holds it`, "forbidden_move");
+  if (t.state === "review") throw new BoardError(`${id} is in review: wait for the verdict`, "forbidden_move");
   const at = now();
   const fields = Object.fromEntries(Object.entries(patch).filter(([k, v]) => v !== undefined && k !== "state")) as Partial<Ticket>;
   let next: Ticket = { ...t, ...fields, updatedAt: at, notes: [...t.notes, { at, by: "agent", text: `Edited (${Object.keys(patch).join(", ") || "nothing"}): ${reason}` }] };
@@ -276,14 +258,14 @@ export const editTicket = (board: Board, id: string, patch: TicketEdit, reason: 
 };
 
 /**
- * Deletion by the agent in your terminal, for merges and tickets that no
- * longer apply. Tickets that depended on it depend on `replacedBy` instead
- * (the ticket it was merged into), or on nothing more; each says so in its
- * notes. Never a ticket a worker holds.
+ * Deletion by the lead or the agent in your terminal, for merges and
+ * tickets that no longer apply. Tickets that depended on it depend on
+ * `replacedBy` instead (the ticket it was merged into), or on nothing more;
+ * each says so in its notes. Never a ticket in review.
  */
 export const deleteTicket = (board: Board, id: string, reason: string, replacedBy?: string): Board => {
   const t = getTicket(board, id);
-  if (HELD_BY_WORKER.includes(t.state)) throw new BoardError(`${id} is ${t.state}: a worker holds it`, "forbidden_move");
+  if (t.state === "review") throw new BoardError(`${id} is in review: wait for the verdict`, "forbidden_move");
   if (replacedBy !== undefined) {
     if (replacedBy === id) throw new BoardError(`${id} cannot replace itself`, "unknown_dep");
     getTicket(board, replacedBy);
@@ -318,7 +300,7 @@ export type ImportResult = {
  * ready); a ticket without an id, or with an unknown one, is appended with
  * a fresh id. Deps are validated at the end against the whole result.
  *
- * `by` records who imported in the notes; `role` limits kinds for agents.
+ * `by` records who imported in the notes.
  */
 export const importBoard = (
   board: Board,
@@ -335,14 +317,6 @@ export const importBoard = (
 
   for (const inc of parsed.tickets) {
     const kind = inc.kind ?? "feature";
-    if (opts.by === "agent") {
-      try {
-        assertAgentMayCreate(kind, opts.role ?? "worker");
-      } catch (e) {
-        skipped.push({ title: inc.title, reason: (e as Error).message });
-        continue;
-      }
-    }
     // An empty or foreign id (a generator's "J-1") is no id: the ticket is appended with the next free T-n.
     const incId = inc.id?.trim() || undefined;
     const existing = incId ? tickets.find((t) => t.id === incId) : undefined;

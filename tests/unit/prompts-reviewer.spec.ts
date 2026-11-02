@@ -10,6 +10,6 @@ test("the reviewer is told to read the code, not only to check acceptance", () =
   // Small findings are chores, not tickets: the one rule that keeps the board from filling with nits.
   expect(md).toContain("anything smaller becomes a `chore`");
   for (const v of ["VERDICT: ok", "VERDICT: fixable", "VERDICT: blocked"]) expect(md).toContain(v);
-  // The implementer's rules are untouched by the reviewer wording.
-  expect(systemMd("implementer")).not.toContain("read every hunk");
+  // The lead's rules are untouched by the reviewer wording.
+  expect(systemMd("lead")).not.toContain("read every hunk");
 });

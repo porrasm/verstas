@@ -56,17 +56,16 @@ A bare array of tickets is accepted as well.
 - Agents importing through the API may create `bug`, `followup` and `chore`
   tickets only. Features from an agent are skipped and reported; the agent
   files them as ideas instead.
-- `agent` is optional. When set, the ticket's implementer is a fresh worker
+- `agent` is optional. When set, the ticket's worker was a fresh worker
   on that driver and model instead of the session's worker (Agent options);
   the reviewer stays the session's, so the review is independent of what
   wrote the code. The driver needs a credential in Settings: a run refuses
   to start while a live ticket names one without it, and the driver's
-  network pack joins the allowlist when the run starts. In lead mode the
-  lead may not claim such a ticket; it hands it over with `board_run`,
-  which runs the worker and the judge while the lead waits. Use it for
-  tickets that need a particular strength, such as judging rendered images.
+  network pack joins the allowlist when the run starts. Kept for boards
+  that carry it; since one lead does every ticket, nothing runs on it any
+  more.
 - `review` is optional and yours only (Judging, below): `full` runs the
-  reviewer, `none` accepts the ticket when the implementer finished
+  reviewer, `none` accepts the ticket on the lead's word
   ("Accepted without review"). Absent, the session's Reviewer setting
   applies: on means `full`, off means `none`. Use `none` for a doc update
   or a trivial change. `checks` is a value from before the harness
@@ -76,43 +75,45 @@ A bare array of tickets is accepted as well.
 
 ### Judging
 
-A ticket may change any subset of the session's repositories. When it is
-submitted, the judge stages every repository and finds the ones that
-changed since the ticket started (its earlier attempts, committed as wip,
-count). The ticket's `repos` play no part in this; when they differ from
-what changed, the note and the reviewer say so.
+A ticket may change any subset of the session's repositories. When the
+lead moves a ticket into `in_progress`, the harness records each
+repository's HEAD on the ticket (`baseline`). When the lead moves it to
+`review`, the judge reads, per repository, the commits since that
+baseline whose subject or `Verstas-Ticket` trailer carries the ticket's id
+(the lead commits its own work, "T-12: …"), plus the uncommitted working
+tree. Commits in the range that carry another ticket's id are left out;
+commits that name no ticket are listed to the reviewer so it can look. A
+requeued ticket keeps its baseline, so its earlier commits stay in the
+next review; it is cleared when the ticket is done. The ticket's `repos`
+play no part in this; when they differ from what changed, the note and the
+reviewer say so.
 
 The harness runs no checks of its own. Each repository's check is the
 command the project brief names under Build / test / run (`bash
-scripts/check.sh`, `npm test`, or "nothing to run"): setup writes that
-line after it has made the build and tests work and has run the command
-once, and the reviewer of every ticket runs it. An implementer runs the
-tests of the code it changed and submits; the reviewer runs the whole
-check of every changed repository (and of the repositories the brief says
-build on a changed one), the commands the acceptance criteria name, and
-then reads the diff. Without a reviewer, the implementer's word is the
-verdict, and it is told to run the check itself before submitting.
+scripts/check.sh`, `npm test`, or "nothing to run"); the reviewer of every
+ticket runs it for every changed repository (and for the repositories the
+brief says build on a changed one), then the commands the acceptance
+criteria name, and then reads the diff. Without a reviewer the lead's word
+is the verdict, and the lead may move tickets to `done` itself.
 
-How a submitted change is judged:
+How a change in review is judged:
 
 1. **Review level.** The ticket's own `review` when you set one, else the
    session's Reviewer setting.
 2. **Review.** With `full`, one reviewer reads every changed repository,
    one section each, after running their checks. With `none`, the ticket
-   is accepted when the implementer finished, or requeued when it stopped
-   at a cap.
-3. **Commit.** All or nothing: every changed repository is scanned for
-   credentials first, then each is committed with the same message and the
-   trailers `Verstas-Ticket` and, across several repositories,
-   `Verstas-Repos`.
+   is accepted on the lead's word.
+3. **Verdict.** `ok` moves the ticket to `done`; what is still uncommitted
+   is committed under the ticket when no other ticket is in flight (the
+   life's backup commit takes it otherwise, labelled with every ticket in
+   progress). `fixable` moves it back to `ready` with the reviewer's notes,
+   every time; the lead decides whether to try again. `blocked` blocks it.
+   Every commit is scanned for credentials first and carries the trailers
+   `Verstas-Ticket` and, across several repositories, `Verstas-Repos`.
 
-`board_changes` shows a worker what the judge would see if it submitted
-now. Chore sweeps go through a size check and, when the session has a
-reviewer, the same reviewer (Chores, below).
-
-A proper harness-run check (one command per repository, run once per
-submission out of band, as evidence for the reviewer first) is on the
-backlog; the first version cost more than it saved and was removed.
+`board_changes` shows the lead what the reviewer would see if it moved a
+ticket to review now. Chore sweeps go through a size check and, when the
+session has a reviewer, the same reviewer (Chores, below).
 
 ### Ticket size
 
@@ -137,27 +138,26 @@ worker minutes to match L. A draft carries the same setting
 
 `backlog` → `ready` → `in_progress` → `review` → `done`, with `waiting`
 (a request is open), `blocked` (gave up) and reopen (`done` → `ready`).
-Only the harness moves tickets to `done`. In the default mode it also
-moves them through `in_progress` and `review`. In lead mode the lead does
-those two moves itself through the agent API: `board_claim` (`ready` to
-`in_progress`, dependencies done, one ticket at a time) and `board_submit`
-(`in_progress` to `review`, report filed), after which the harness judges
-the ticket and moves it to `done`, back to `ready` or to `blocked`. You move
-between `backlog`, `ready`, `blocked`, and reopen.
+The lead moves tickets itself through the agent API (`board_move`): any
+transition the board allows, several tickets in progress at once, a new
+ticket straight into `ready` or `in_progress`. Three moves are not its:
+out of `review` (the verdict moves the ticket to `done`, `ready` or
+`blocked`), into `waiting` (a request on the ticket does that), and into
+`done` while the session has a reviewer (`in_progress` → `done` is the
+lead's only when the reviewer is off). You move between `backlog`,
+`ready`, `blocked`, and reopen.
 
 ### Timing
 
 Every state change records the ticket's clock: `stateSince` (the last
 change), `timeIn` (seconds per state, summed over every visit),
 `firstClaimAt` (the first move to `in_progress`) and `readyBeforeClaim`
-(queueing before that claim). The run adds each worker's reported seconds to
-`agentSeconds` (implementer and reviewer; never the lead, which spans
-tickets). The session page shows a done ticket as "Took 42m · agent 31m ·
-judging 3m · waiting on you 6m · requeued 2m", runs a timer on the ticket in
-progress (against the worker cap in the default mode, elapsed only in lead
-mode, where the cap belongs to the whole lead), and sums "waiting on you"
-over the board in the header: the time the loop stood still for you. Agent
-time in lead mode is the time in `in_progress` plus the reviewer's seconds.
+(queueing before that move). The run adds the reviewer's reported seconds
+to `agentSeconds` (never the lead's, which spans tickets). The session page
+shows a done ticket as "Took 42m · agent 31m · judging 3m · waiting on you
+6m · requeued 2m", runs a timer on a ticket in progress, and sums "waiting
+on you" over the board in the header: the time the loop stood still for
+you. Agent time is the time in `in_progress` plus the reviewer's seconds.
 Tickets from before timing have none of these fields and show nothing.
 
 ## Chores
@@ -179,13 +179,13 @@ when the reviewer's verdict is not ok, the sweep is refused with the
 reason, the chores go back to open, and the changes stay in the working
 tree for the lead to turn into a ticket or revert.
 
-The list has a sweep line, the `choreSweepAt` cap (default 10): with that
-many chores open, the lead sweeps before it starts another ticket, and
-`board_claim` and `board_run` are refused until the list is below the
-line again. Set it to 0 to leave the timing to the lead. Any worker,
-reviewer or lead may drop an open chore that turned out moot or not worth
-its change (`chore_drop`, with the reason); you drop and promote them on
-the session page.
+The list has a sweep line, the `choreSweepAt` cap (default 10), shown to
+the lead with the list as the point at which to sweep before the next
+ticket; nothing is refused over it. A sweep needs no ticket in progress or
+in review, since the batch is its own commit. Any worker, reviewer or lead
+may drop an open chore that turned out moot or not worth its change
+(`chore_drop`, with the reason); you drop and promote them on the session
+page.
 
 ```jsonc
 {
@@ -204,8 +204,7 @@ the session page.
 - `board.sweep` is the sweep in flight or the last one: its number, the
   chore ids, `working` / `judging` / `accepted` / `refused`, the note and
   the diff size.
-- Sweeps are a lead's job (lead mode). In the one-worker-per-ticket mode
-  chores wait on the list until you promote them or switch the mode.
+- Sweeps are the lead's job.
 
 ## Markdown
 

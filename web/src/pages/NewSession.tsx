@@ -174,7 +174,7 @@ export const NewSessionPage = ({ draftId = null, fromSession = null }: { draftId
           {source && (
             <>
               <p className="lead">
-                A fresh board on a copy of <strong>{source.name}</strong>'s box: its settings (image, recipes, network, agents, caps, limits, mode), a copy of its home volume and snapshot, the notes below, and fresh clones of its repositories. It comes up initialized{requirements === null || requirements.trim() === source.requirements.trim() ? ", without a setup worker" : "; the setup worker checks the box against the changed setup instructions"}. {source.name} itself is not changed.
+                A fresh board on a copy of <strong>{source.name}</strong>'s box: its settings (image, recipes, network, agents, caps, limits), a copy of its home volume and snapshot, the notes below, and fresh clones of its repositories. It comes up initialized{requirements === null || requirements.trim() === source.requirements.trim() ? ", without a setup worker" : "; the setup worker checks the box against the changed setup instructions"}. {source.name} itself is not changed.
               </p>
               <label className="chk"><input type="checkbox" checked={copy.projectNotes} onChange={(e) => setCopy({ ...copy, projectNotes: e.target.checked })} /> Copy brief.md and learnings.md (env.md, setup.sh, tools/ and INDEX.md always come along)</label>
               <label className="chk"><input type="checkbox" checked={copy.allNotes} onChange={(e) => setCopy({ ...copy, allNotes: e.target.checked })} /> Copy all notes (never the last lead's handoff, state.md)</label>

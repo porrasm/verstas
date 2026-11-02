@@ -21,8 +21,9 @@ The design is in the
   that speaks the same event contract works too, see `docs/DRIVERS.md`)
   against `/workspace`.
 - **Board**: tickets in plain JSON (`docs/BOARD.md`), editable by hand in
-  the UI, by paste (import), and by the agent through a stdio MCP server
-  that talks to the agent API.
+  the UI, by paste (import), and by the lead through a stdio MCP server
+  that talks to the agent API. Beside it, a goal: the text the lead works
+  toward. One lead works both; either alone is enough.
 - **Drafts**: a session prepared by an assistant on your machine through
   the draft MCP endpoint (`/mcp` on the UI port), step by step, then
   reviewed and created by you (`docs/DRAFTS.md`).
@@ -126,63 +127,50 @@ Then, in the web app:
    answer the inbox from your phone through the `verstas` app in the apps
    monorepo. Off by default, and per session off until you tick it; see
    [docs/REMOTE.md](docs/REMOTE.md) for what is and is not sent.
-8. **How tickets are worked** (Session settings, per session). **One
-   worker per ticket**, the default: Verstas picks the next ready ticket,
-   starts a fresh implementer for it, then the reviewer. Tick
-   **Implementers continue one conversation** to have each implementer of
-   a run resume the previous one's Claude Code conversation instead of
-   re-reading the repositories. **A lead works the board**: one long-lived
-   agent chooses the order, claims and submits tickets itself, may use
-   subagents, and proposes new tickets to the backlog. Verstas still
-   judges and commits every ticket it submits, parks a ticket the moment
-   the lead asks you something, and keeps a lead running: it resumes the
-   lead's conversation when it stops early, and starts a fresh lead from
-   a handoff note (kept in `notes/state.md`) when the lead says its
-   context has become noise or it reaches its own caps. Every worker has
-   a `budget` tool showing its turns, minutes and context size. To change
-   the lead's rules without a rebuild, write them to
+8. **How the work is done.** One lead works the session. Its brief is the
+   **goal** you write on the session page (one line or a whole
+   specification; optional) and the **board** (optional): either alone is
+   enough, together the lead works both. Nobody picks work for it: it
+   chooses the order, how to cut the work, whether to use subagents, and
+   which tickets are in progress at once. It moves tickets itself
+   (`board_move`), creates tickets of any kind, edits and deletes them, and
+   commits its own work with the ticket id in the subject. The one
+   exception is the **independent review**: with the reviewer on (Session
+   settings), a ticket the lead moves to `review` is judged by a fresh
+   reviewer, which runs the repositories' checks and reads the change (the
+   commits since the ticket entered `in_progress` that carry its id, plus
+   the working tree; `docs/BOARD.md`, Judging), and Verstas moves the
+   ticket to `done`, back to `ready` with the notes, or to `blocked`. Only
+   Verstas moves a ticket to `done` while the reviewer is on; with it off
+   the lead does. Verstas keeps the lead alive and nothing more: when a
+   lead life ends it commits whatever is left uncommitted (labelled with
+   the tickets in progress), then continues the lead's conversation, or
+   starts a fresh lead from the handoff note it kept in `notes/state.md`
+   (shown on the page) when the lead said its context had become noise or
+   hit a cap. The run ends when the lead calls `done` with its assessment
+   (shown on the page; the session reads "goal met, says the lead") and no
+   ticket is ready, when you press Pause (a running Claude Code lead is
+   told to reach a sensible point, update its note and stop), when a
+   request about the goal waits on you and no ticket can go on, when two
+   lives in a row change nothing, or at the session's cap on lives per run
+   (`goalRounds`, default 25). A request on a ticket parks that ticket only;
+   the lead carries on with the rest. Every `progressMinutes` of a run
+   (default 30, 0 for none) a running Claude Code lead is asked for a short
+   progress update and posts it to the inbox. Edit the goal at any time:
+   the next life reads it, a running lead is told in its conversation, and
+   the goal it replaces goes to the session's goal history with how it
+   ended. Starting again after a met goal means "not yet". Every lead has
+   a `budget` tool showing its turns, minutes and context size; the lead
+   caps (`leadMinutes`, `leadTurns`) are optional and unset by default. To
+   change the lead's rules without a rebuild, write them to
    `~/.verstas/prompts/lead.md`; the next lead reads it.
-   **A worker works toward a goal** (goal mode): no board, no tickets, no
-   reviewer. You write a goal on the session page, one line or a whole
-   specification ("a Mario Party clone running in the browser"), and one
-   long-lived worker works toward it in rounds. A round is one worker from
-   start to exit; after every round Verstas commits whatever changed in
-   each repository, finished or not, so git is the record and the review.
-   The worker keeps its plan and progress in `notes/state.md` (shown on
-   the page) and the next round continues its conversation, or starts a
-   fresh worker from that note after a `handoff` or a cap, as a lead does.
-   The run ends when the worker calls `goal_done` with its assessment
-   (shown on the page; the session reads "goal met, says the worker"),
-   when you press Pause (a running Claude Code worker is told to finish
-   its step, update its note and stop), when the worker files a request,
-   when two rounds in a row change nothing, or at the session's round cap
-   (`goalRounds`, default 25). To follow the work without reading the
-   log, the inbox gets a progress update: every `progressMinutes` of a run
-   (default 30, 0 for none) a running Claude Code worker is asked for a
-   short one (how far the goal is, what is done, what is next) and posts
-   it as a message. Edit the goal at any time: the next round
-   reads it, a worker running now is told in its conversation, and the
-   goal it replaces goes to the session's goal history with how it ended.
-   Starting again after a met goal means "not yet": the worker is told
-   what it claimed and looks for what falls short. A session in goal mode
-   is a workshop you keep: set the next goal and start, on the same box
-   and clones; when the repository moved on GitHub meanwhile (you merged
-   the last pull request), Next round brings the clones up to date first,
-   and Start does it on its own when nothing would be lost. The worker's rules can be replaced with
-   `~/.verstas/prompts/goal.md`. The board modes are unchanged by it.
-   **Chores** (both modes keep the list, a lead works it): small fixes
-   that are not worth a ticket. Reviewers and workers file them instead of
-   follow-up tickets; a lead sweeps a batch when the board runs dry, when
-   it is in those files anyway, and always once the list reaches the
-   session's sweep line (`choreSweepAt`, default 10: claims are refused
-   until it sweeps). Anyone drops a chore that is not worth doing
-   (`chore_drop`). Verstas commits the batch as one commit after a size
-   check and, when the session has a reviewer, its review (`docs/BOARD.md`,
-   Chores).
-   **A ticket's own agent**: a ticket may name a driver and model of its
-   own; its implementer is then a fresh worker on that agent, judged by the
-   session's reviewer. A lead hands such a ticket over with `board_run`.
-   **Several repositories**: a ticket's repositories are a hint; a worker
+   **Chores**: small fixes that are not worth a ticket. Reviewers and
+   workers file them; the lead sweeps a batch when it sees fit (no sweep
+   while a ticket is in progress), anyone drops one that is not worth
+   doing (`chore_drop`), and Verstas commits the batch as one commit after
+   a size check and, when the session has a reviewer, its review
+   (`docs/BOARD.md`, Chores).
+   **Several repositories**: a ticket's repositories are a hint; the lead
    changes whichever it needs. The harness runs no checks of its own: the
    reviewer runs each changed repository's check (the command the brief
    names) and reads the change (`docs/BOARD.md`, Judging).
