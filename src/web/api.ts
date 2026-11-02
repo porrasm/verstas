@@ -1967,6 +1967,23 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
     }),
   );
 
+  /** Every ticket and chore goes; the goal stays. Not while a run is active: its worker holds a ticket. */
+  api.post(
+    "/sessions/:id/board/clear",
+    wrap(async (req, res) => {
+      const h = await d.hub.get(param(req, "id"));
+      if (d.runs.status(h.id)) {
+        res.status(409).json({ error: "Stop the run first; a worker may hold a ticket" });
+        return;
+      }
+      const removed = await h.mutate((docs) => ({
+        next: { board: { ...docs.board, tickets: [], chores: [], sweep: undefined } },
+        result: { tickets: docs.board.tickets.length, chores: docs.board.chores.length },
+      }));
+      res.json({ ok: true, removed });
+    }),
+  );
+
   // --- chores: small fixes swept in batches (docs/BOARD.md) ------------------
 
   api.post(

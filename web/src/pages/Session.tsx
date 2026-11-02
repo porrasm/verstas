@@ -304,6 +304,12 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
     if (patch.caps || patch.limits || patch.mode || patch.planning !== undefined) await api("PUT", `${base}/caps`, { caps: patch.caps, limits: patch.limits, mode: patch.mode, planning: patch.planning });
     await refreshRun();
   };
+  /** Every ticket and chore off the board, after a confirm; Export board first keeps a copy. */
+  const clearBoard = () => {
+    const what = [`${board.tickets.length} ticket${board.tickets.length === 1 ? "" : "s"}`, ...(board.chores.length ? [`${board.chores.length} chore${board.chores.length === 1 ? "" : "s"}`] : [])].join(" and ");
+    if (!confirm(`Delete all ${what} from "${session.name}"?\n\nThe goal and the repositories stay. This cannot be undone; Export board (JSON) keeps a copy.`)) return;
+    void tryAct("clearing the board", () => api("POST", `${base}/board/clear`));
+  };
   const bodyProps: BodyProps = {
     session,
     board,
@@ -360,6 +366,7 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
               items={[
                 { label: "Import board…", onClick: () => setImportText("") },
                 { label: "Export board (JSON)", href: `/api${base}/board/export` },
+                ...(!goalMode && (board.tickets.length > 0 || board.chores.length > 0) ? [{ label: active ? "Clear board (stop the run first)" : "Clear board…", onClick: clearBoard, disabled: active }] : []),
                 { label: active ? "Export session (stop the run first)" : "Export session (.ver)…", onClick: doArchive, disabled: active },
                 ...(initialized
                   ? [
