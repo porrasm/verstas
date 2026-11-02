@@ -3,27 +3,21 @@ import express, { type Request, type Response, type NextFunction } from "express
 import { z } from "zod";
 import {
   actionDetailSchema,
-  choreIdSchema,
-  choreStateSchema,
   ideaSchema,
   messageSchema,
   now,
   requestOutcome,
   requestSchema,
-  sweepResultSchema,
   ticketIdSchema,
   ticketImportSchema,
   ticketKindSchema,
-  ticketSizeSchema,
   ticketStateSchema,
   importRepos,
   type AgentRequest,
-  type Board,
   type Inbox,
-  type SweepResult,
   type Ticket,
 } from "../core/types.js";
-import { addChore, addNote, agentAddDep, agentSetPriority, beginSweep, BoardError, deleteTicket, editTicket, getTicket, importBoard, openChores, replaceTicket, setChoreState, sweepInFlight, sweepToJudging, transition, validateRepos, type AgentRole } from "../board/board.js";
+import { addNote, agentAddDep, agentSetPriority, BoardError, deleteTicket, editTicket, getTicket, importBoard, replaceTicket, transition, validateRepos, type AgentRole } from "../board/board.js";
 import type { SessionHub } from "../sessions/hub.js";
 import type { Artifact } from "../sessions/artifacts.js";
 
@@ -61,10 +55,6 @@ export type AgentRunHooks = {
   requested?(run: RunToken, ticketId: string): void;
   /** Each repository's HEAD now: the baseline of a ticket entering in_progress, which the review reads from. */
   baseline?(sessionId: string): Promise<Record<string, string>>;
-  /** The lead took a batch of chores (board.sweep is now `working`). */
-  sweepStarted?(run: RunToken, ids: string[]): void;
-  /** The lead submitted its sweep with one result per chore; the run judges it (size, the reviewer, commit) and settles the chores. */
-  sweepSubmitted?(run: RunToken, results: SweepResult[]): void;
   /** What the judge would see if the change were submitted now: touched repositories and the review level. */
   previewJudging?(sessionId: string, ticketId?: string): Promise<unknown>;
   /** An agent published a file from the box for the user (src/sessions/artifacts.ts). */
@@ -106,12 +96,10 @@ const summary = (t: Ticket) => ({
   title: t.title,
   state: t.state,
   kind: t.kind,
-  size: t.size,
   priority: t.priority,
   deps: t.deps,
   repos: t.repos,
-  pinned: t.pinned,
-  agent: t.agent,
+  review: t.review,
 });
 
 export const createAgentApi = (hub: SessionHub, tokens: RunTokens, hooks?: AgentRunHooks): express.Express => {
@@ -148,10 +136,10 @@ export const createAgentApi = (hub: SessionHub, tokens: RunTokens, hooks?: Agent
   const r = express.Router();
   r.use(auth);
 
-  /** Moving tickets, handoff, done and sweeps are the lead's: nobody else works the board. */
+  /** Moving tickets, handoff and done are the lead's: nobody else works the board. */
   const leadOnly = (req: AgentRequestWithRun, res: Response): boolean => {
     if (req.run.role !== "lead") {
-      res.status(403).json({ error: "Only the lead moves tickets, sweeps and hands off" });
+      res.status(403).json({ error: "Only the lead moves tickets and hands off" });
       return false;
     }
     if (!hooks) {
@@ -166,7 +154,7 @@ export const createAgentApi = (hub: SessionHub, tokens: RunTokens, hooks?: Agent
     (req: Request, res: Response) => {
       fn(req as AgentRequestWithRun, res).catch((e: unknown) => {
         if (e instanceof z.ZodError) res.status(400).json({ error: `Invalid input: ${e.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}` });
-        else if (e instanceof BoardError) res.status(e.code === "unknown_ticket" || e.code === "unknown_chore" ? 404 : e.code === "unknown_repo" ? 400 : e.code === "sweep_in_flight" || e.code === "no_sweep" ? 409 : 403).json({ error: e.message });
+        else if (e instanceof BoardError) res.status(e.code === "unknown_ticket" ? 404 : e.code === "unknown_repo" ? 400 : 403).json({ error: e.message });
         else {
           console.error(`[agent] 500 ${req.method} ${req.originalUrl}:`, e);
           res.status(500).json({ error: (e as Error).message });
@@ -196,7 +184,7 @@ export const createAgentApi = (hub: SessionHub, tokens: RunTokens, hooks?: Agent
   r.post(
     "/tickets",
     wrap(async (req, res) => {
-      const input = ticketImportSchema.omit({ id: true, state: true, pinned: true, review: true }).parse(req.body);
+      const input = ticketImportSchema.omit({ id: true, state: true, review: true }).parse(req.body);
       // The lead owns the board and may start a ticket at once; the agent in your terminal makes one ready when you ask; other workers file into the backlog.
       const asked = z.object({ state: z.enum(["backlog", "ready", "in_progress"]).optional() }).parse(req.body).state;
       const state = req.run.role === "lead" ? (asked ?? "backlog") : req.run.role === "terminal" && asked !== "in_progress" ? (asked ?? "backlog") : "backlog";
@@ -290,7 +278,6 @@ export const createAgentApi = (hub: SessionHub, tokens: RunTokens, hooks?: Agent
           kind: ticketKindSchema.optional(),
           spec: z.string().max(50_000).optional(),
           acceptance: z.array(z.string().min(1).max(2000)).optional(),
-          size: ticketSizeSchema.optional(),
           repos: z.array(z.string().min(1).max(100)).max(20).optional(),
           /** The older single-repository form. */
           repo: z.string().min(1).max(100).optional(),
@@ -448,104 +435,6 @@ export const createAgentApi = (hub: SessionHub, tokens: RunTokens, hooks?: Agent
         return { next: { inbox: { ...d.inbox, ideas: [...d.inbox.ideas, i] } }, result: i.id };
       });
       res.status(201).json({ ok: true, id, note: "Kept in the ideas list for the user. Do not implement it." });
-    }),
-  );
-
-  // --- Chores: small fixes outside the ticket flow ---------------------------
-
-  r.get(
-    "/chores",
-    wrap(async (req, res) => {
-      const h = await hub.get(req.run.sessionId);
-      const state = typeof req.query.state === "string" ? choreStateSchema.parse(req.query.state) : undefined;
-      const chores = h.board.chores.filter((c) => !state || c.state === state).map(({ id, text, where, repo, state: st, by, fromTicket, outcome, promotedTo }) => ({ id, text, where, repo, state: st, by, fromTicket, outcome, promotedTo }));
-      res.json({ chores, sweep: h.board.sweep ?? null, approvalRequired: h.session.caps.choreApproval, sweepAt: h.session.caps.choreSweepAt || null, open: openChores(h.board).length });
-    }),
-  );
-
-  r.post(
-    "/chores",
-    wrap(async (req, res) => {
-      const input = z.object({ text: z.string().min(1).max(2000), where: z.string().max(500).optional(), repo: z.string().min(1).max(100).optional() }).parse(req.body);
-      const h = await hub.get(req.run.sessionId);
-      const out = await h.mutate((d) => {
-        if (input.repo && !d.session.repos.some((x) => x.name === input.repo)) throw new BoardError(`No repository ${input.repo} in this session (${d.session.repos.map((x) => x.name).join(", ") || "none"})`, "unknown_repo");
-        const r = addChore(d.board, input, "agent", { fromTicket: req.run.currentTicket, state: d.session.caps.choreApproval ? "proposed" : "open" });
-        return { next: { board: r.board }, result: { id: r.id, state: d.session.caps.choreApproval ? "proposed" : "open" } };
-      });
-      res.status(201).json({ ok: true, ...out, note: out.state === "proposed" ? "Kept for the user's approval; a sweep takes it once approved." : "On the chore list; a lead sweeps it in a batch." });
-    }),
-  );
-
-  /** Anyone may drop an open chore that is moot or not worth doing; the reason stays with it. A chore in a sweep is settled by chores_submit. */
-  r.post(
-    "/chores/:id/drop",
-    wrap(async (req, res) => {
-      const id = choreIdSchema.parse(req.params.id);
-      const { reason } = z.object({ reason: z.string().min(1).max(2000) }).parse(req.body);
-      const h = await hub.get(req.run.sessionId);
-      await h.mutate((d) => ({ next: { board: setChoreState(d.board, id, "dropped", `Dropped by the ${req.run.role}${req.run.currentTicket ? ` on ${req.run.currentTicket}` : ""}: ${reason.trim()}`) } }));
-      res.json({ ok: true, id, state: "dropped" });
-    }),
-  );
-
-  r.get(
-    "/chores/sweep",
-    wrap(async (req, res) => {
-      const h = await hub.get(req.run.sessionId);
-      const sw = h.board.sweep;
-      if (!sw) {
-        res.json({ state: "none" });
-        return;
-      }
-      const chores = h.board.chores.filter((c) => sw.ids.includes(c.id)).map(({ id, state, outcome, promotedTo }) => ({ id, state, outcome, promotedTo }));
-      res.json({ ...sw, chores });
-    }),
-  );
-
-  r.post(
-    "/chores/sweep",
-    wrap(async (req, res) => {
-      if (!leadOnly(req, res)) return;
-      const { ids, max } = z.object({ ids: z.array(choreIdSchema).max(50).optional(), max: z.number().int().min(1).max(50).optional() }).parse(req.body ?? {});
-      const refusal = hooks!.moveRefusal?.(req.run);
-      if (refusal) {
-        res.status(409).json({ error: refusal });
-        return;
-      }
-      const h = await hub.get(req.run.sessionId);
-      const out = await h.mutate((d) => {
-        const held = d.board.tickets.filter((t) => HELD.has(t.state));
-        if (held.length) throw new BoardError(`${held.map((t) => `${t.id} (${t.state})`).join(", ")} ${held.length === 1 ? "is" : "are"} in progress; a sweep is its own commit, so finish those first`, "forbidden_move");
-        const r = beginSweep(d.board, { ids, max });
-        return { next: { board: r.board }, result: r };
-      });
-      hooks!.sweepStarted?.(req.run, out.sweep.ids);
-      res.json({
-        ok: true,
-        sweep: out.sweep.n,
-        chores: out.chores.map(({ id, text, where, repo, fromTicket, by }) => ({ id, text, where, repo, fromTicket, by })),
-        limits: { maxLines: h.session.caps.sweepMaxLines, maxFiles: h.session.caps.sweepMaxFiles },
-        next: "Do each chore (or decide to drop or promote it), run the repository's own checks, then chores_submit with one line per chore. The batch becomes one commit; keep it under the limits or it is refused.",
-      });
-    }),
-  );
-
-  r.post(
-    "/chores/sweep/submit",
-    wrap(async (req, res) => {
-      if (!leadOnly(req, res)) return;
-      const { results } = z.object({ results: z.array(sweepResultSchema).max(50).default([]) }).parse(req.body ?? {});
-      const h = await hub.get(req.run.sessionId);
-      await h.mutate((d) => {
-        const live = sweepInFlight(d.board);
-        if (!live) throw new BoardError("No sweep is in flight; start one with chores_sweep", "no_sweep");
-        const unknown = results.map((r) => r.id).filter((id) => !live.ids.includes(id));
-        if (unknown.length) throw new BoardError(`${unknown.join(", ")} ${unknown.length === 1 ? "is" : "are"} not in this sweep (${live.ids.join(", ")})`, "chore_state");
-        return { next: { board: sweepToJudging(d.board) } };
-      });
-      hooks!.sweepSubmitted?.(req.run, results);
-      res.json({ ok: true, state: "judging", next: "The harness runs the size check and the session's reviewer, then commits or refuses. Poll chores_sweep status, or wait with chores_submit." });
     }),
   );
 

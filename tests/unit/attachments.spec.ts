@@ -6,7 +6,7 @@ import path from "node:path";
 import { emptyBoard } from "../../src/board/board.js";
 import { saveBoard, writeJsonAtomic } from "../../src/board/store.js";
 import { attachmentLines, inboxSchema, sessionSchema } from "../../src/core/types.js";
-import { setupPrompt, verstasMd } from "../../src/harness/prompts.js";
+import { verstasMd } from "../../src/harness/prompts.js";
 import { SessionHub } from "../../src/sessions/hub.js";
 import { sessionPaths } from "../../src/sessions/sessions.js";
 import { createUiApi, type UiApiDeps } from "../../src/web/api.js";
@@ -24,9 +24,7 @@ test("workers see each attachment's path with its description; one without a des
   const session = sessionSchema.parse({ ...base, attachments });
   const md = verstasMd(session, "http://x/agent");
   expect(md).toContain("  - `/workspace/attachments/plant_generation_seminar`: The spec. Tickets cite its sections.");
-  expect(setupPrompt(session, emptyBoard("g"), [], "setup")).toContain("# Attachments (what the user said they are)");
   expect(verstasMd(sessionSchema.parse(base), "http://x/agent")).toContain("Attachments the user added: none.");
-  expect(setupPrompt(sessionSchema.parse(base), emptyBoard("g"), [], "setup")).not.toContain("# Attachments");
 });
 
 test("the session API sets and clears an attachment's description", async () => {

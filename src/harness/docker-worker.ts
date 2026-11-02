@@ -9,7 +9,7 @@ import { now, type SetupResult } from "../core/types.js";
 import { secretValues, type Secrets } from "../config.js";
 import { writeAllowlist } from "../sessions/sessions.js";
 import { readWorkerStream, RunManager, type Shell, type WorkerDone, type WorkerRunner } from "./run.js";
-import { CODEX_SERIALIZE_AFTER_DAYS, codexAuthAgeDays, credentialFor, driverInfo, missingCredentialError, missingCredentials, whyDriverNeeded } from "./drivers.js";
+import { CODEX_SERIALIZE_AFTER_DAYS, codexAuthAgeDays, credentialFor, driverInfo, missingCredentialError, missingCredentials } from "./drivers.js";
 import type { Job } from "../worker/worker.js";
 import { dockerTerminal } from "./docker-terminal.js";
 
@@ -185,9 +185,8 @@ export const ensureSessionSandbox = async (c: RunManagerConfig, session: Session
   // No secrets in the container's environment (see dockerWorker); fail early if a run will need a credential it does not have.
   const h = await c.hub.get(session.id);
   if (needsCredentials) {
-    // The session's roles and the tickets' own agents: a ticket that names a driver without a credential fails now, not after the lead reaches it.
-    const missing = missingCredentials(await c.credentials.secrets(), session, h.board);
-    if (missing.length) throw missingCredentialError(missing[0]!, whyDriverNeeded(session, h.board, missing[0]!));
+    const missing = missingCredentials(await c.credentials.secrets(), session);
+    if (missing.length) throw missingCredentialError(missing[0]!);
   }
   await writeEnvFile(envFile, { VERSTAS_SESSION: session.id });
   // Sessions created before the proxy directory existed get it here.
@@ -207,32 +206,12 @@ export const ensureSessionSandbox = async (c: RunManagerConfig, session: Session
   // Services the agent registered with svc come back after a container restart; a no-op when they run.
   const up = await runInSandbox(c.sandbox, session.id, ["svc", "up"], { allowFailure: true, timeoutMs: 180_000 });
   if (up.code !== 0 && up.stdout + up.stderr) console.warn(`[sandbox ${session.id}] svc up: ${(up.stdout + up.stderr).trim().slice(-500)}`);
-  if (recreated && !fromSnapshot) await replayRecipe(c, session.id);
   if (recreated && !fromSnapshot) {
     for (const rc of session.rootScripts) {
       const r = await runRootScript(c.sandbox, session.id, rc.script, rc.cwd);
       if (!r.ok) console.warn(`[sandbox ${session.id}] replaying approved root script failed (${r.code}): ${rc.script.slice(0, 120)}`);
     }
   }
-};
-
-/**
- * notes/setup.sh, the recipe the setup worker wrote, run as the agent (it
- * uses sudo where it needs root) on a freshly created container. Project
- * dependencies in the workspace and services in the home volume survive a
- * recreate on their own; the recipe brings back what lived in the
- * container's own filesystem. Logged to <session>/setup/recipe.log.
- */
-export const replayRecipe = async (c: RunManagerConfig, sessionId: string): Promise<{ ok: boolean; code: number } | null> => {
-  const h = await c.hub.get(sessionId);
-  const recipe = path.join(h.paths.notes, "setup.sh");
-  if (!(await fs.stat(recipe).catch(() => null))) return null;
-  const t0 = Date.now();
-  const r = await runInSandbox(c.sandbox, sessionId, ["bash", "-e", "/workspace/notes/setup.sh"], { allowFailure: true, timeoutMs: 30 * 60_000 });
-  await fs.mkdir(h.paths.setup, { recursive: true });
-  await fs.writeFile(path.join(h.paths.setup, "recipe.log"), `# notes/setup.sh · ${now()} · exit ${r.code} · ${Math.round((Date.now() - t0) / 1000)}s\n${r.stdout}${r.stderr}`);
-  if (r.code !== 0) console.warn(`[sandbox ${sessionId}] replaying notes/setup.sh failed with exit ${r.code}; see setup/recipe.log`);
-  return { ok: r.code === 0, code: r.code };
 };
 
 /**

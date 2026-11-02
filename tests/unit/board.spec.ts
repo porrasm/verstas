@@ -5,7 +5,6 @@ import {
   BoardError,
   emptyBoard,
   importBoard,
-  nextReady,
   nextTicketId,
   parseBoardPaste,
   parseMarkdownBoard,
@@ -35,8 +34,11 @@ test("import assigns ids, defaults and validates against the schema", () => {
   const a = r.board.tickets[0]!;
   expect(a.state).toBe("backlog");
   expect(a.kind).toBe("feature");
-  expect(a.size).toBe("M");
   expect(a.priority).toBe(100);
+  // Fields from before (size, pinned, attempts, agent) are accepted and dropped.
+  const old = importBoard(emptyBoard(), { tickets: [{ title: "Old", size: "L", pinned: true, agent: { driver: "codex" } }], chores: [{ text: "x" }] } as never);
+  expect(Object.keys(old.board.tickets[0]!)).not.toEqual(expect.arrayContaining(["size", "pinned", "agent", "attempts"]));
+  expect("chores" in old.board).toBe(false);
 });
 
 test("import gives a fresh id to a ticket with an empty or foreign id, so generated boards paste into an existing session", () => {
@@ -83,23 +85,12 @@ test("import rejects unknown dependencies and cycles", () => {
   ).toThrow(/cycle/);
 });
 
-test("nextReady honours deps, priority and creation order", () => {
-  const b = seeded();
-  // T-3 has the lowest priority number but depends on T-2 which is not done.
-  expect(nextReady(b)?.id).toBe("T-1");
-  const afterOne = transition(transition(b, "T-1", "in_progress"), "T-1", "review");
-  expect(nextReady(afterOne)?.id).toBeUndefined(); // T-2 waits on T-1 (review, not done)
-  const done = transition(afterOne, "T-1", "done");
-  expect(nextReady(done)?.id).toBe("T-2");
-});
-
-test("transition enforces the state machine and leaves attempts to the loop's verdicts", () => {
+test("transition enforces the state machine", () => {
   let b = seeded();
   expect(() => transition(b, "T-1", "done")).toThrow(/Cannot move/);
   b = transition(b, "T-1", "in_progress");
   b = transition(b, "T-1", "ready", { by: "harness", text: "reviewer: fixable" });
   b = transition(b, "T-1", "in_progress");
-  expect(b.tickets[0]!.attempts).toBe(0);
   expect(b.tickets[0]!.notes.map((n) => n.text)).toEqual(["reviewer: fixable"]);
   expect(() => transition(b, "T-99", "ready")).toThrow(/No ticket/);
 });
@@ -144,7 +135,8 @@ Emit events to an injected sink.
   expect(r.goal).toBe("Build the mapping engine");
   expect(r.tickets).toHaveLength(2);
   const a = r.tickets[0]!;
-  expect(a).toMatchObject({ id: "T-3", title: "Mapping engine: CC and notes", size: "M", repos: ["nuppi"], deps: ["T-1", "T-2"], priority: 20 });
+  // The size in parentheses, from before, is dropped from the title.
+  expect(a).toMatchObject({ id: "T-3", title: "Mapping engine: CC and notes", repos: ["nuppi"], deps: ["T-1", "T-2"], priority: 20 });
   expect(a.acceptance).toEqual(["7-bit and 14-bit CC covered by tests", "no Electron imports"]);
   expect(a.spec).toBe("Pure module in src/engine.\nInput is a 0..1 value.");
   expect(r.tickets[1]).toMatchObject({ title: "Mock MIDI port", kind: "chore", state: "ready", spec: "Emit events to an injected sink." });

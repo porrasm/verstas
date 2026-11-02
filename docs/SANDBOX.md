@@ -354,23 +354,15 @@ Boundary 2 and the Residual risks), and it owns the container: a
 malicious install could replace `node`, `git` or `claude` for every later
 worker in that session. The session is the unit you throw away.
 
-**The setup recipe**, `notes/setup.sh`, is written by the setup worker and
-replayed when the container is recreated, as the agent user with sudo
-available, logged to `<session>/setup/recipe.log`. It is agent-written text
-that reaches a root-capable shell without a person reading it first; that
-gives the agent nothing it did not already have through sudo, and it never
-runs outside the session container.
-
-**Recipes** (formerly setup scripts) are the other path: bash in the
-library, either written by you (runs as root) or saved from a session's
-`notes/setup.sh` (runs as the agent, with sudo),
-copied into the session at creation, run once as root with `bash -e` when
+**Recipes** (formerly setup scripts) are bash in the library, written by
+you (runs as root; recipes saved from a session before run as the agent,
+with sudo), copied into the session at creation, run once as root with `bash -e` when
 the container is created (and again on recreate or re-run), output logged
 to `<session>/setup/<name>.log`. The agent never writes or edits them; it
 can read the copies. The hosts a script declares join the session
 allowlist, which is the one place a script widens the boundary, visibly.
 
-Everything else a worker needs from a person goes through the other action
+Everything else the lead needs from a person goes through the other action
 kinds of the same request: `instruction` (a website to configure, a file
 to place) and `question` (a decision). Those run nothing; you act, you
 answer, the ticket resumes when every action is decided.
@@ -388,12 +380,14 @@ directory.
 
 ## Snapshots
 
-When you confirm the environment, the host commits the session container
-to `verstas-session-<id>:latest` (`docker commit`; the workspace bind mount
-and the home volume are not part of it). A recreated container starts from
-that image while the base image is the one it was taken from; otherwise the
-recipe is replayed on the base image. The snapshot holds whatever the agent
-installed, so it is exactly as trusted as the session: it is never pushed
+At initialization and at the end of every run, the host commits the
+session container to `verstas-session-<id>:latest` (`docker commit`; the
+workspace bind mount and the home volume are not part of it). It is the one
+record of what the lead installed system-wide. A recreated container starts
+from that image while the base image is the one it was taken from;
+otherwise it starts from the base image, the recipes run again, and the
+lead installs the rest as it needs it. The snapshot holds whatever the
+agent installed, so it is exactly as trusted as the session: it is never pushed
 anywhere, and another session uses it only when you start that session
 from this one's environment (below). `verstas doctor` lists labelled
 resources without a matching directory and offers to remove them.
@@ -421,15 +415,12 @@ shared, and the source is never modified:
   a `docker tag`: a tag shares the image id and so the old label, and
   deleting the source would delete it.
 - **Settings** (image, recipes, root scripts, network, limits, caps,
-  agents, mode, setup instructions) and the box's notes (env.md, setup.sh,
-  tools/, INDEX.md; brief.md and learnings.md unless you untick them; all
-  notes but the handoff state.md on request; attachments on request).
+  agents) and the notes directory unless you untick it (never the last
+  lead's `state.md`, which belongs to the old board); attachments on
+  request.
 - **Repositories** are fresh clones from your checkouts, or from the
   source's run branch to carry its unapplied commits: bundled inside the
   source's container and cloned from the bundle, which is pure data.
-- The confirmed **readiness** comes along when the setup instructions are
-  unchanged, and initialization then skips the setup worker; changed
-  instructions leave it out so the setup worker checks the box again.
 
 The new session comes up initialized through the usual path. If any step
 fails, its volume, snapshot image and directory are removed. It inherits

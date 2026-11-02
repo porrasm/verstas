@@ -104,18 +104,6 @@ export const DraftPage = ({ id }: { id: string }) => {
         {draft.goal.trim() ? <pre className="small" style={{ fontFamily: "inherit" }}>{draft.goal}</pre> : <div className="muted small">No goal.</div>}
       </section>
 
-      <section className="card">
-        <h3>Session requirements</h3>
-        {draft.requirements.trim() ? (
-          <>
-            <ul className="checks">{draft.requirements.split("\n").filter((l) => l.trim()).map((l, i) => <li key={i} className="small">{l}</li>)}</ul>
-            <p className="lead">A setup worker makes the box meet these right after the session is created; tickets start after you confirm.</p>
-          </>
-        ) : (
-          <div className="muted small">None: there will be no setup phase.</div>
-        )}
-      </section>
-
       <div className="two">
         <section className="card">
           <h3>Repositories</h3>
@@ -145,7 +133,7 @@ export const DraftPage = ({ id }: { id: string }) => {
           <h3>Board</h3>
           <span className="muted small">{draft.tickets.length} ticket{draft.tickets.length === 1 ? "" : "s"} · {byState.ready} ready · {byState.backlog} backlog · in run order</span>
         </div>
-        {tickets.length === 0 && <div className="muted small" style={{ marginTop: 8 }}>No tickets yet{draft.goal.trim() ? "; the planner can draft them from the goal once the session exists." : "."}</div>}
+        {tickets.length === 0 && <div className="muted small" style={{ marginTop: 8 }}>No tickets{draft.goal.trim() ? "; the lead works toward the goal and may write its own." : "."}</div>}
         <div className="stack tight" style={{ marginTop: 10 }}>
           {tickets.map((t) => <TicketRow key={t.id} t={t} open={open === t.id} onToggle={() => setOpen(open === t.id ? null : t.id)} />)}
         </div>
@@ -158,8 +146,7 @@ const TicketRow = ({ t, open, onToggle }: { t: DraftTicket; open: boolean; onTog
   <div className={`tk ${t.state ?? "ready"}${open ? " open" : ""}`} onClick={onToggle} role="button" tabIndex={0} onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && onToggle()}>
     <div className="id">
       <span>{t.id}</span>
-      <span className="k">{t.kind ?? "feature"} · {t.size ?? "M"} · p{t.priority ?? 100}</span>
-      {t.pinned && <span className="pin">pinned</span>}
+      <span className="k">{t.kind ?? "feature"} · p{t.priority ?? 100}</span>
     </div>
     <div className="title">{t.title}</div>
     <div className="meta">

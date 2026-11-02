@@ -1,7 +1,7 @@
 import { test, expect } from "@playwright/test";
 import { createCodexTranslator } from "../../src/worker/translate-codex.js";
 
-const ctx = { ticket: "T-7", role: "implementer" as const, now: () => "2026-10-03T10:00:00.000Z", model: "gpt-5.1-codex" };
+const ctx = { ticket: "T-7", role: "lead" as const, now: () => "2026-10-03T10:00:00.000Z", model: "gpt-5.1-codex" };
 const j = (o: unknown) => JSON.stringify(o);
 
 test("codex: thread start, a command with its result, a message, and a completed turn", () => {
@@ -30,7 +30,7 @@ test("codex: thread start, a command with its result, a message, and a completed
 
   const msg = t.line(j({ type: "item.completed", item: { id: "i5", type: "agent_message", text: "Done. Report filed." } }));
   expect(msg.assistantTurn).toBe(true);
-  expect(msg.events).toEqual([{ kind: "text", t: ctx.now(), ticket: "T-7", role: "implementer", text: "Done. Report filed." }]);
+  expect(msg.events).toEqual([{ kind: "text", t: ctx.now(), ticket: "T-7", role: "lead", text: "Done. Report filed." }]);
 
   const end = t.line(j({ type: "turn.completed", usage: { input_tokens: 1200, cached_input_tokens: 800, cache_write_input_tokens: 0, output_tokens: 150, reasoning_output_tokens: 0 } }));
   expect(end.events[0]).toEqual({ kind: "cost", t: ctx.now(), ticket: "T-7", cost: { inputTokens: 1200, outputTokens: 150 } });

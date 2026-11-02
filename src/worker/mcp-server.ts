@@ -59,16 +59,17 @@ export const readBudget = async (file = process.env.VERSTAS_BUDGET_FILE ?? ""): 
   } catch {
     return { available: false, note: "The totals are being written; ask again." };
   }
-  const b = parsed as { turns: number; seconds: number; contextTokens: number; outputTokens: number; caps: { minutes: number; turns: number; budgetUsd: number }; resumed?: boolean; control?: unknown };
+  const b = parsed as { turns: number; seconds: number; contextTokens: number; outputTokens: number; caps: { minutes?: number; turns?: number; budgetUsd?: number }; resumed?: boolean; control?: unknown };
   return {
     available: true,
     turns: b.turns,
-    turnsLeft: Math.max(0, b.caps.turns - b.turns),
+    // A cap that is not set has nothing left to count down: the field is absent.
+    ...(b.caps.turns ? { turnsLeft: Math.max(0, b.caps.turns - b.turns) } : {}),
     minutes: Math.floor(b.seconds / 60),
-    minutesLeft: Math.max(0, b.caps.minutes - Math.floor(b.seconds / 60)),
+    ...(b.caps.minutes ? { minutesLeft: Math.max(0, b.caps.minutes - Math.floor(b.seconds / 60)) } : {}),
     contextTokens: b.contextTokens,
     outputTokens: b.outputTokens,
-    budgetUsd: b.caps.budgetUsd,
+    ...(b.caps.budgetUsd ? { budgetUsd: b.caps.budgetUsd } : {}),
     resumedConversation: Boolean(b.resumed),
     ...(b.control ? { control: b.control } : {}),
   };
@@ -98,30 +99,11 @@ export const moveAndWait = async (id: string, to: string, note?: string, waitMs 
   }
 };
 
-/** How long `chores_submit` waits for the harness's verdict on a sweep. */
-const SWEEP_WAIT_MS = Number(process.env.VERSTAS_SWEEP_WAIT_MS) || 20 * 60_000;
-
-type SweepView = { state: string; n?: number; note?: string; chores?: unknown[] };
-
-/** Submit the sweep, then wait until the harness committed or refused it. */
-export const submitSweepAndWait = async (results: unknown[], waitMs = SWEEP_WAIT_MS, pollMs = SUBMIT_POLL_MS): Promise<unknown> => {
-  await api("POST", "/chores/sweep/submit", { results });
-  const until = Date.now() + waitMs;
-  for (;;) {
-    await new Promise((r) => setTimeout(r, pollMs));
-    const sw = (await api("GET", "/chores/sweep")) as SweepView;
-    if (sw.state === "accepted") return { sweep: sw.n, verdict: "committed", note: sw.note, chores: sw.chores };
-    if (sw.state === "refused") return { sweep: sw.n, verdict: "refused: the chores are open again; read the note", note: sw.note, chores: sw.chores };
-    if (sw.state === "none") return { verdict: "no sweep" };
-    if (Date.now() >= until) return { sweep: sw.n, state: sw.state, verdict: "still being judged", note: "Call chores_list later; do not start another sweep or claim a ticket until it is settled." };
-  }
-};
-
 export const TOOLS: Tool[] = [
   {
     name: "budget",
     description:
-      "Your running totals in this worker: turns used and left, minutes used and left, the size of your current context in tokens (what the model was last sent), and the dollar cap. Check it before starting something long, and when deciding whether to file your report now.",
+      "Your running totals in this life: turns and minutes used (and left, when the session caps them), and the size of your current context in tokens (what the model was last sent).",
     inputSchema: obj({}, []),
     call: () => readBudget(),
   },
@@ -151,7 +133,7 @@ export const TOOLS: Tool[] = [
   },
   {
     name: "board_list_tickets",
-    description: "List the board's tickets (id, title, state, kind, size, priority, deps, expected repos). Optionally filter by state.",
+    description: "List the board's tickets (id, title, state, kind, priority, deps, expected repos, review). Optionally filter by state.",
     inputSchema: obj({ state: { type: "string", enum: ["backlog", "ready", "in_progress", "review", "waiting", "blocked", "done"] } }, []),
     call: (a) => api("GET", `/board${a.state ? `?state=${encodeURIComponent(String(a.state))}` : ""}`),
   },
@@ -177,14 +159,13 @@ export const TOOLS: Tool[] = [
   {
     name: "board_create_ticket",
     description:
-      "Create a ticket in the backlog for work you found but do not do now: a feature, a bug, a follow-up (missing test, doc gap) or a chore. The user approves backlog tickets before they run.",
+      "Create a ticket in the backlog for work you found but do not do now: a feature, a bug, a follow-up (missing test, doc gap) or a chore. The user sees it on the board.",
     inputSchema: obj(
       {
         title: str("Short title", 200),
         kind: { type: "string", enum: ["feature", "bug", "followup", "chore"] },
         spec: str("What to do and where"),
         acceptance: { type: "array", items: str("One acceptance criterion", 2000), maxItems: 20 },
-        size: { type: "string", enum: ["S", "M", "L"] },
         repos: { type: "array", items: str("Directory name under /workspace", 100), maxItems: 20, description: "The repositories you expect it to touch: a hint for the user and the worker, not a limit" },
         deps: { type: "array", items: str("Ticket id", 20), maxItems: 20 },
         priority: { type: "integer", minimum: 0, maximum: 1000 },
@@ -202,51 +183,6 @@ export const TOOLS: Tool[] = [
     call: (a) => api("GET", `/changes${a.id ? `?ticket=${encodeURIComponent(String(a.id))}` : ""}`),
   },
   {
-    name: "chore",
-    description:
-      "File a small, self-contained fix that is not worth a ticket: a nit, a rename, a missing guard, a doc line, a weak test name; a few dozen changed lines at most. One line of text plus where to look. Chores are swept in batches by a lead and committed together after the repository's checks; no reviewer. A bug, anything a user would notice, or anything bigger is a ticket (board_create_ticket), not a chore.",
-    inputSchema: obj({ text: str("What to change, one line", 2000), where: str("File, function or page", 500), repo: str("Which clone under /workspace, when the session has several", 100) }, ["text"]),
-    call: (a) => api("POST", `/chores`, { text: a.text, where: a.where, repo: a.repo }),
-  },
-  {
-    name: "chores_list",
-    description: "The chore list: small fixes waiting for a sweep (state open), proposed ones awaiting the user, and what the last sweep did. Optionally filter by state.",
-    inputSchema: obj({ state: { type: "string", enum: ["proposed", "open", "sweeping", "done", "dropped", "promoted"] } }, []),
-    call: (a) => api("GET", `/chores${a.state ? `?state=${encodeURIComponent(String(a.state))}` : ""}`),
-  },
-  {
-    name: "chore_drop",
-    description:
-      "Drop an open chore that is no longer worth doing: it was fixed along the way, the code it names is gone, or the change would not be an improvement. Any role may drop; give the reason in one line, it stays with the chore. A chore in a lead's current sweep is settled with chores_submit instead.",
-    inputSchema: obj({ id: str("Chore id, e.g. C-3", 20), reason: str("Why it is dropped, one line", 2000) }, ["id", "reason"]),
-    call: (a) => api("POST", `/chores/${encodeURIComponent(String(a.id))}/drop`, { reason: a.reason }),
-  },
-  {
-    name: "chores_sweep",
-    leadOnly: true,
-    description:
-      "Take a batch of open chores to do in one go (no ticket may be in progress or in review): the given ids, or the oldest ones up to max. Returns the chores and the size limits of a sweep. Do them, run the repository's own checks yourself, then chores_submit. The batch becomes one commit (read by the session's reviewer first, when it has one), so stay within the limits and never touch the project's contract documents or fixtures from a sweep; make that a ticket instead.",
-    inputSchema: obj({ ids: { type: "array", items: str("Chore id, e.g. C-3", 20), maxItems: 50 }, max: { type: "integer", minimum: 1, maximum: 50 } }, []),
-    call: (a) => api("POST", `/chores/sweep`, { ids: a.ids, max: a.max }),
-  },
-  {
-    name: "chores_submit",
-    leadOnly: true,
-    description:
-      "Submit the sweep you hold: one result per chore, outcome done (note: what changed), dropped (note: why) or promoted (note: what the ticket should say; a backlog ticket is created). A chore you leave out goes back to the list. The harness runs a size check and, when the session has a reviewer, has it read the batch; then it commits the batch as one commit or refuses it (the changes stay in the working tree; split them into a ticket or revert them), and returns the verdict.",
-    inputSchema: obj(
-      {
-        results: {
-          type: "array",
-          maxItems: 50,
-          items: obj({ id: str("Chore id", 20), outcome: { type: "string", enum: ["done", "dropped", "promoted"] }, note: str("One line", 2000) }, ["id", "outcome"]),
-        },
-      },
-      ["results"],
-    ),
-    call: (a) => submitSweepAndWait((a.results as unknown[]) ?? []),
-  },
-  {
     name: "board_set_priority",
     description: "Change a ticket's priority (lower first) with a reason.",
     inputSchema: obj({ id: str("Ticket id", 20), priority: { type: "integer", minimum: 0, maximum: 1000 }, reason: str("Why", 2000) }, ["id", "priority", "reason"]),
@@ -256,7 +192,7 @@ export const TOOLS: Tool[] = [
     name: "board_update_ticket",
     roles: ["lead", "terminal"],
     description:
-      "Change an existing ticket: title, kind, spec, acceptance criteria (replaces the list), size, expected repos, deps (replaces the list), priority, or state (backlog or ready; other moves are board_move). Fields left out stay as they are. Not for a ticket in review. For a merge: update the ticket that stays with the combined spec and criteria, then board_delete_ticket the others with replacedBy.",
+      "Change an existing ticket: title, kind, spec, acceptance criteria (replaces the list), expected repos, deps (replaces the list), priority, or state (backlog or ready; other moves are board_move). Fields left out stay as they are. Not for a ticket in review. For a merge: update the ticket that stays with the combined spec and criteria, then board_delete_ticket the others with replacedBy.",
     inputSchema: obj(
       {
         id: str("Ticket id", 20),
@@ -264,7 +200,6 @@ export const TOOLS: Tool[] = [
         kind: { type: "string", enum: ["feature", "bug", "followup", "chore"] },
         spec: str("What to do and where"),
         acceptance: { type: "array", items: str("One acceptance criterion", 2000), maxItems: 20 },
-        size: { type: "string", enum: ["S", "M", "L"] },
         repos: { type: "array", items: str("Directory name under /workspace", 100), maxItems: 20, description: "Expected repositories (replaces the list); a hint" },
         deps: { type: "array", items: str("Ticket id", 20), maxItems: 20 },
         priority: { type: "integer", minimum: 0, maximum: 1000 },
@@ -292,7 +227,7 @@ export const TOOLS: Tool[] = [
   {
     name: "request",
     description:
-      "For what you cannot do yourself (you have sudo: install packages yourself). Ask the user for everything you need right now in ONE request. Name the ticket it is about (`ticket`) when you have several in progress; that ticket parks until the user answers. Give a summary (what you need and why) and a list of actions. Kinds Verstas performs on approval: 'network' (a host to allow), 'pack' (a named bundle of hosts for a toolchain, e.g. 'playwright'; listed in /workspace/VERSTAS.md), 'resources' (more minutes/turns/memory). Kinds the user performs or answers: 'instruction' (something only a person can do), 'question' (a decision; offer options). Ask questions rarely: if a sensible choice exists, make it, note the assumption, and continue. The outcomes reach you when the user has decided every action.",
+      "For what you cannot do yourself (you have sudo: install packages yourself). Ask the user for everything you need right now in ONE request. Name the ticket it is about (`ticket`) when you have several in progress; that ticket parks until the user answers. Give a summary (what you need and why) and a list of actions. Kinds Verstas performs on approval: 'network' (a host to allow), 'pack' (a named bundle of hosts for a toolchain, e.g. 'playwright'; listed in /workspace/VERSTAS.md), 'resources' (more memory for the box). Kinds the user performs or answers: 'instruction' (something only a person can do), 'question' (a decision; offer options). Ask questions rarely: if a sensible choice exists, make it, note the assumption, and continue. The outcomes reach you when the user has decided every action.",
     inputSchema: obj(
       {
         summary: str("What you need and why, for the user. One paragraph.", 8000),
@@ -307,8 +242,6 @@ export const TOOLS: Tool[] = [
               host: str("network: hostname or *.suffix", 253),
               pack: str("pack: the pack name, e.g. playwright", 40),
               port: { type: "integer", minimum: 1, maximum: 65535 },
-              workerMinutes: { type: "integer", minimum: 1, maximum: 600 },
-              workerTurns: { type: "integer", minimum: 1, maximum: 500 },
               memoryMb: { type: "integer", minimum: 256, maximum: 65536 },
               text: str("instruction or question: the text", 5000),
               options: { type: "array", items: str("question: an option", 200), maxItems: 8 },

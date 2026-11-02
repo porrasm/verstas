@@ -58,7 +58,7 @@ test("board MCP server speaks JSON-RPC and forwards tool calls with the run toke
     const names = (list.result!.tools as { name: string; inputSchema: { required: string[] } }[]).map((t) => t.name);
     expect(names).toEqual([
       "budget", "board_list_tickets", "board_get_ticket", "board_add_note", "board_report", "board_create_ticket",
-      "chore", "chores_list", "chore_drop", "board_set_priority", "board_add_dep", "request", "halt", "message", "artifact", "idea",
+      "board_set_priority", "board_add_dep", "request", "halt", "message", "artifact", "idea",
     ]);
 
     const got = await call("tools/call", { name: "board_get_ticket", arguments: { id: "T-1" } });
@@ -102,12 +102,12 @@ test("the budget tool turns the worker's totals into what is left, and says so w
   }
 });
 
-test("board_move, done, handoff, the sweeps and the board edits are shown to the lead; the terminal agent edits too; the reviewer gets neither", async () => {
+test("board_move, done, handoff and the board edits are shown to the lead; the terminal agent edits too; the reviewer gets neither", async () => {
   const { visibleTools } = await import("../../src/worker/mcp-server.js");
   const lead = visibleTools("lead").map((t) => t.name);
   const reviewer = visibleTools("reviewer").map((t) => t.name);
   const terminal = visibleTools("terminal").map((t) => t.name);
-  for (const name of ["board_move", "done", "handoff", "chores_sweep", "chores_submit", "board_changes"]) {
+  for (const name of ["board_move", "done", "handoff", "board_changes"]) {
     expect(lead).toContain(name);
     expect(reviewer).not.toContain(name);
     expect(terminal).not.toContain(name);
@@ -117,17 +117,20 @@ test("board_move, done, handoff, the sweeps and the board edits are shown to the
     expect(terminal).toContain(name);
     expect(reviewer).not.toContain(name);
   }
-  for (const name of ["chore", "chores_list", "chore_drop", "board_report", "board_create_ticket"]) {
+  for (const name of ["board_report", "board_create_ticket", "board_add_note"]) {
     expect(lead).toContain(name);
     expect(reviewer).toContain(name);
   }
-  for (const role of ["lead", "reviewer", "planner", "setup", "prompt", "terminal"]) expect(visibleTools(role).map((t) => t.name)).not.toContain("goal_done");
+  for (const role of ["lead", "reviewer", "prompt", "terminal"]) {
+    const names = visibleTools(role).map((t) => t.name);
+    for (const gone of ["goal_done", "chore", "chores_list", "chore_drop", "chores_sweep", "chores_submit", "board_claim", "board_submit", "board_run"]) expect(names).not.toContain(gone);
+  }
   // board_create_ticket: every kind for everyone; the lead may start a ticket at once, the terminal agent may make one ready.
   const props = (role: string) => (visibleTools(role).find((t) => t.name === "board_create_ticket")!.inputSchema as { properties: { kind: { enum: string[] }; state?: { enum: string[] } } }).properties;
-  for (const role of ["lead", "reviewer", "planner", "terminal"]) expect(props(role).kind.enum).toEqual(["feature", "bug", "followup", "chore"]);
+  for (const role of ["lead", "reviewer", "terminal"]) expect(props(role).kind.enum).toEqual(["feature", "bug", "followup", "chore"]);
   expect(props("lead").state?.enum).toEqual(["backlog", "ready", "in_progress"]);
   expect(props("terminal").state?.enum).toEqual(["backlog", "ready"]);
-  for (const role of ["planner", "reviewer"]) expect(props(role).state).toBeUndefined();
+  expect(props("reviewer").state).toBeUndefined();
 });
 
 test("a move to review waits for the verdict and returns the harness's notes since the move; other moves return at once", async () => {

@@ -8,7 +8,7 @@ import { normalizeReviewMode, type Ticket } from "../core/types.js";
  * checks.
  */
 
-/** What changed in one repository for a ticket (since its baseline) or for a sweep (the working tree). */
+/** What changed in one repository for a ticket: since its baseline, or the working tree when it has none. */
 export type RepoChange = {
   repo: string;
   added: number;

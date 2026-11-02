@@ -14,7 +14,7 @@ import { cloneFromBundle, entryProblem } from "./workspace.js";
  * environment, so another machine can import it and initialize it again.
  *
  *   manifest.json        format, version, what is inside
- *   session.json         settings, requirements, prompts, the setup verdict
+ *   session.json         settings, the goal and its history, prompts
  *   board.json           the board
  *   inbox.json           requests, messages, ideas
  *   runs/<n>/...         run history: run.json, events.jsonl, ticket reports
@@ -24,7 +24,7 @@ import { cloneFromBundle, entryProblem } from "./workspace.js";
  * Light: no container, home volume or snapshot, and nothing a repository
  * ignores (node_modules, build output). Those are tied to the machine and
  * its CPU architecture; initialization on the importing machine rebuilds
- * them (the recipes, notes/setup.sh and the setup worker).
+ * them (the recipes; the lead installs the rest as it goes).
  *
  * Left out because they are recreated: proxy/ (from session.allowlist),
  * setup/ (from session.setupScripts), sandbox.env, export/, and any env file
@@ -210,7 +210,7 @@ export type ImportResult = {
  * Unpacks an archive into a staging directory beside the sessions, clones
  * every bundle, and moves it into place as `<root>/<id>`. The session comes
  * in as a plan with its clones in place: Initialize builds the container
- * here (recipes, notes/setup.sh, the setup worker) and keeps the clones.
+ * here (the container and the recipes) and keeps the clones.
  */
 export const importArchive = async (i: ImportInput): Promise<ImportResult> => {
   const { zip, manifest, session: exported } = readArchive(i.file);
@@ -282,7 +282,6 @@ export const importArchive = async (i: ImportInput): Promise<ImportResult> => {
       image: i.image,
       repos,
       initializedAt: null,
-      readiness: undefined,
       snapshot: i.replace?.snapshot,
       setup: [],
       state: "setup",

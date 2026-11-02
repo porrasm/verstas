@@ -10,12 +10,12 @@ import { SessionHub } from "../../src/sessions/hub.js";
 import { sessionPaths } from "../../src/sessions/sessions.js";
 import { inboxSchema, sessionSchema } from "../../src/core/types.js";
 
-const setup = async (opts: { choreApproval?: boolean; choreSweepAt?: number } = {}) => {
+const setup = async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "verstas-api-"));
   const id = "2026-10-03-t";
   const paths = sessionPaths(root, id);
   await fs.mkdir(paths.workspace, { recursive: true });
-  await writeJsonAtomic(paths.session, sessionSchema.parse({ id, name: "t", goal: "g", createdAt: "2026-10-03T00:00:00.000Z", repos: [{ name: "app", sourcePath: "/x", branch: "main", runBranch: "verstas/t" }], caps: { choreApproval: opts.choreApproval ?? false, ...(opts.choreSweepAt === undefined ? {} : { choreSweepAt: opts.choreSweepAt }) } }));
+  await writeJsonAtomic(paths.session, sessionSchema.parse({ id, name: "t", goal: "g", createdAt: "2026-10-03T00:00:00.000Z", repos: [{ name: "app", sourcePath: "/x", branch: "main", runBranch: "verstas/t" }] }));
   let board = importBoard(emptyBoard("g"), {
     tickets: [
       { id: "T-1", title: "Schema", state: "ready", pinned: true },
@@ -66,7 +66,7 @@ test("reads the board and tickets, with the current ticket in the summary", asyn
     expect((b.json.tickets as { id: string }[]).map((t) => t.id)).toEqual(["T-1", "T-2"]);
     expect(((await s.call("GET", "/board?state=in_progress")).json.tickets as unknown[]).length).toBe(1);
     const t = await s.call("GET", "/tickets/T-1");
-    expect(t.json).toMatchObject({ id: "T-1", title: "Schema", pinned: true });
+    expect(t.json).toMatchObject({ id: "T-1", title: "Schema" });
     expect((await s.call("GET", "/tickets/T-9")).status).toBe(404);
     expect((await s.call("GET", "/tickets/evil")).status).toBe(400);
   } finally {
@@ -323,83 +323,6 @@ test("what a lead files after its ticket is settled is not attached to that tick
   }
 });
 
-test("chores: anyone files one (proposed when the session says so); sweeps are the lead's and need a run", async () => {
-  const s = await setup();
-  try {
-    const c = await s.call("POST", "/chores", { text: "Rename tmp to pending", where: "src/loop.ts" });
-    expect(c.status).toBe(201);
-    expect(c.json).toMatchObject({ id: "C-1", state: "open" });
-    expect((await s.call("POST", "/chores", { text: "x", repo: "nope" })).status).toBe(400);
-    const list = await s.call("GET", "/chores");
-    expect((list.json.chores as { id: string; fromTicket?: string; by: string }[])[0]).toMatchObject({ id: "C-1", fromTicket: "T-2", by: "agent" });
-    expect((await s.call("GET", "/chores/sweep")).json).toEqual({ state: "none" });
-    // A worker may not sweep.
-    expect((await s.call("POST", "/chores/sweep", {})).status).toBe(403);
-    // A lead without a run cannot either.
-    const noRun = s.tokens.issue({ sessionId: s.id, runId: 1, role: "lead" });
-    expect((await s.call("POST", "/chores/sweep", {}, `Bearer ${noRun}`)).status).toBe(409);
-  } finally {
-    await s.close();
-  }
-});
-
-test("chores: a sweep is refused while a ticket is in progress; the lead's sweep holds the chores and its submit hands the results to the run", async () => {
-  const s = await setup();
-  const started: string[][] = [];
-  const submitted: unknown[] = [];
-  const hooks = { submitted() {}, handoff() {}, moveRefusal: () => undefined, sweepStarted: (_r: unknown, ids: string[]) => started.push(ids), sweepSubmitted: (_r: unknown, results: unknown) => submitted.push(results) };
-  const app = createAgentApi(s.hub, s.tokens, hooks);
-  const server = app.listen(0, "127.0.0.1");
-  const port = await new Promise<number>((r) => server.on("listening", () => r((server.address() as net.AddressInfo).port)));
-  const call = async (method: string, p: string, body: unknown, token: string) => {
-    const res = await fetch(`http://127.0.0.1:${port}/agent${p}`, { method, headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
-    return { status: res.status, json: (await res.json()) as Record<string, unknown> };
-  };
-  try {
-    await s.call("POST", "/chores", { text: "One" });
-    await s.call("POST", "/chores", { text: "Two" });
-    const lead = s.tokens.issue({ sessionId: s.id, runId: 1, role: "lead" });
-    // T-2 is in progress (the setup put it there): no sweep until it is settled.
-    expect((await call("POST", "/chores/sweep", {}, lead)).json.error).toContain("T-2 (in_progress) is in progress");
-    const h0 = await s.hub.get(s.id);
-    await h0.mutate((d) => ({ next: { board: transition(d.board, "T-2", "ready", { by: "user", text: "back" }) } }));
-    const sw = await call("POST", "/chores/sweep", { max: 5 }, lead);
-    expect(sw.status).toBe(200);
-    expect(sw.json).toMatchObject({ sweep: 1, limits: { maxLines: 400, maxFiles: 15 } });
-    expect((sw.json.chores as { id: string; text: string }[]).map((c) => c.text)).toEqual(["One", "Two"]);
-    expect(started).toEqual([["C-1", "C-2"]]);
-    expect((await call("POST", "/chores/sweep", {}, lead)).status).toBe(409);
-    expect((await call("POST", "/chores/sweep/submit", { results: [{ id: "C-9", outcome: "done" }] }, lead)).json.error).toContain("C-9 is not in this sweep");
-    const sub = await call("POST", "/chores/sweep/submit", { results: [{ id: "C-1", outcome: "done", note: "ok" }, { id: "C-2", outcome: "dropped", note: "moot" }] }, lead);
-    expect(sub.json).toMatchObject({ ok: true, state: "judging" });
-    expect(submitted).toEqual([[{ id: "C-1", outcome: "done", note: "ok" }, { id: "C-2", outcome: "dropped", note: "moot" }]]);
-    expect((await call("GET", "/chores/sweep", undefined, lead)).json).toMatchObject({ n: 1, state: "judging" });
-    expect((await call("POST", "/chores/sweep/submit", { results: [] }, lead)).status).toBe(409);
-  } finally {
-    await new Promise((r) => server.close(r));
-    await s.close();
-  }
-});
-
-test("chores: anyone drops a chore with a reason", async () => {
-  const s = await setup();
-  try {
-    await s.call("POST", "/chores", { text: "One" });
-    await s.call("POST", "/chores", { text: "Two" });
-    expect((await s.call("GET", "/chores")).json).toMatchObject({ open: 2 });
-    const drop = await s.call("POST", "/chores/C-2/drop", { reason: "fixed by T-2 already" });
-    expect(drop.json).toMatchObject({ ok: true, id: "C-2", state: "dropped" });
-    const after = (await s.call("GET", "/chores")).json as { open: number; chores: { id: string; state: string; outcome?: string }[] };
-    expect(after.open).toBe(1);
-    expect(after.chores.find((c) => c.id === "C-2")).toMatchObject({ state: "dropped", outcome: "Dropped by the worker on T-2: fixed by T-2 already" });
-    expect((await s.call("POST", "/chores/C-2/drop", { reason: "again" })).status).toBe(403);
-    expect((await s.call("POST", "/chores/C-9/drop", { reason: "x" })).status).toBe(404);
-    expect((await s.call("POST", "/chores/C-1/drop", {})).status).toBe(400);
-  } finally {
-    await s.close();
-  }
-});
-
 test("agents may not set a ticket's review mode: the agent API leaves it out; a user import keeps it", async () => {
   const s = await setup();
   try {
@@ -415,14 +338,3 @@ test("agents may not set a ticket's review mode: the agent API leaves it out; a 
   }
 });
 
-test("chores: with choreApproval on, an agent's chore waits as proposed", async () => {
-  const s = await setup({ choreApproval: true });
-  try {
-    const c = await s.call("POST", "/chores", { text: "Needs a look" });
-    expect(c.json).toMatchObject({ id: "C-1", state: "proposed" });
-    expect((await s.call("GET", "/chores?state=open")).json.chores).toEqual([]);
-    expect((await s.call("GET", "/chores")).json.approvalRequired).toBe(true);
-  } finally {
-    await s.close();
-  }
-});

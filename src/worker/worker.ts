@@ -177,11 +177,13 @@ export const runJob = async (job: Job, io: { /** Where messages from the user ar
   process.once("SIGTERM", onTerm);
   process.once("SIGINT", onTerm);
 
-  const timer = setTimeout(() => {
-    stopReason = "time_cap";
-    emit({ kind: "status", t: new Date().toISOString(), ticket: job.ticket, text: `time cap of ${job.caps.minutes} min reached; stopping` });
-    stop();
-  }, job.caps.minutes * 60_000);
+  const timer = job.caps.minutes
+    ? setTimeout(() => {
+        stopReason = "time_cap";
+        emit({ kind: "status", t: new Date().toISOString(), ticket: job.ticket, text: `time cap of ${job.caps.minutes} min reached; stopping` });
+        stop();
+      }, job.caps.minutes * 60_000)
+    : undefined;
 
   let stderr = "";
   let spawnError = "";
@@ -229,7 +231,7 @@ export const runJob = async (job: Job, io: { /** Where messages from the user ar
       turns++;
       budget.turns = turns;
       writeBudget();
-      if (turns > job.caps.turns && !stopReason) {
+      if (job.caps.turns && turns > job.caps.turns && !stopReason) {
         stopReason = "turn_cap";
         emit({ kind: "status", t: new Date().toISOString(), ticket: job.ticket, text: `turn cap of ${job.caps.turns} reached; stopping` });
         stop();

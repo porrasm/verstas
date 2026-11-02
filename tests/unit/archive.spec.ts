@@ -167,9 +167,8 @@ test("import replace keeping the environment: the snapshot record stays on the i
     await importArchive({ root: w.root, file: out, id: w.session.id, workTargets: [], image: "img", replace: { removeEnvironment: async () => undefined, snapshot } });
     const kept = await loadSession(w.root, w.session.id);
     expect(kept.snapshot).toEqual(snapshot);
-    // Still a plan: Initialize runs the setup worker against the imported board and requirements.
+    // Still a plan: Initialize brings the container up on this machine.
     expect(kept.initializedAt).toBeNull();
-    expect(kept.readiness).toBeUndefined();
     await importArchive({ root: w.root, file: out, id: w.session.id, workTargets: [], image: "img", replace: { removeEnvironment: async () => undefined } });
     expect((await loadSession(w.root, w.session.id)).snapshot).toBeUndefined();
   } finally {

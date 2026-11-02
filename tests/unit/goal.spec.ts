@@ -1,7 +1,7 @@
 import { test, expect } from "@playwright/test";
 import { emptyBoard, importBoard } from "../../src/board/board.js";
 import { now, reviseGoal, sessionSchema } from "../../src/core/types.js";
-import { leadContinuePrompt, leadPrompt, systemMd, verifyRule, verstasMd } from "../../src/harness/prompts.js";
+import { leadContinuePrompt, leadPrompt, reviewFacts, systemMd, verstasMd } from "../../src/harness/prompts.js";
 
 /** The goal's pure parts: the goal history on the session and what the lead's prompts say about it. */
 
@@ -29,8 +29,8 @@ test("reviseGoal keeps the history: the old goal goes in as revised, or as met w
 test("the lead's prompts: the first lead, a next goal after a met one, a revised goal, the claim made before, no goal, and the continue prompt", () => {
   const board = importBoard(emptyBoard("g"), { tickets: [{ id: "T-1", title: "Schema", state: "ready" }, { id: "T-2", title: "Engine", state: "backlog" }] }).board;
   const first = leadPrompt(board, { goal: "A CLI that greets", round: 1, history: [{ repo: "app", log: "" }] });
-  expect(first).toContain("# Work the session");
-  expect(first).toContain("Life 1 of this run");
+  expect(first).toContain("# The session");
+  expect(first).toContain("Lead life 1 of this run");
   expect(first).toContain("## Goal\nA CLI that greets");
   expect(first).toContain("you are the first lead here");
   expect(first).toContain("(no commits since the clone)");
@@ -40,13 +40,11 @@ test("the lead's prompts: the first lead, a next goal after a met one, a revised
   const next = leadPrompt(board, { goal: "Add a GUI", round: 1, stateNote: "# Plan\n- CLI done", goalChange: { kind: "next", at: "2026-10-04T00:00:00.000Z", previous: "A CLI that greets", note: "Greets; tests pass." }, history: [{ repo: "app", log: "abc123 Lead 3.2: greet\n" }] });
   expect(next).toContain("The previous goal was met");
   expect(next).toContain("Greets; tests pass.");
-  expect(next).toContain("Rewrite notes/state.md for the new goal");
   expect(next).toContain("abc123 Lead 3.2: greet");
   expect(next).toContain("# Plan\n- CLI done");
 
   const revised = leadPrompt(board, { goal: "A CLI that greets in Finnish", round: 2, stateNote: "# Plan", goalChange: { kind: "revised", at: "2026-10-02T00:00:00.000Z", previous: "A CLI that greets" }, history: [], lastWords: "(stopped at time_cap) writing tests", answers: ["R-1: Which language? Answer: Finnish"] });
   expect(revised).toContain("The goal was revised at 2026-10-02T00:00");
-  expect(revised).toContain("Reconcile notes/state.md");
   expect(revised).toContain("stopped at a cap before it updated the note");
   expect(revised).toContain("writing tests");
   expect(revised).toContain("Requests the user decided");
@@ -74,24 +72,29 @@ test("the lead's prompts: the first lead, a next goal after a met one, a revised
   expect(contRevised).toContain("In progress: T-1 (ready)");
 });
 
-test("the lead's rules name the board contract and done; VERSTAS.md says the lead commits and how the review reads the commits", () => {
+test("the lead is told facts, not how to work: its role, the review contract, its caps; your rules file adds to it", () => {
   const sys = systemMd("lead");
   expect(sys).toContain("Role: lead");
-  expect(sys).toContain("board_move");
+  expect(sys).toContain("how you work is yours to decide");
   expect(sys).toContain("`done`");
-  expect(sys).toContain("handoff");
-  expect(sys).toContain("notes/state.md");
-  expect(sys).toContain("Commit your own work");
-  expect(sys).not.toContain("Never commit");
-  expect(systemMd("reviewer")).toContain("Never commit");
+  expect(sys).toContain("`handoff`");
+  // No procedure: no checks to run, no definition of done, no reading order.
+  for (const word of ["must", "Definition of done", "run the tests", "Read /workspace/notes/brief.md"]) expect(sys).not.toContain(word);
+  expect(systemMd("lead", "Always write a test first.")).toContain("Always write a test first.");
+  // The reviewer keeps its procedure and verdict contract.
+  const rev = systemMd("reviewer");
+  expect(rev).toContain("Two passes, both required");
+  expect(rev).toContain("VERDICT: ok");
+  expect(rev).toContain("Never commit");
 
   const box = verstasMd(session({ repos: [{ name: "app", sourcePath: "/x", branch: "main", runBranch: "verstas/g" }] }), "http://x/agent");
+  expect(box).toContain("/workspace/app");
   expect(box).toContain("board_*");
-  expect(box).toContain("commit your own work");
+  expect(box).toContain("Commits are yours");
   expect(box).toContain("carry its id");
-  expect(box).toContain("a lead life has no time or turn cap of its own");
-  const capped = verstasMd(session({ caps: { leadMinutes: 90 } }), "http://x/agent");
-  expect(capped).toContain("one lead life ends at 90 minutes");
-  expect(verifyRule({ repos: [], caps: session().caps })).toContain("independent reviewer");
-  expect(verifyRule({ repos: [], caps: { ...session().caps, reviewer: false } })).toContain("you move tickets to done yourself");
+  expect(box).toContain("A lead life has no time or turn cap");
+  for (const gone of ["setup.sh", "brief.md", "env.md says", "chore", "Caps per worker", "USD"]) expect(box).not.toContain(gone);
+  expect(verstasMd(session({ caps: { leadMinutes: 90 } }), "http://x/agent")).toContain("A lead life ends at 90 minutes");
+  expect(reviewFacts({ caps: session().caps })).toContain("independent reviewer");
+  expect(reviewFacts({ caps: { ...session().caps, reviewer: false } })).toContain("You move tickets to `done`");
 });

@@ -61,68 +61,46 @@ Then, in the web app:
    paste a GitHub token and add the GitHub repositories sessions work on
    (each gets a mirror on this machine; sessions clone from it), paste the
    Claude token.
-2. **New session**: a name and, if you have one, a board. That is all the
-   form asks. The session starts as a **plan**: nothing is cloned and no
+2. **New session**: a name and, if you have them, a goal and a board.
+   That is all the form asks. The session starts as a **plan**: nothing is cloned and no
    container exists yet. Or let an assistant prepare a draft first
    (**Connect an assistant** on the New session page, `docs/DRAFTS.md`);
-   creating from its review page brings its repositories, packs, recipes
-   and board along. **Start from: Environment of <session>** instead
+   creating from its review page brings its repositories, packs, recipes,
+   goal and board along. **Start from: Environment of <session>** instead
    starts a fresh board on a copy of an initialized session's box (home
-   volume, snapshot, settings, notes) and comes up initialized without
-   running setup again (`docs/SANDBOX.md`).
+   volume, snapshot, settings, notes) and comes up initialized
+   (`docs/SANDBOX.md`).
 3. **Session page, while it is a plan**: a setup sheet, section by
    section: repositories (cloned fresh at initialization, at the branch
-   you pick), the board (write or import tickets), the environment (setup
-   mode, instructions, recipes, attachments), network packs, agents and
-   caps. Come back to it over hours if you like. The launch panel beside
-   the sheet sums up what Initialize will do; press **Initialize** there
-   (or **Initialize and start**, which goes on to the ready tickets when
-   initialization succeeds). Initialization clones the repositories,
-   creates the container, runs the recipes and, unless you chose to skip
-   it, a setup worker (step 5); while it runs the page shows its steps
-   and the log. After that the page turns to overseeing: approve tickets
-   by moving them from backlog to ready, start the run, watch the live
-   log, answer requests in the inbox, pause or stop at any time. **Plan
-   tickets…** takes a request ("build the mapping engine, done means …")
-   and runs a planner that drafts backlog tickets from it and the
-   repositories. The environment and the session settings fold away in
-   the sidebar; **Reset environment** there removes the container, the
-   home volume, the snapshot and the clones and makes the session a plan
-   again; the board, notes and settings stay. Its dialog counts each
-   repository's commits since the session started and points to Publish PR
-   or Export first, since unpublished work on a run branch goes with the
-   clones.
+   you pick), the goal, the board (write or import tickets), the
+   environment (recipes, attachments), network packs, agents, review and
+   limits. Come back to it over hours if you like. The launch panel
+   beside the sheet sums up what Initialize will do; press **Initialize**
+   there (or **Initialize and start**, which starts the lead when it
+   succeeds). Initialization clones the repositories, creates the
+   container and runs the recipes; that is all. The lead installs what
+   else it needs as it goes, and the box is committed to an image after
+   every run, so its installs survive a recreated container. After that
+   the page turns to overseeing: approve tickets by moving them from
+   backlog to ready, start the run, watch the live log, answer requests in
+   the inbox, pause or stop at any time. The environment and the session
+   settings fold away in the sidebar; **Reset environment** there removes
+   the container, the home volume, the snapshot and the clones and makes
+   the session a plan again; the board, notes and settings stay. Its
+   dialog counts each repository's commits since the session started and
+   points to Publish PR or Export first, since unpublished work on a run
+   branch goes with the clones.
 4. **Recipes** (own tab): bash that runs once when a session's container
-   is created, so the box starts set up. After a session's setup worker
-   built an environment, "Save as recipe" on the session page puts its
-   `notes/setup.sh` and `notes/env.md` in the library; tick it on the next
-   session for the same repositories. Hand-written ones run as root; two
-   to paste are in `docs/examples/scripts/` (Postgres, Chromium). "Copy
-   context for an LLM" gives any assistant the facts of the box so it can
-   write one, or a board.
-5. **Setup** (the Environment section of the setup sheet, the Environment
-   panel once the box exists): what happens at
-   initialization after the container and the recipes. Two modes. **Setup
-   worker** (the default): an agent reads the repositories and the board
-   and makes the box a sensible place to develop them: toolchains at the
-   pinned versions, dependencies from the lockfiles, the services the
-   tests need, the build and test commands verified by running them. It
-   implements nothing and installs nothing only a later ticket would need.
-   Your **instructions** ("Postgres 17 reachable, migrations applied; the
-   e2e suite runs") go on top of that. It asks you in one request for
-   what it cannot do and runs again once you answer; a "ready" verdict
-   completes initialization (and starts the tickets, with Initialize and
-   start). "Needs" leaves the session uninitialized and puts the report
-   at the top of the page with the two ways on: fix what it names and
-   **Initialize again**, or **Accept as is**, which completes it by hand. **Skip**: the container and the
-   recipes only. The setup worker writes three notes every later worker
-   reads: `notes/brief.md` (the project brief), `notes/env.md` (what is
-   installed, services, verified commands) and `notes/setup.sh` (the
-   recipe that rebuilds the box after the container is recreated).
-6. **Ask the box** (on the session page): one worker with your text, the
-   brief and env.md, outside any ticket. "Make sure you can run the e2e
-   suite", "why is the dev server slow?". It can install and configure; a
+   is created, so the box starts with what you know it needs. Hand-written
+   ones run as root; two to paste are in `docs/examples/scripts/`
+   (Postgres, Chromium). "Copy context for an LLM" gives any assistant the
+   facts of the box so it can write one, or a board.
+5. **Ask the box** (on the session page): one worker with your text,
+   outside any ticket and the run. "Make sure you can run the e2e suite",
+   "why is the dev server slow?". It can install and configure; a
    repository change becomes one commit; the reply stays on the page.
+6. **Agent terminal** (on the session page, below): plan the board with
+   Claude Code or Codex in a conversation, in the box.
 7. **Remote dashboard** (optional, Settings): follow ticked sessions and
    answer the inbox from your phone through the `verstas` app in the apps
    monorepo. Off by default, and per session off until you tick it; see
@@ -151,29 +129,27 @@ Then, in the web app:
    (shown on the page; the session reads "goal met, says the lead") and no
    ticket is ready, when you press Pause (a running Claude Code lead is
    told to reach a sensible point, update its note and stop), when a
-   request about the goal waits on you and no ticket can go on, when two
-   lives in a row change nothing, or at the session's cap on lives per run
-   (`goalRounds`, default 25). A request on a ticket parks that ticket only;
+   request about the goal waits on you and no ticket can go on, or when two
+   lives in a row change nothing. A request on a ticket parks that ticket only;
    the lead carries on with the rest. Every `progressMinutes` of a run
    (default 30, 0 for none) a running Claude Code lead is asked for a short
    progress update and posts it to the inbox. Edit the goal at any time:
    the next life reads it, a running lead is told in its conversation, and
    the goal it replaces goes to the session's goal history with how it
-   ended. Starting again after a met goal means "not yet". Every lead has
-   a `budget` tool showing its turns, minutes and context size; the lead
-   caps (`leadMinutes`, `leadTurns`) are optional and unset by default. To
-   change the lead's rules without a rebuild, write them to
-   `~/.verstas/prompts/lead.md`; the next lead reads it.
-   **Chores**: small fixes that are not worth a ticket. Reviewers and
-   workers file them; the lead sweeps a batch when it sees fit (no sweep
-   while a ticket is in progress), anyone drops one that is not worth
-   doing (`chore_drop`), and Verstas commits the batch as one commit after
-   a size check and, when the session has a reviewer, its review
-   (`docs/BOARD.md`, Chores).
+   ended. Starting again after a met goal means "not yet".
+   **What Verstas tells the lead**: facts, not a procedure. `VERSTAS.md`
+   in the box says where it is, what the tools do, how to reach you, how
+   commits and the review work, and its caps; the system prompt names its
+   role. Nothing tells it to run checks, read a brief or work in a given
+   order. The only limits are the optional lead caps (`leadMinutes`,
+   `leadTurns`, unset by default: a life then ends when the lead stops or
+   hands off), and `budget` shows the lead its turns, minutes and context
+   size. To give every lead your own rules, write them to
+   `~/.verstas/prompts/lead.md`; the next lead reads them after its role.
    **Several repositories**: a ticket's repositories are a hint; the lead
    changes whichever it needs. The harness runs no checks of its own: the
-   reviewer runs each changed repository's check (the command the brief
-   names) and reads the change (`docs/BOARD.md`, Judging).
+   reviewer runs each changed repository's check and reads the change
+   (`docs/BOARD.md`, Judging).
 9. **Publish PR** when you want the work: the session page's Work panel
    shows per repository which got commits, its base and whether GitHub
    moved on. Publish PR pushes the commits since the base to
@@ -182,7 +158,7 @@ Then, in the web app:
    merge on GitHub.
    **Next round** goes the other way once you merged: every repository's
    clone moves to the latest default branch (or one you pick) without a
-   new clone, you see each new tip, and Plan tickets follows. **Sync** does
+   new clone, and you see each new tip. **Sync** does
    it for one repository and any branch; Start does it on its own when the
    base moved and nothing would be lost, and refuses with the reason when
    something would. **Reclone** replaces a clone with a fresh one for when
@@ -195,13 +171,12 @@ Then, in the web app:
    as a bundle; no container, home volume or ignored files (node_modules,
    build output). **Import session…** on the other machine's Sessions page
    brings it in as a plan with its clones in place, and **Initialize**
-   rebuilds the environment there (recipes, `notes/setup.sh`, the setup
-   worker). Importing a session whose id exists asks whether to replace it
-   (the way back) or import a copy. Replacing keeps this machine's home
-   volume and snapshot of the session by default ("Keep this machine's
-   environment"), so the Initialize that follows finds everything
-   installed and is quick; it still runs the setup worker, since the
-   imported board and setup instructions may differ. A copy has a new id
+   rebuilds the environment there (the container and the recipes; the
+   lead installs the rest again as it needs it). Importing a session whose
+   id exists asks whether to replace it (the way back) or import a copy.
+   Replacing keeps this machine's home volume and snapshot of the session
+   by default ("Keep this machine's environment"), so the Initialize that
+   follows finds everything installed. A copy has a new id
    and so no environment here. GitHub repositories mean the same on every
    machine; a repository from an older local checkout is matched to a
    repository of the same name here. Format: `src/sessions/archive.ts`.
@@ -209,7 +184,7 @@ Then, in the web app:
    go with it.
 
 Runs continue while Verstas is open (on macOS, also with the window
-closed). Quitting stops them and requeues the ticket a worker held.
+closed). Quitting stops them and requeues the tickets the lead had in progress.
 
 ## Agent terminal
 
@@ -217,10 +192,10 @@ closed). Quitting stops them and requeues the ticket a worker held.
 their own interactive interface, running in the session's box, on the
 page. Slash commands, `/resume` and the rest work as in your own terminal.
 The agent has the board tools: it can read the board and write tickets
-(features too; to the backlog, or straight to ready when you ask), edit,
-merge and delete tickets, take notes and file chores, so you can plan with it in a conversation instead
-of the one-shot planner. It is a run of its own: it starts only when
-nothing else runs, and starting a run (or planning) ends it. When it ends,
+(any kind; to the backlog, or straight to ready when you ask), edit,
+merge and delete tickets and take notes, so you can plan the board with
+it in a conversation. It is a run of its own: it starts only when nothing
+else runs, and starting a run ends it. When it ends,
 whatever it changed in the repositories is committed as one commit,
 "Terminal: …". The first time in a box, Claude Code asks you to trust the
 folder and to accept its bypass-permissions mode (the box is the sandbox,

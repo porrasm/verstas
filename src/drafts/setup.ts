@@ -38,7 +38,7 @@ export const mcpSetup = (i: McpSetupInput): McpSetup => {
     stdioBuilt: i.stdioBuilt,
     prompt: [
       `Use the ${MCP_SERVER_NAME} MCP server to prepare a Verstas draft session for what we discussed.`,
-      "Call verstas_context first. Then create the draft and build it step by step: repositories, session requirements, network packs, recipes, and the board a few tickets at a time.",
+      "Call verstas_context first. Then create the draft and build it step by step: repositories, network packs, recipes, and the board a few tickets at a time.",
       "Run draft_validate until there are no errors, put your assumptions in the notes, and give me the review link. Do not try to create or start the session; I do that in Verstas.",
     ].join(" "),
   };

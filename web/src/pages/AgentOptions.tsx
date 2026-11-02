@@ -25,7 +25,7 @@ const title = (drivers: DriverInfo[], d: DriverName) => drivers.find((x) => x.na
 
 /** One line for the summary: "Claude Code · claude-sonnet-5-5 · reviewer: Codex (gpt-5.1-codex)". */
 export const describeAgents = (s: { model?: string; agents?: SessionAgents }, drivers: DriverInfo[], reviewerOn = true): string => {
-  const w = agentFor(s, "implementer");
+  const w = agentFor(s, "lead");
   const r = agentFor(s, "reviewer");
   const one = (a: AgentSpec) => `${title(drivers, a.driver)}${a.model ? ` · ${a.model}` : ""}`;
   const same = r.driver === w.driver && (r.model ?? "") === (w.model ?? "");
@@ -58,7 +58,7 @@ const AgentRow = ({ id, label, value, drivers, onChange }: { id: string; label: 
 };
 
 const Warnings = ({ agents, drivers, reviewerOn }: { agents: SessionAgents; drivers: DriverInfo[]; reviewerOn: boolean }) => {
-  const used = [agentFor({ agents }, "implementer").driver, ...(reviewerOn ? [agentFor({ agents }, "reviewer").driver] : [])];
+  const used = [agentFor({ agents }, "lead").driver, ...(reviewerOn ? [agentFor({ agents }, "reviewer").driver] : [])];
   const infos = [...new Set(used)].map((d) => drivers.find((x) => x.name === d)).filter((x): x is DriverInfo => Boolean(x));
   const missing = infos.filter((d) => !d.configured);
   const noCost = infos.filter((d) => !d.reportsCost);
@@ -83,7 +83,7 @@ const Warnings = ({ agents, drivers, reviewerOn }: { agents: SessionAgents; driv
 
 export const AgentOptionsDialog = ({ agents, reviewerOn = true, onSave, onClose }: { agents: SessionAgents; reviewerOn?: boolean; onSave: (a: SessionAgents) => void; onClose: () => void }) => {
   const drivers = useDrivers();
-  const [worker, setWorker] = useState<AgentSpec>(agentFor({ agents }, "implementer"));
+  const [worker, setWorker] = useState<AgentSpec>(agentFor({ agents }, "lead"));
   const [reviewer, setReviewer] = useState<AgentSpec | null>(agents.reviewer ?? null);
   useEffect(() => {
     const key = (e: KeyboardEvent) => e.key === "Escape" && onClose();
@@ -96,7 +96,7 @@ export const AgentOptionsDialog = ({ agents, reviewerOn = true, onSave, onClose 
       <div className="dialog">
         <h3 id="agent-options-title">Agent options</h3>
         <p className="lead" style={{ margin: 0 }}>
-          The worker runs the planner, the setup pass, prompts and every implementer. The reviewer judges each ticket's diff; a different agent there gives a second opinion. Every agent uses the same board tools and rules.
+          The worker runs the lead and Ask the box. The reviewer judges each ticket the lead moves to review; a different agent there gives a second opinion.
         </p>
         <AgentRow id="worker" label="Worker" value={worker} drivers={drivers} onChange={setWorker} />
         {reviewerOn && (

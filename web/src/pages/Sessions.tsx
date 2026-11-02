@@ -5,11 +5,11 @@ const ORDER = ["done", "review", "in_progress", "waiting", "blocked", "ready", "
 
 const stateOf = (s: SessionSummary): { label: string; tone: string; dot: string } => {
   if (s.run?.state === "running") {
-    const label = s.session.state === "planning" ? "planning" : s.session.state === "checking" ? (s.session.initializedAt ? "checking the environment" : "initializing") : s.run.currentTicket ? `working on ${s.run.currentTicket}` : "running";
+    const label = !s.session.initializedAt ? "initializing" : s.run.currentTicket ? `working on ${s.run.currentTicket}` : "running";
     return { label, tone: "sig", dot: "run" };
   }
   if (s.openRequests) return { label: "waiting for you", tone: "warn", dot: "bad" };
-  if (!s.session.initializedAt) return s.session.readiness?.verdict === "needs" ? { label: "initialization needs you", tone: "warn", dot: "bad" } : { label: "not initialized", tone: "quiet", dot: "" };
+  if (!s.session.initializedAt) return { label: "not initialized", tone: "quiet", dot: "" };
   switch (s.session.state) {
     case "finished":
       return { label: s.session.goalMet ? "goal met" : "finished", tone: "good", dot: "good" };
@@ -158,7 +158,7 @@ export const SessionsPage = ({ status }: { status: Status | null }) => {
       {sorted && sorted.length === 0 ? (
         <div className="card empty-state">
           <h3>No sessions yet</h3>
-          <p>Create one, paste a board or let the planner draft it, and start the run.</p>
+          <p>Create one, write a goal or paste a board, and start the run.</p>
           <a className="btn pri" href="#/new">New session</a>
         </div>
       ) : (

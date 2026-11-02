@@ -28,11 +28,9 @@ import {
   useNow,
   type AgentRequest,
   type Board,
-  type Chore,
   type Config,
   type Inbox,
   type NetworkPack,
-  type Readiness,
   type ReviewMode,
   type Run,
   type Sandbox,
@@ -86,14 +84,11 @@ type Tone = "sig" | "good" | "warn" | "quiet" | "info";
 const sessionStatus = (session: Session, run: Run | undefined, active: boolean): { label: string; tone: Tone } => {
   if (active) {
     if (run?.terminal) return { label: `agent terminal · ${run.terminal.driver === "codex" ? "Codex" : "Claude Code"}`, tone: "sig" };
-    if (session.state === "checking") return { label: isInitialized(session) ? "checking the environment" : "initializing the environment", tone: "sig" };
-    if (session.state === "planning") return { label: "planning", tone: "sig" };
+    if (!isInitialized(session)) return { label: "initializing the environment", tone: "sig" };
     if (run?.state === "paused") return { label: `pausing · ${PAUSE_REASON[run.pauseReason ?? ""] ?? run.pauseReason ?? ""}`, tone: "sig" };
     return { label: run?.currentTicket ? `working on ${run.currentTicket}` : "running", tone: "sig" };
   }
   if (!isInitialized(session)) {
-    if (session.state === "waiting") return { label: "initialization waits for you", tone: "warn" };
-    if (session.readiness?.verdict === "needs") return { label: "initialization needs you", tone: "warn" };
     return { label: "not initialized", tone: "quiet" };
   }
   switch (session.state) {
@@ -138,7 +133,6 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
   const [importText, setImportText] = useState<string | null>(null);
   const [exportInfo, setExportInfo] = useState<string[] | null>(null);
   const [newTicket, setNewTicket] = useState(false);
-  const [planning, setPlanning] = useState(false);
   const [busy, setBusy] = useState("");
   const [logTicket, setLogTicket] = useState("");
   const [lastEventAt, setLastEventAt] = useState<string | null>(null);
@@ -231,13 +225,8 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
   };
   const tryAct = (label: string, fn: () => Promise<unknown>) => act(label, fn).catch(() => undefined);
   const runAction = (action: string) => tryAct(action, () => api("POST", `${base}/run`, { action }));
-  /** Initialize: clone the repositories, create the container, run the recipes and the setup worker; with start, the tickets follow. */
+  /** Initialize: clone the repositories, create the container, run the recipes; with start, the lead follows. */
   const init = (start: boolean) => tryAct(start ? "initializing and starting" : "initializing", () => api("POST", `${base}/init`, { start }));
-  const plan = (prompt: string) =>
-    act("planning", async () => {
-      await api("POST", `${base}/run`, { action: "plan", prompt });
-      setPlanning(false);
-    }).catch(() => undefined);
   /** Stop or remove this session's container and proxy; either comes back on the next run. */
   const runSandbox = (action: "stop" | "remove") => tryAct(action === "stop" ? "stopping container" : "removing sandbox", () => api("POST", `${base}/sandbox`, { action }));
   const doExport = () =>
@@ -295,16 +284,14 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
   const pausedBanner = !active && run && (run.state === "paused" || run.state === "halted" || run.state === "failed") && session.state !== "finished";
   const initialized = isInitialized(session);
   const terminalActive = Boolean(active && run?.terminal);
-  /** The setup worker left the box short of ready and nobody accepted it: the one state that needs a decision before anything else. */
-  const initNeeds = !initialized && !active && session.readiness?.verdict === "needs" && !session.readiness.confirmedAt;
   const saveSettings = async (patch: SettingsPatch) => {
     if (patch.allowlist || patch.packs) await api("PUT", `${base}/allowlist`, { allowlist: patch.allowlist, packs: patch.packs });
-    if (patch.caps || patch.limits || patch.planning !== undefined) await api("PUT", `${base}/caps`, { caps: patch.caps, limits: patch.limits, planning: patch.planning });
+    if (patch.caps || patch.limits) await api("PUT", `${base}/caps`, { caps: patch.caps, limits: patch.limits });
     await refreshRun();
   };
-  /** Every ticket and chore off the board, after a confirm; Export board first keeps a copy. */
+  /** Every ticket off the board, after a confirm; Export board first keeps a copy. */
   const clearBoard = () => {
-    const what = [`${board.tickets.length} ticket${board.tickets.length === 1 ? "" : "s"}`, ...(board.chores.length ? [`${board.chores.length} chore${board.chores.length === 1 ? "" : "s"}`] : [])].join(" and ");
+    const what = `${board.tickets.length} ticket${board.tickets.length === 1 ? "" : "s"}`;
     if (!confirm(`Delete all ${what} from "${session.name}"?\n\nThe goal and the repositories stay. This cannot be undone; Export board (JSON) keeps a copy.`)) return;
     void tryAct("clearing the board", () => api("POST", `${base}/board/clear`));
   };
@@ -331,7 +318,6 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
     onImport: () => setImportText(""),
     onNewTicket: () => setNewTicket(true),
     onExport: doExport,
-    onPlan: () => setPlanning(true),
     onInit: init,
     saveSettings,
     repoState,
@@ -346,7 +332,6 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
           <div className="actions">
             {initialized && !active && <button className="pri" onClick={() => runAction("start")} disabled={Boolean(busy)} title={session.goalMet ? "Start again with the same goal: the lead takes that as not yet and looks for what falls short" : "One lead works the goal and the board's ready tickets; Verstas judges what it moves to review and commits what it leaves"}>{session.goalMet ? "Start again" : "Start run"}</button>}
             {terminalActive && <ConfirmButton className="pri" label="Start run" confirm="End the terminal and start" onConfirm={() => runAction("start")} disabled={Boolean(busy)} />}
-            {initialized && (!active || terminalActive) && <button onClick={() => setPlanning(true)} disabled={Boolean(busy)} title={terminalActive ? "Planning ends the agent terminal first; its changes are committed" : "Describe what to build; a planner worker turns it into backlog tickets"}>Plan tickets…</button>}
             {initialized && !active && (
               <MoreMenu
                 label="Agent terminal ▾"
@@ -364,7 +349,7 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
               items={[
                 { label: "Import board…", onClick: () => setImportText("") },
                 { label: "Export board (JSON)", href: `/api${base}/board/export` },
-                ...(board.tickets.length > 0 || board.chores.length > 0 ? [{ label: active ? "Clear board (stop the run first)" : "Clear board…", onClick: clearBoard, disabled: active }] : []),
+                ...(board.tickets.length > 0 ? [{ label: active ? "Clear board (stop the run first)" : "Clear board…", onClick: clearBoard, disabled: active }] : []),
                 { label: active ? "Export session (stop the run first)" : "Export session (.ver)…", onClick: doArchive, disabled: active },
                 ...(initialized
                   ? [
@@ -412,14 +397,12 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
       {openRequests.length > 0 && (
         <section className="card attention">
           <h3>Needs you · {openRequests.length} request{openRequests.length === 1 ? "" : "s"}</h3>
-          <p className="lead">The worker parked its ticket until you answer. Nothing else moves while a request is open.</p>
+          <p className="lead">The lead parked the ticket a request is about and carries on with the rest; a request about the goal pauses the run until you answer.</p>
           <div className="attention-grid">
             {openRequests.map((r) => <RequestItem key={r.id} r={r} onDecide={decide} onOpenTicket={openTicket} />)}
           </div>
         </section>
       )}
-
-      {initNeeds && <InitNeedsCard session={session} now={now} busy={Boolean(busy)} onInit={() => init(false)} onAccept={() => tryAct("accepting", () => api("POST", `${base}/setup/confirm`, { start: false }))} />}
 
       {exportInfo && (
         <section className="card stack tight">
@@ -443,8 +426,6 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
           <button className="pri sm end" onClick={() => tryAct("approving", () => api("POST", `${base}/tickets/approve-all`))} disabled={Boolean(busy)}>Approve all</button>
         </div>
       )}
-
-      {planning && <PlanDialog session={session} busy={Boolean(busy)} onCancel={() => setPlanning(false)} onPlan={plan} />}
 
       {newTicket && (
         <NewTicketForm
@@ -522,7 +503,6 @@ type BodyProps = {
   onImport: () => void;
   onNewTicket: () => void;
   onExport: () => void;
-  onPlan: () => void;
   onInit: (start: boolean) => void;
   saveSettings: (patch: SettingsPatch) => Promise<void>;
   repoState: RepoStateHandle;
@@ -607,10 +587,10 @@ const RunBody = (p: BodyProps) => {
         {board.tickets.length === 0 ? (
           <div className="card empty-state">
             <h3>No tickets</h3>
-            <p>The lead works toward the goal above and may write tickets of its own. Paste a board, write tickets by hand, or describe what to build and let the planner draft them from the repositories.</p>
+            <p>The lead works toward the goal above and may write tickets of its own. Paste a board, write tickets by hand, or plan them with the agent terminal.</p>
             <div className="row">
               <button onClick={p.onImport}>Import board…</button>
-              <button className="pri" onClick={p.onPlan} disabled={active || Boolean(p.busy)}>Plan tickets…</button>
+              <button onClick={p.onNewTicket} disabled={Boolean(p.busy)}>New ticket</button>
             </div>
           </div>
         ) : (
@@ -620,8 +600,7 @@ const RunBody = (p: BodyProps) => {
       </div>
       <aside className="side">
         <InboxPanel inbox={inbox} onRead={(mid) => void p.tryAct("read", () => api("POST", `${base}/messages/${mid}/read`))} onPromote={(iid) => void p.tryAct("promote", () => api("POST", `${base}/ideas/${iid}/promote`))} onOpenTicket={p.openTicket} />
-        <ChoresPanel board={board} base={base} tryAct={p.tryAct} onOpenTicket={p.openTicket} />
-        <WorkPanel session={session} base={base} active={active} done={counts.done ?? 0} repoState={p.repoState} onExport={p.onExport} onPlan={p.onPlan} onDone={async () => { await p.refreshRun(); await p.repoState.refresh(); }} />
+        <WorkPanel session={session} base={base} active={active} done={counts.done ?? 0} repoState={p.repoState} onExport={p.onExport} onDone={async () => { await p.refreshRun(); await p.repoState.refresh(); }} />
         <PromptBox session={session} base={base} active={active} onDone={p.refreshRun} />
         <EnvironmentPanel env={env} />
         <SessionSettings session={session} onSave={p.saveSettings} />
@@ -641,7 +620,6 @@ const PlanBody = (p: BodyProps) => {
   const { onRetry, onApprove } = useBoardActions(p);
   const total = board.tickets.length;
   const ready = counts.ready ?? 0;
-  const worker = session.setupMode !== "skip";
   return (
     <div className="sess-body">
       <div className="main">
@@ -654,7 +632,7 @@ const PlanBody = (p: BodyProps) => {
           <>
             <section className="card stack" style={{ gap: 10 }}>
               <SheetHead title="Repositories" mark={session.repos.length ? `${session.repos.length} to clone` : "none yet"} tone={session.repos.length ? "good" : "warn"} />
-              <p className="lead" style={{ margin: 0 }}>Cloned fresh at initialization, at the branch chosen here. The workers commit on a branch of their own; Publish PR takes it to GitHub.</p>
+              <p className="lead" style={{ margin: 0 }}>Cloned fresh at initialization, at the branch chosen here. The lead commits on a branch of its own; Publish PR takes it to GitHub.</p>
               <RepoSection env={env} bare />
             </section>
 
@@ -667,7 +645,7 @@ const PlanBody = (p: BodyProps) => {
                 {total === 0 ? (
                   <div className="card empty-state">
                     <h3>No tickets yet</h3>
-                    <p>Paste a board or write tickets by hand. Or initialize first and let the planner draft them: it reads the repositories, so it needs the box. With a goal written above, the lead can also start without tickets.</p>
+                    <p>Paste a board or write tickets by hand, or initialize and plan them with the agent terminal, which reads the repositories. With a goal written above, the lead can start without tickets.</p>
                   </div>
                 ) : (
                   <BoardView board={board} inbox={inbox} run={run} active={active} clock={ticketClock(session)} openId={p.ticketId} onOpen={p.openTicket} onRetry={onRetry} onApprove={onApprove} onShowLog={p.setLogTicket} />
@@ -675,16 +653,15 @@ const PlanBody = (p: BodyProps) => {
               </section>
 
             <section className="card stack" style={{ gap: 10 }}>
-              <SheetHead title="Environment" mark={worker ? `setup worker · ${session.setupScripts.length} recipe${session.setupScripts.length === 1 ? "" : "s"}` : `setup skipped · ${session.setupScripts.length} recipe${session.setupScripts.length === 1 ? "" : "s"}`} tone="quiet" />
-              <SetupSection env={env} />
-              <Divider />
+              <SheetHead title="Environment" mark={`${session.setupScripts.length} recipe${session.setupScripts.length === 1 ? "" : "s"}`} tone="quiet" />
+              <p className="lead" style={{ margin: 0 }}>Initialize creates the container and runs the recipes you tick. Everything else the lead installs itself as it goes; the box is committed to an image after every run, so its installs stay.</p>
               <RecipeSection env={env} />
               <Divider />
               <AttachmentSection env={env} />
               {hasNotes(env) && (
                 <>
                   <Divider />
-                  <div className="muted small">Left from an earlier box; the next setup worker rewrites them.</div>
+                  <div className="muted small">Left from an earlier box; the next lead reads them.</div>
                   <NotesSection env={env} />
                 </>
               )}
@@ -696,7 +673,7 @@ const PlanBody = (p: BodyProps) => {
             </section>
 
             <section className="card stack" style={{ gap: 10 }}>
-              <SheetHead title="Agents, caps and limits" mark="every worker" tone="quiet" />
+              <SheetHead title="Agents, review and limits" mark="the lead and the reviewer" tone="quiet" />
               <AgentOptionsButton agents={session.agents ?? {}} legacyModel={session.model} reviewerOn={session.caps.reviewer} onChange={(agents) => void p.tryAct("agents", () => api("PUT", `${base}/caps`, { agents }))} />
               <SessionSettings session={session} onSave={p.saveSettings} part="caps" />
             </section>
@@ -842,9 +819,9 @@ const SyncDialog = ({ repo, st, base, onClose, onDone }: { repo: RepoSpec; st: R
 /**
  * Next round: after you merged the pull requests on GitHub, every
  * repository moves to the latest branch (the repository's default branch
- * unless you pick another), and you see each new tip before planning.
+ * unless you pick another), and you see each new tip before the next run.
  */
-const NextRoundDialog = ({ session, state, base, onClose, onDone, onPlan }: { session: Session; state: ReposState | null; base: string; onClose: () => void; onDone: () => Promise<void>; onPlan: () => void }) => {
+const NextRoundDialog = ({ session, state, base, onClose, onDone }: { session: Session; state: ReposState | null; base: string; onClose: () => void; onDone: () => Promise<void> }) => {
   const repos = session.repos.filter((r) => r.github);
   const [defaults, setDefaults] = useState<Record<string, string>>({});
   const [branches, setBranches] = useState<Record<string, string>>({});
@@ -911,7 +888,6 @@ const NextRoundDialog = ({ session, state, base, onClose, onDone, onPlan }: { se
         {err && <div className="banner warn"><span>{err}</span></div>}
         <div className="row">
           {!results && <button className="pri" onClick={() => void go()} disabled={working || !repos.length}>{working ? "Syncing…" : "Sync every repository"}</button>}
-          {results && allOk && <button className="pri" onClick={() => { onClose(); onPlan(); }}>Plan tickets…</button>}
           {results && !allOk && <button onClick={() => setResults(null)}>Back</button>}
           <button className="quiet" onClick={onClose} disabled={working}>{results ? "Close" : "Cancel"}</button>
         </div>
@@ -1069,7 +1045,7 @@ const RepoStatus = ({ r, live }: { r: RepoState; live: boolean }) => {
   );
 };
 
-const WorkPanel = ({ session, base, active, done, repoState, onExport, onDone, onPlan }: { session: Session; base: string; active: boolean; done: number; repoState: RepoStateHandle; onExport: () => void; onDone: () => Promise<void>; onPlan: () => void }) => {
+const WorkPanel = ({ session, base, active, done, repoState, onExport, onDone }: { session: Session; base: string; active: boolean; done: number; repoState: RepoStateHandle; onExport: () => void; onDone: () => Promise<void> }) => {
   const [restoring, setRestoring] = useState<RepoSpec | null>(null);
   const [publishing, setPublishing] = useState<RepoSpec | null>(null);
   const [syncing, setSyncing] = useState<RepoSpec | null>(null);
@@ -1129,7 +1105,7 @@ const WorkPanel = ({ session, base, active, done, repoState, onExport, onDone, o
           }}
         />
       )}
-      {nextRound && <NextRoundDialog session={session} state={repoState.state} base={base} onClose={() => setNextRound(false)} onDone={onDone} onPlan={onPlan} />}
+      {nextRound && <NextRoundDialog session={session} state={repoState.state} base={base} onClose={() => setNextRound(false)} onDone={onDone} />}
       {publishing && (
         <PublishDialog
           repo={publishing}
@@ -1237,25 +1213,22 @@ const RestoreRepo = ({ repo, base, onClose, onDone }: { repo: RepoSpec; base: st
   );
 };
 
-// --- the environment: repositories, attachments, recipes, setup mode, initialization ------
+// --- the environment: repositories, attachments, recipes, initialization ------
 
-type SetupInfo = { requirements: string; readiness: Readiness | null; env: string; recipe: string; recipeLog: string; logs: Record<string, string> };
+type SetupInfo = { logs: Record<string, string> };
 type RepoChoice = { target: string; github: string; branches: string[]; current: string };
-type Brief = { text: string; updatedAt: string | null; words: number };
 
 /**
  * Everything the box is made of, shared by the sections below. While the
  * session is a plan the sections are cards of the setup sheet; once the
  * box exists they fold into one Environment panel in the sidebar. Before
  * initialization the repositories can change; everything else can change
- * at any time (recipes re-run on request, instructions apply to the next
- * setup worker).
+ * at any time (recipes re-run on request).
  */
 const useEnvironment = (session: Session, base: string, active: boolean, onDone: () => Promise<void>) => {
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
   const [info, setInfo] = useState<SetupInfo | null>(null);
-  const [brief, setBrief] = useState<Brief | null>(null);
   const [sudo, setSudo] = useState<{ count: number; commands: string[] } | null>(null);
   const [library, setLibrary] = useState<SetupScript[]>([]);
   const [choices, setChoices] = useState<RepoChoice[]>([]);
@@ -1263,9 +1236,8 @@ const useEnvironment = (session: Session, base: string, active: boolean, onDone:
   const now = useNow();
   useEffect(() => {
     api<SetupInfo>("GET", `${base}/setup`).then(setInfo).catch(() => setInfo(null));
-    api<Brief>("GET", `${base}/brief`).then(setBrief).catch(() => setBrief(null));
     api<{ count: number; commands: string[] }>("GET", `${base}/sudo-log`).then(setSudo).catch(() => setSudo(null));
-  }, [base, session.readiness?.at, session.readiness?.confirmedAt, session.requirements, session.initializedAt, active]);
+  }, [base, session.initializedAt, active]);
   useEffect(() => {
     api<SetupScript[]>("GET", "/scripts").then(setLibrary).catch(() => setLibrary([]));
   }, []);
@@ -1300,7 +1272,7 @@ const useEnvironment = (session: Session, base: string, active: boolean, onDone:
     await copyText(md);
     setMsg("Session context copied for an assistant.");
   };
-  return { session, base, active, busy, msg, info, brief, sudo, library, choices, initialized, now, act, copyContext };
+  return { session, base, active, busy, msg, info, sudo, library, choices, initialized, now, act, copyContext };
 };
 type Env = ReturnType<typeof useEnvironment>;
 
@@ -1439,54 +1411,6 @@ const AttachmentSection = ({ env }: { env: Env }) => {
   );
 };
 
-/** The setup worker's verdict: its checks, its summary, and when it was. */
-const ReadinessView = ({ r, now, open = false }: { r: Readiness; now: number; open?: boolean }) => {
-  const [show, setShow] = useState(open);
-  return (
-    <div className="small">
-      <span className={`dot ${r.verdict === "ready" ? "good" : "bad"}`} /> <strong>{r.verdict === "ready" ? "Ready" : "Needs attention"}</strong> <span className="muted">{fmtAgo(r.at, now)}{r.confirmedAt ? " · accepted" : ""}</span>{" "}
-      {r.checks.length > 0 && <button className="quiet sm" onClick={() => setShow(!show)}>{show ? "hide checks" : `${r.checks.filter((c) => c.ok).length}/${r.checks.length} checks`}</button>}
-      {show && <ul className="checks">{r.checks.map((c, i) => <li key={i} className={c.ok ? "ok" : "err"}>{c.ok ? "✓" : "✗"} {c.text}</li>)}</ul>}
-      {r.summary && <div className="muted" style={{ marginTop: 4, whiteSpace: "pre-wrap" }}>{r.summary}</div>}
-    </div>
-  );
-};
-
-/** What happens at initialization after the container and the recipes: a setup worker with your instructions, or nothing. */
-const SetupSection = ({ env }: { env: Env }) => {
-  const { session, base, active, busy, initialized, now, act } = env;
-  const [draft, setDraft] = useState(session.requirements);
-  useEffect(() => setDraft(session.requirements), [session.requirements]);
-  const dirty = draft !== session.requirements;
-  const saveInstructions = () => act(() => api("PUT", `${base}/requirements`, { requirements: draft }), initialized ? "Saved. They apply to the next environment check." : "Saved. They apply when you initialize.");
-  const setMode = (setupMode: "agentic" | "skip") => act(() => api("PUT", `${base}/requirements`, { setupMode }));
-  const r = session.readiness;
-  return (
-    <div className="small">
-      <strong>Setup</strong> <span className="muted">what happens at initialization, after the container and the recipes</span>
-      <div className="stack" style={{ gap: 4, marginTop: 6 }}>
-        <label className="chk"><input type="radio" name="setupMode" checked={session.setupMode !== "skip"} onChange={() => void setMode("agentic")} disabled={busy || active} /> <strong>Setup worker</strong> <span className="muted">reads the repositories and the board, installs toolchains and dependencies, starts the services the tests need, verifies the build and test commands, writes env.md and the recipe. Implements nothing.</span></label>
-        <label className="chk"><input type="radio" name="setupMode" checked={session.setupMode === "skip"} onChange={() => void setMode("skip")} disabled={busy || active} /> <strong>Skip</strong> <span className="muted">the container and the recipes only; the workers find out what is missing.</span></label>
-      </div>
-      {session.setupMode !== "skip" && (
-        <label style={{ marginTop: 8 }}>
-          Instructions for the setup worker <span className="help">optional, on top of what it works out itself</span>
-          <textarea value={draft} onChange={(e) => setDraft(e.target.value)} disabled={active} placeholder={"Run the app but do not run the tests\nSet up the env and check that you can POST to /api/somepath\nPostgres 17 reachable, migrations applied"} style={{ minHeight: 72 }} />
-        </label>
-      )}
-      {session.setupMode !== "skip" && dirty && (
-        <div className="row" style={{ marginTop: 6 }}>
-          <button className="pri sm" onClick={saveInstructions} disabled={busy}>Save instructions</button>
-          <button className="sm" onClick={() => setDraft(session.requirements)}>Discard</button>
-        </div>
-      )}
-      {/* Before initialization a "needs" verdict is the attention card at the top of the page. */}
-      {r && initialized && <div style={{ marginTop: 8 }}><ReadinessView r={r} now={now} /></div>}
-      {initialized && <button className="quiet sm" style={{ marginTop: 6 }} onClick={() => act(() => api("POST", `${base}/run`, { action: "setup" }), "Setup worker started.")} disabled={busy || active} title="Run the setup worker again against this box">Check the environment again</button>}
-    </div>
-  );
-};
-
 /** Recipes from the library, ticked for this session; their results once the container ran them. */
 const RecipeSection = ({ env }: { env: Env }) => {
   const { session, base, active, busy, info, library, initialized, now, act } = env;
@@ -1522,51 +1446,22 @@ const RecipeSection = ({ env }: { env: Env }) => {
   );
 };
 
-/** What the setup worker wrote (env.md, setup.sh, the brief) and what ran as root. Nothing to show while the session is a plan. */
+/** What ran as root in the box: the sudo log, newest last. The lead's own notes are its business; its plan note is on the goal panel. */
 const NotesSection = ({ env }: { env: Env }) => {
-  const { session, base, active, busy, info, brief, sudo, initialized, now, act } = env;
-  const [show, setShow] = useState<"" | "brief" | "env" | "recipe" | "sudo">("");
-  const [recipeName, setRecipeName] = useState<string | null>(null);
-  const toggle = (k: typeof show) => setShow(show === k ? "" : k);
+  const { sudo } = env;
+  const [show, setShow] = useState(false);
   return (
-    <div className="stack tight">
-      <div className="small">
-        <span className={`dot ${info?.env ? "good" : ""}`} /> <strong>env.md</strong> <span className="muted">{info?.env ? "what is installed and how to run it; every worker reads it" : "written by the setup worker"}</span>{" "}
-        {info?.env && <button className="quiet sm" onClick={() => toggle("env")}>{show === "env" ? "hide" : "view"}</button>}
-        {show === "env" && <pre className="mono" style={{ whiteSpace: "pre-wrap", maxHeight: 360, overflow: "auto", marginTop: 6 }}>{info?.env}</pre>}
-      </div>
-      <div className="small">
-        <span className={`dot ${info?.recipe ? "good" : ""}`} /> <strong>setup.sh</strong> <span className="muted">{info?.recipe ? "the recipe that rebuilds the box after a recreate" : "written by the setup worker"}</span>{" "}
-        {info?.recipe && <button className="quiet sm" onClick={() => toggle("recipe")}>{show === "recipe" ? "hide" : "view"}</button>}{" "}
-        {info?.recipe && recipeName === null && <button className="quiet sm" onClick={() => setRecipeName(session.repos.map((x) => x.name).join("-") || "recipe")} title="Save setup.sh and env.md to the recipe library, to tick on the next session">Save as recipe</button>}
-        {recipeName !== null && (
-          <div className="row" style={{ marginTop: 6 }}>
-            <input value={recipeName} onChange={(e) => setRecipeName(e.target.value)} placeholder="recipe name" style={{ maxWidth: 240 }} />
-            <button className="pri sm" disabled={busy || !recipeName.trim()} onClick={() => act(async () => { await api("POST", `${base}/recipe/promote`, { name: recipeName.trim() }); setRecipeName(null); }, "Saved to Recipes. Tick it on the next session for these repositories.")}>Save</button>
-            <button className="sm" onClick={() => setRecipeName(null)}>Cancel</button>
-          </div>
-        )}
-        {show === "recipe" && <pre className="mono" style={{ whiteSpace: "pre-wrap", maxHeight: 360, overflow: "auto", marginTop: 6 }}>{info?.recipe}{info?.recipeLog ? `\n\n--- last replay ---\n${info.recipeLog.slice(-3000)}` : ""}</pre>}
-      </div>
-      <div className="small">
-        <span className={`dot ${brief?.text ? "good" : ""}`} /> <strong>Project brief</strong>{" "}
-        <span className="muted">{brief?.text ? `${brief.words} words · ${brief.updatedAt ? fmtAgo(brief.updatedAt, now) : ""} · every worker reads it first` : "none yet; the setup worker writes notes/brief.md"}</span>{" "}
-        {brief?.text && <button className="quiet sm" onClick={() => toggle("brief")}>{show === "brief" ? "hide" : "view"}</button>}{" "}
-        {initialized && <button className="quiet sm" onClick={() => act(() => api("POST", `${base}/run`, { action: "brief" }), "Setup worker started; the brief appears when it finishes.")} disabled={busy || active} title={active ? "Pause or stop the run first" : "Run a setup worker that writes or refreshes the brief"}>{brief?.text ? "Refresh brief" : "Write brief"}</button>}
-        {show === "brief" && brief?.text && <pre className="mono" style={{ whiteSpace: "pre-wrap", maxHeight: 360, overflow: "auto", marginTop: 6 }}>{brief.text}</pre>}
-      </div>
-      <div className="small">
-        <span className="dot" /> <strong>Run as root</strong>{" "}
-        <span className="muted">{sudo?.count ? `${sudo.count} sudo command${sudo.count === 1 ? "" : "s"} by the agent` : "nothing yet"}</span>{" "}
-        {Boolean(sudo?.count) && <button className="quiet sm" onClick={() => toggle("sudo")}>{show === "sudo" ? "hide" : "view"}</button>}
-        {show === "sudo" && sudo && <pre className="mono" style={{ whiteSpace: "pre-wrap", maxHeight: 240, overflow: "auto", marginTop: 6 }}>{sudo.commands.join("\n")}</pre>}
-      </div>
+    <div className="small">
+      <span className="dot" /> <strong>Run as root</strong>{" "}
+      <span className="muted">{sudo?.count ? `${sudo.count} sudo command${sudo.count === 1 ? "" : "s"} by the agent` : "nothing yet"}</span>{" "}
+      {Boolean(sudo?.count) && <button className="quiet sm" onClick={() => setShow(!show)}>{show ? "hide" : "view"}</button>}
+      {show && sudo && <pre className="mono" style={{ whiteSpace: "pre-wrap", maxHeight: 240, overflow: "auto", marginTop: 6 }}>{sudo.commands.join("\n")}</pre>}
     </div>
   );
 };
 
-/** Has the setup worker left anything to read? After a reset the notes stay, so a plan can have them too. */
-const hasNotes = (env: Env): boolean => Boolean(env.info?.env || env.info?.recipe || env.brief?.text || env.sudo?.count);
+/** Has an earlier box left anything to read? After a reset the log stays, so a plan can have it too. */
+const hasNotes = (env: Env): boolean => Boolean(env.sudo?.count);
 
 const Divider = () => <div style={{ borderTop: "1px solid var(--line)" }} />;
 
@@ -1589,8 +1484,6 @@ const EnvironmentPanel = ({ env }: { env: Env }) => {
         <RepoSection env={env} />
         <Divider />
         <AttachmentSection env={env} />
-        <Divider />
-        <SetupSection env={env} />
         <Divider />
         <RecipeSection env={env} />
         <Divider />
@@ -1711,16 +1604,14 @@ const SheetHead = ({ title, mark, tone, children }: { title: string; mark: strin
 const LaunchPanel = ({ env, counts, total, busy, onInit }: { env: Env; counts: Record<string, number>; total: number; busy: boolean; onInit: (start: boolean) => void }) => {
   const { session, active, msg, copyContext } = env;
   const ready = counts.ready ?? 0;
-  const worker = session.setupMode !== "skip";
   return (
     <section className="card stack launch" style={{ gap: 10 }}>
       <h3>{active ? "Initializing…" : "Ready to initialize?"}</h3>
-      <p className="lead" style={{ margin: 0 }}>Initialize clones the repositories, creates the container and runs the recipes{worker ? ", then a setup worker makes the box ready" : ""}. Nothing runs before that; come back to this plan over hours if you like.</p>
+      <p className="lead" style={{ margin: 0 }}>Initialize clones the repositories, creates the container and runs the recipes. Nothing runs before that; come back to this plan over hours if you like.</p>
       <ul className="launch-list">
         <li><span className={`dot ${session.repos.length ? "good" : "bad"}`} />{session.repos.length ? <span><b>{session.repos.length}</b> repositor{session.repos.length === 1 ? "y" : "ies"}: <span className="mono">{session.repos.map((r) => r.name).join(", ")}</span></span> : <span>No repositories: the workers would have nothing to change.</span>}</li>
-        <li><span className={`dot ${ready ? "good" : total ? "info" : ""}`} />{total ? <span><b>{total}</b> ticket{total === 1 ? "" : "s"}, <b>{ready}</b> ready{counts.backlog ? `, ${counts.backlog} in the backlog` : ""}</span> : <span>No tickets yet. Fine: the planner drafts them once the box exists.</span>}</li>
+        <li><span className={`dot ${ready ? "good" : total ? "info" : ""}`} />{total ? <span><b>{total}</b> ticket{total === 1 ? "" : "s"}, <b>{ready}</b> ready{counts.backlog ? `, ${counts.backlog} in the backlog` : ""}</span> : <span>No tickets. Fine with a goal: the lead works toward it and may write its own.</span>}</li>
         <li><span className={`dot ${session.setupScripts.length ? "good" : ""}`} />{session.setupScripts.length ? <span>Recipes: {session.setupScripts.map((s) => s.name).join(", ")}</span> : <span>No recipes; the box starts from the plain image.</span>}</li>
-        <li><span className={`dot ${worker ? "good" : ""}`} />{worker ? <span>Setup worker{session.requirements.trim() ? ", with your instructions" : ""}</span> : <span>Setup skipped: the workers find out what is missing.</span>}</li>
         <li><span className={`dot ${session.packs.length || session.allowlist.length ? "good" : ""}`} />{session.packs.length ? <span>Packs: {session.packs.join(", ")}</span> : <span>No packs: only the agents' backends{session.allowlist.length ? " and the allowlist" : ""}.</span>}</li>
         {session.attachments.length > 0 && <li><span className="dot good" /><span>{session.attachments.length} attachment{session.attachments.length === 1 ? "" : "s"}</span></li>}
       </ul>
@@ -1728,8 +1619,8 @@ const LaunchPanel = ({ env, counts, total, busy, onInit }: { env: Env; counts: R
         <div className="small"><span className="dot run" /> The box is being made. The log on the left shows each step.</div>
       ) : (
         <div className="stack tight">
-          <button className="pri" onClick={() => onInit(false)} disabled={busy} title="Clone the repositories, create the container, run the recipes and the setup worker">{session.readiness ? "Initialize again" : "Initialize"}</button>
-          <button onClick={() => onInit(true)} disabled={busy || !ready} title={ready ? "Initialize, and work through the ready tickets when it succeeds" : "No ready tickets to start on"}>Initialize and start</button>
+          <button className="pri" onClick={() => onInit(false)} disabled={busy} title="Clone the repositories, create the container, run the recipes">Initialize</button>
+          <button onClick={() => onInit(true)} disabled={busy || (!ready && !session.goal.trim())} title={ready || session.goal.trim() ? "Initialize, and start the lead when it succeeds" : "Write a goal or make a ticket ready first"}>Initialize and start</button>
         </div>
       )}
       <button className="quiet sm" onClick={copyContext} title="Markdown describing this session, to paste into any assistant that helps you plan it">Copy context for an LLM</button>
@@ -1751,65 +1642,12 @@ const InitProgress = ({ session }: { session: Session }) => {
           const res = session.setup.find((x) => x.name === sc.name);
           return <li key={sc.name} className={res ? (res.ok ? "ok" : "err") : ""}>Recipe {sc.name}{res ? (res.ok ? ": ok" : `: failed, exit ${res.code}`) : ""}</li>;
         })}
-        <li>{session.setupMode === "skip" ? "Setup worker skipped" : "Setup worker: reads the repositories and the board, installs what is missing, verifies the build and test commands, then reports"}</li>
       </ul>
     </section>
   );
 };
 
-/** The setup worker said the box needs you: the report, and the two ways on. */
-const InitNeedsCard = ({ session, now, busy, onInit, onAccept }: { session: Session; now: number; busy: boolean; onInit: () => void; onAccept: () => void }) => (
-  <section className="card attention stack tight">
-    <h3>Initialization needs you</h3>
-    <p className="lead" style={{ margin: 0 }}>The setup worker could not make the box ready on its own. Fix what it names (instructions, recipes, repositories) and initialize again, or accept the box as it is and start anyway.</p>
-    <ReadinessView r={session.readiness!} now={now} open />
-    <div className="row">
-      <button className="pri" onClick={onInit} disabled={busy}>Initialize again</button>
-      <button onClick={onAccept} disabled={busy} title="Count the environment as good enough: you dealt with the rest by hand, or it does not matter">Accept as is</button>
-    </div>
-  </section>
-);
-
-// --- plan tickets ---------------------------------------------------------
-
-/** Your request for the planner: what to build. It becomes backlog tickets you approve. */
-const PlanDialog = ({ session, busy, onCancel, onPlan }: { session: Session; busy: boolean; onCancel: () => void; onPlan: (text: string) => void }) => {
-  const plans = session.prompts.filter((p) => p.kind === "plan");
-  const [text, setText] = useState(plans.length ? "" : session.goal);
-  useEffect(() => {
-    const key = (e: KeyboardEvent) => e.key === "Escape" && onCancel();
-    addEventListener("keydown", key);
-    return () => removeEventListener("keydown", key);
-  }, [onCancel]);
-  return (
-    <div className="overlay" onMouseDown={(e) => e.target === e.currentTarget && onCancel()} role="dialog" aria-modal="true" aria-labelledby="plan-title">
-      <div className="dialog">
-        <h3 id="plan-title">Plan tickets</h3>
-        <p className="muted small" style={{ margin: 0 }}>Say what to build and what done looks like. A planner worker reads the repositories and the board, then adds tickets to the backlog for you to approve. It adds only what is missing when the board already has tickets.</p>
-        <textarea id="plan" value={text} onChange={(e) => setText(e.target.value)} placeholder="Build the mapping engine: a layout editor, the mapping rules, and a mock MIDI output. Done means the editor round-trips a layout through the engine and the e2e suite covers it." style={{ minHeight: 140 }} autoFocus />
-        {plans.length > 0 && (
-          <details>
-            <summary className="muted small">Earlier planning requests ({plans.length})</summary>
-            {[...plans].reverse().map((p) => (
-              <div key={p.at} className="small" style={{ borderTop: "1px solid var(--line)", paddingTop: 6, marginTop: 6 }}>
-                <div className="muted">{fmtAgo(p.at)} · run {p.runId}</div>
-                <div style={{ whiteSpace: "pre-wrap" }}>{p.text.slice(0, 600)}</div>
-                {p.reply && <div className="muted" style={{ whiteSpace: "pre-wrap", marginTop: 4 }}>{p.reply.slice(0, 400)}</div>}
-                <button className="quiet sm" onClick={() => setText(p.text)}>Use this again</button>
-              </div>
-            ))}
-          </details>
-        )}
-        <div className="actions">
-          <button onClick={onCancel}>Cancel</button>
-          <button className="pri" onClick={() => onPlan(text)} disabled={busy || !text.trim()}>Plan</button>
-        </div>
-      </div>
-    </div>
-  );
-};
-
-// --- goal mode ----------------------------------------------------------------
+// --- the goal ---------------------------------------------------------------
 
 /**
  * The goal above the board: the text the lead works toward beside the
@@ -1945,8 +1783,8 @@ const PromptBox = ({ session, base, active, onDone }: { session: Session; base: 
   return (
     <section className="card stack" style={{ gap: 8 }}>
       <h3>Ask the box</h3>
-      <p className="lead">One worker with your text, the brief and env.md, outside any ticket. It can install, configure and investigate; a repository change becomes one commit.</p>
-      <textarea id="prompt" value={text} onChange={(e) => setText(e.target.value)} placeholder="Make sure you can run the e2e suite and the dev server, and update env.md." style={{ minHeight: 70 }} />
+      <p className="lead">One worker with your text, outside any ticket and the run. It can install, configure and investigate; a repository change becomes one commit.</p>
+      <textarea id="prompt" value={text} onChange={(e) => setText(e.target.value)} placeholder="Make sure you can run the e2e suite and the dev server." style={{ minHeight: 70 }} />
       <div className="row">
         <button className="pri sm" onClick={send} disabled={busy || active || !text.trim() || !isInitialized(session)} title={!isInitialized(session) ? "Initialize the session first" : active ? "Wait for the run to finish, or pause it" : "Run one worker with this prompt"}>Run prompt</button>
         <span className="muted small">{msg}</span>
@@ -2161,7 +1999,7 @@ const RequestItem = ({ r, onDecide, onOpenTicket }: { r: AgentRequest; onDecide:
             </div>
             {d.kind === "network" && <div className="mono">allow {d.host}{d.port ? `:${d.port}` : ""} (HTTPS)</div>}
             {d.kind === "pack" && <div className="mono">allow the {d.pack} pack (HTTPS; the hosts are listed under Network on the New session form)</div>}
-            {d.kind === "resources" && <div className="mono small">{(["workerMinutes", "workerTurns", "memoryMb"] as const).filter((k) => d[k] !== undefined).map((k) => `${k}: ${String(d[k])}`).join(" · ")}</div>}
+            {d.kind === "resources" && <div className="mono small">{d.memoryMb ? `memory: ${d.memoryMb} MB` : "more resources"}</div>}
             {(d.kind === "instruction" || d.kind === "question") && <div style={{ whiteSpace: "pre-wrap" }}>{d.text}</div>}
             {d.kind === "question" && d.options && !decided && (
               <div className="row" style={{ gap: 6 }}>
@@ -2242,20 +2080,16 @@ const TicketCard = ({ t, clock, doneIds, request, active, open, onOpen, onRetry,
       <div className="id">
         <span>{t.id}</span>
         <span className="k">{t.kind}</span>
-        <span className="k">{t.size}</span>
         {t.priority <= 2 && <span className="k" title={`priority ${t.priority}`}>p{t.priority}</span>}
-        {t.pinned && <span className="pin" title="Pinned: the agent may not reprioritise it">⚲</span>}
         {t.review && normalizeReviewMode(t.review) !== clock.review && <span className="k" title={`${REVIEW_LABEL[t.review]} (the session's is ${REVIEW_LABEL[clock.review].toLowerCase()})`}>{normalizeReviewMode(t.review) === "none" ? "no review" : "review"}</span>}
-        {t.agent && <span className="k" title={`Runs on its own agent: ${t.agent.driver}${t.agent.model ? ` (${t.agent.model})` : ""}`}>{t.agent.driver}</span>}
       </div>
       <div className="title">{t.title}</div>
-      {(t.deps.length > 0 || t.attempts > 0 || t.diff || active || timing) && (
+      {(t.deps.length > 0 || t.diff || active || timing) && (
         <div className="meta">
           {active && <span className="pill sig">working</span>}
-          {timing && t.state === "in_progress" && <span className="pill quiet mono" title="Time on this ticket since it was claimed">{inProgressClock(t, now)}</span>}
+          {timing && t.state === "in_progress" && <span className="pill quiet mono" title="Time on this ticket since it went into progress">{inProgressClock(t, now)}</span>}
           {timing && t.state === "done" && <span className="pill quiet mono" title={timingLine(timing)}>{fmtSpan(timing.total)}</span>}
           {t.deps.length > 0 && <span className={`pill ${depsOk ? "quiet" : t.state === "ready" ? "sig" : "quiet"}`} title={`Depends on ${t.deps.join(", ")}`}>deps {depsDone}/{t.deps.length}</span>}
-          {t.attempts > 1 && <span className="pill quiet">attempt {t.attempts}</span>}
           {t.diff && <span className="pill quiet mono">+{t.diff.added} −{t.diff.removed}</span>}
         </div>
       )}
@@ -2309,15 +2143,14 @@ const ReviewOptions = ({ sessionReviewer }: { sessionReviewer: boolean }) => (
   <>
     <option value="">Session default ({sessionReviewer ? "full review" : "no review"})</option>
     <option value="full">Full review: the reviewer runs the checks and reads the change</option>
-    <option value="none">No review: accepted when the implementer finishes</option>
+    <option value="none">No review: the lead moves it to done itself</option>
   </>
 );
 
 const NewTicketForm = ({ session, board, onCancel, onCreate }: { session: Session; board: Board; onCancel: () => void; onCreate: (body: Record<string, unknown>) => Promise<void> }) => {
-  const [f, setF] = useState({ title: "", kind: "feature", repos: session.repos.length === 1 ? [session.repos[0]!.name] : ([] as string[]), size: "S", priority: "100", deps: "", state: "ready", spec: "", acceptance: "", agentDriver: "", agentModel: "", review: "" });
+  const [f, setF] = useState({ title: "", kind: "feature", repos: session.repos.length === 1 ? [session.repos[0]!.name] : ([] as string[]), priority: "100", deps: "", state: "ready", spec: "", acceptance: "", review: "" });
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
-  const drivers = useDrivers();
   const submit = async () => {
     setErr("");
     setBusy(true);
@@ -2326,13 +2159,11 @@ const NewTicketForm = ({ session, board, onCancel, onCreate }: { session: Sessio
         title: f.title.trim(),
         kind: f.kind,
         repos: f.repos,
-        size: f.size,
         priority: Number(f.priority) || 100,
         deps: f.deps.split(/[,\s]+/).filter(Boolean),
         state: f.state,
         spec: f.spec,
         acceptance: f.acceptance.split(/\n/).map((x) => x.trim()).filter(Boolean),
-        ...(f.agentDriver ? { agent: { driver: f.agentDriver, model: f.agentModel.trim() || undefined } } : {}),
         ...(f.review ? { review: f.review } : {}),
       });
     } catch (e) {
@@ -2349,35 +2180,20 @@ const NewTicketForm = ({ session, board, onCancel, onCreate }: { session: Sessio
       <div className="three">
         <label>Title<input id="nt-title" value={f.title} onChange={(e) => setF({ ...f, title: e.target.value })} autoFocus placeholder="Mapping engine: 14-bit CC pairs" /></label>
         <label>Kind<select value={f.kind} onChange={(e) => setF({ ...f, kind: e.target.value })}><option>feature</option><option>bug</option><option>followup</option><option>chore</option></select></label>
-        <label>Expected repositories <span className="help">A hint for you and the worker; it may touch others</span><RepoPicker names={session.repos.map((r) => r.name)} value={f.repos} onChange={(repos) => setF({ ...f, repos })} /></label>
-        <label>Size<select value={f.size} onChange={(e) => setF({ ...f, size: e.target.value })}><option>S</option><option>M</option><option>L</option></select></label>
+        <label>Expected repositories <span className="help">A hint for you and the lead; it may touch others</span><RepoPicker names={session.repos.map((r) => r.name)} value={f.repos} onChange={(repos) => setF({ ...f, repos })} /></label>
         <label>
-          Own agent <span className="help">Optional: a fresh worker on this agent does the ticket instead of the session's worker</span>
-          <select value={f.agentDriver} onChange={(e) => setF({ ...f, agentDriver: e.target.value, agentModel: "" })}>
-            <option value="">session's worker</option>
-            {drivers.map((d) => <option key={d.name} value={d.name}>{d.title}{d.configured ? "" : " (no credential)"}</option>)}
-          </select>
-        </label>
-        {f.agentDriver && (
-          <label>
-            Model <span className="help">Any id that CLI accepts; empty uses the account's default</span>
-            <input className="mono" list="new-ticket-agent-models" value={f.agentModel} onChange={(e) => setF({ ...f, agentModel: e.target.value })} placeholder="account default" />
-            <datalist id="new-ticket-agent-models">{(drivers.find((d) => d.name === f.agentDriver)?.models ?? []).map((m) => <option key={m} value={m} />)}</datalist>
-          </label>
-        )}
-        <label>
-          Review <span className="help">How the ticket is judged when it is submitted</span>
+          Review <span className="help">How the ticket is judged when the lead moves it to review</span>
           <select value={f.review} onChange={(e) => setF({ ...f, review: e.target.value })}>
             <ReviewOptions sessionReviewer={session.caps.reviewer} />
           </select>
         </label>
-        <label>Priority <span className="help">lower runs first</span><input type="number" min={0} max={1000} value={f.priority} onChange={(e) => setF({ ...f, priority: e.target.value })} /></label>
+        <label>Priority <span className="help">lower first; a hint the lead reads</span><input type="number" min={0} max={1000} value={f.priority} onChange={(e) => setF({ ...f, priority: e.target.value })} /></label>
         <label>Depends on <span className="help">ids, e.g. {ids.slice(-2).join(", ") || "T-1"}</span><input className="mono" value={f.deps} onChange={(e) => setF({ ...f, deps: e.target.value })} /></label>
       </div>
-      <label>Spec <span className="help">What to do and where; a fresh agent reads only this, the acceptance criteria and the brief</span><textarea value={f.spec} onChange={(e) => setF({ ...f, spec: e.target.value })} style={{ minHeight: 120 }} /></label>
+      <label>Spec <span className="help">What to do and where</span><textarea value={f.spec} onChange={(e) => setF({ ...f, spec: e.target.value })} style={{ minHeight: 120 }} /></label>
       <label>Acceptance criteria <span className="help">one per line, checkable by a reviewer</span><textarea value={f.acceptance} onChange={(e) => setF({ ...f, acceptance: e.target.value })} style={{ minHeight: 70 }} /></label>
       <div className="row">
-        <label className="chk"><input type="radio" name="nt-state" checked={f.state === "ready"} onChange={() => setF({ ...f, state: "ready" })} /> Ready to run</label>
+        <label className="chk"><input type="radio" name="nt-state" checked={f.state === "ready"} onChange={() => setF({ ...f, state: "ready" })} /> Ready for the lead</label>
         <label className="chk"><input type="radio" name="nt-state" checked={f.state === "backlog"} onChange={() => setF({ ...f, state: "backlog" })} /> Backlog (approve later)</label>
         <button className="pri end" onClick={submit} disabled={busy || !f.title.trim()}>Create ticket</button>
       </div>
@@ -2557,78 +2373,6 @@ const EventText = ({ e }: { e: VEvent }) => {
   }
 };
 
-// --- chores ----------------------------------------------------------------
-
-/**
- * The chore list: small fixes filed by reviewers, workers and you, swept
- * by a lead in batches and committed after the session's reviewer read the batch (docs/BOARD.md).
- */
-const ChoresPanel = ({ board, base, tryAct, onOpenTicket }: { board: Board; base: string; tryAct: (label: string, fn: () => Promise<unknown>) => Promise<unknown>; onOpenTicket: (tid: string) => void }) => {
-  const [text, setText] = useState("");
-  const [where, setWhere] = useState("");
-  const chores = board.chores ?? [];
-  const proposed = chores.filter((c) => c.state === "proposed");
-  const open = chores.filter((c) => c.state === "open");
-  const sweeping = chores.filter((c) => c.state === "sweeping");
-  const settled = chores.filter((c) => c.state === "done" || c.state === "dropped" || c.state === "promoted").sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-  const live = proposed.length + open.length + sweeping.length;
-  const sweep = board.sweep;
-  const add = async () => {
-    if (!text.trim()) return;
-    await tryAct("adding chore", () => api("POST", `${base}/chores`, { text: text.trim(), where: where.trim() || undefined }));
-    setText("");
-    setWhere("");
-  };
-  const row = (c: Chore) => (
-    <div className="req" key={c.id}>
-      <div className="head">
-        <span className={`pill ${c.state === "sweeping" ? "sig" : c.state === "proposed" ? "warn" : c.state === "done" ? "good" : "quiet"}`}>{c.state}</span>
-        <span className="mono muted">{c.id}</span>
-        {c.fromTicket && <span className="small">from <a href="#" className="mono" onClick={(e) => { e.preventDefault(); onOpenTicket(c.fromTicket!); }}>{c.fromTicket}</a></span>}
-        {c.promotedTo && <span className="small">→ <a href="#" className="mono" onClick={(e) => { e.preventDefault(); onOpenTicket(c.promotedTo!); }}>{c.promotedTo}</a></span>}
-        <span className="faint" title={fmtDateTime(c.createdAt)}>{fmtAgo(c.createdAt)}</span>
-      </div>
-      <div className="wrap" style={{ fontSize: 13 }}>{c.text}{c.where ? <span className="muted"> · {c.where}</span> : null}</div>
-      {c.outcome && <div className="wrap muted" style={{ fontSize: 12.5 }}>{c.outcome}</div>}
-      {(c.state === "proposed" || c.state === "open") && (
-        <div className="row">
-          {c.state === "proposed" && <button className="sm pri" onClick={() => void tryAct("approving chore", () => api("POST", `${base}/chores/${c.id}/state`, { state: "open" }))}>Approve</button>}
-          <button className="sm" onClick={() => void tryAct("promoting chore", () => api("POST", `${base}/chores/${c.id}/promote`, {}))}>Make a ticket</button>
-          <button className="sm quiet" onClick={() => void tryAct("dropping chore", () => api("POST", `${base}/chores/${c.id}/state`, { state: "dropped", note: "Dropped by the user" }))}>Drop</button>
-        </div>
-      )}
-    </div>
-  );
-  return (
-    <section className="card">
-      <h3>Chores{live ? ` · ${live}` : ""}</h3>
-      <p className="lead">Small fixes that are not worth a ticket. A lead sweeps them in batches; the session's reviewer reads the batch (when the session has one) and it becomes one commit.</p>
-      {sweep && (sweep.state === "working" || sweep.state === "judging") && <div className="small"><span className="pill sig">sweep {sweep.n} {sweep.state}</span> {sweep.ids.join(", ")}</div>}
-      {sweep && (sweep.state === "accepted" || sweep.state === "refused") && <div className="small muted"><span className={`pill ${sweep.state === "accepted" ? "good" : "warn"}`}>sweep {sweep.n} {sweep.state}</span> {sweep.note}</div>}
-      {proposed.length > 0 && (
-        <div className="row small" style={{ marginTop: 8 }}>
-          <span><b>{proposed.length}</b> proposed by the workers wait for your approval.</span>
-          <button className="sm end" onClick={() => void tryAct("approving chores", () => api("POST", `${base}/chores/approve-all`))}>Approve all</button>
-        </div>
-      )}
-      {sweeping.map(row)}
-      {proposed.map(row)}
-      {open.map(row)}
-      <div className="row" style={{ marginTop: 8 }}>
-        <input placeholder="A small fix, one line" value={text} onChange={(e) => setText(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") void add(); }} style={{ flex: 2 }} />
-        <input placeholder="where (optional)" value={where} onChange={(e) => setWhere(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") void add(); }} style={{ flex: 1 }} />
-        <button className="sm" onClick={() => void add()} disabled={!text.trim()}>Add</button>
-      </div>
-      {settled.length > 0 && (
-        <details style={{ marginTop: 8 }}>
-          <summary className="muted small">{settled.length} settled</summary>
-          <div className="decided">{settled.slice(0, 50).map(row)}</div>
-        </details>
-      )}
-    </section>
-  );
-};
-
 // --- inbox -----------------------------------------------------------------
 
 const InboxPanel = ({ inbox, onRead, onPromote, onOpenTicket }: { inbox: Inbox; onRead: (mid: string) => void; onPromote: (iid: string) => void; onOpenTicket: (tid: string) => void }) => {
@@ -2679,25 +2423,11 @@ const requestSummary = (r: AgentRequest): string => r.summary.split("\n")[0]!.sl
 
 // --- settings --------------------------------------------------------------
 
-type SettingsPatch = { allowlist?: string[]; packs?: string[]; caps?: Partial<Omit<Session["caps"], "leadMinutes" | "leadTurns">> & { /** null clears the cap. */ leadMinutes?: number | null; leadTurns?: number | null }; limits?: Partial<Session["limits"]>; planning?: Session["planning"] | null };
+type SettingsPatch = { allowlist?: string[]; packs?: string[]; caps?: Partial<Omit<Session["caps"], "leadMinutes" | "leadTurns">> & { /** null clears the cap. */ leadMinutes?: number | null; leadTurns?: number | null }; limits?: Partial<Session["limits"]> };
 
-/** What each ticket size means; mirrors TICKET_SIZE_GUIDE in src/core/types.ts. */
-const TICKET_SIZE_HELP: Record<"S" | "M" | "L", string> = {
-  S: "one change in one place; under ~150 lines, under 15 min of agent time",
-  M: "one feature slice with its follow-ups folded in; ~150–800 lines, 15–45 min",
-  L: "a whole feature one reviewer can still judge in one pass; ~800–2,000 lines, 45–120 min",
-};
 const CAP_HELP: Record<string, string> = {
-  workerMinutes: "Wall-clock cap for the reviewer of one ticket (and for setup and Ask the box)",
-  workerTurns: "Model turns for the reviewer of one ticket",
-  budgetUsd: "Spend cap per run",
-  runTickets: "Tickets per run before it pauses",
-  leadMinutes: "Optional: wall-clock life of one lead; then a fresh one takes over from the note. Empty: no cap",
+  leadMinutes: "Optional: wall-clock life of one lead; then a fresh one takes over from notes/state.md. Empty: no cap",
   leadTurns: "Optional: model turns per lead life; then a fresh one takes over. Empty: no cap",
-  sweepMaxLines: "A chore sweep's commit may change at most this many lines; over it the sweep is refused",
-  sweepMaxFiles: "Files a chore sweep's commit may touch",
-  choreSweepAt: "Open chores at which the lead must sweep before its next ticket (0: never forced)",
-  goalRounds: "Lead lives (one lead, start to exit, then a commit of what it left) per run before it pauses for a look",
   progressMinutes: "Every this many minutes the lead posts a short progress update to the inbox (Claude Code only; 0: never)",
 };
 
@@ -2710,23 +2440,12 @@ const SessionSettings = ({ session, onSave, part = "all" }: { session: Session; 
   const fromSession = () => ({
     allow: session.allowlist.join("\n"),
     packs: session.packs,
-    workerMinutes: String(session.caps.workerMinutes),
-    workerTurns: String(session.caps.workerTurns),
-    budgetUsd: String(session.caps.budgetUsd),
-    runTickets: String(session.caps.runTickets),
     reviewer: session.caps.reviewer,
     leadMinutes: session.caps.leadMinutes ? String(session.caps.leadMinutes) : "",
     leadTurns: session.caps.leadTurns ? String(session.caps.leadTurns) : "",
-    sweepMaxLines: String(session.caps.sweepMaxLines ?? 400),
-    sweepMaxFiles: String(session.caps.sweepMaxFiles ?? 15),
-    choreSweepAt: String(session.caps.choreSweepAt ?? 10),
-    goalRounds: String(session.caps.goalRounds ?? 25),
     progressMinutes: String(session.caps.progressMinutes ?? 30),
-    choreApproval: session.caps.choreApproval ?? false,
     memory: session.limits.memory,
     cpus: String(session.limits.cpus),
-    ticketSize: (session.planning?.ticketSize ?? "") as "" | "S" | "M" | "L",
-    sizeGuidance: session.planning?.guidance ?? "",
   });
   const [f, setF] = useState(fromSession);
   const [state, setState] = useState<"clean" | "dirty" | "saving" | "saved" | "error">("clean");
@@ -2739,7 +2458,7 @@ const SessionSettings = ({ session, onSave, part = "all" }: { session: Session; 
     setF(fromSession());
     setState("clean");
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [session.allowlist, session.packs, session.caps, session.limits, session.planning]);
+  }, [session.allowlist, session.packs, session.caps, session.limits]);
   const set = <K extends keyof ReturnType<typeof fromSession>>(k: K, v: ReturnType<typeof fromSession>[K]) => {
     setF({ ...f, [k]: v });
     setState("dirty");
@@ -2751,10 +2470,8 @@ const SessionSettings = ({ session, onSave, part = "all" }: { session: Session; 
         ...(part !== "caps" ? { allowlist: f.allow.split(/\n/).map((s) => s.trim()).filter(Boolean), packs: f.packs } : {}),
         ...(part !== "network"
           ? {
-              caps: { workerMinutes: Number(f.workerMinutes), workerTurns: Number(f.workerTurns), budgetUsd: Number(f.budgetUsd), runTickets: Number(f.runTickets), reviewer: f.reviewer, leadMinutes: f.leadMinutes.trim() ? Number(f.leadMinutes) : null, leadTurns: f.leadTurns.trim() ? Number(f.leadTurns) : null, sweepMaxLines: Number(f.sweepMaxLines), sweepMaxFiles: Number(f.sweepMaxFiles), choreApproval: f.choreApproval, choreSweepAt: Number(f.choreSweepAt), goalRounds: Number(f.goalRounds), progressMinutes: Number(f.progressMinutes) },
+              caps: { reviewer: f.reviewer, leadMinutes: f.leadMinutes.trim() ? Number(f.leadMinutes) : null, leadTurns: f.leadTurns.trim() ? Number(f.leadTurns) : null, progressMinutes: Number(f.progressMinutes) },
               limits: { memory: f.memory, cpus: Number(f.cpus) },
-              // Nothing chosen clears the block: planning agents then size tickets themselves, as before.
-              planning: f.ticketSize || f.sizeGuidance.trim() ? { ticketSize: f.ticketSize || undefined, guidance: f.sizeGuidance.trim() || undefined } : null,
             }
           : {}),
       });
@@ -2788,20 +2505,9 @@ const SessionSettings = ({ session, onSave, part = "all" }: { session: Session; 
       )}
       {part !== "network" && (
         <div className="two">
-          <label>
-            Ticket size
-            <span className="help" title="Every ticket pays a fixed cost (a reviewer runs the checks and reads in, a commit), so fewer, larger tickets run faster.">What the planner and agent terminals aim for. {f.ticketSize ? `${TICKET_SIZE_HELP[f.ticketSize]}.` : "Not set: they choose."}</span>
-            <select value={f.ticketSize} onChange={(e) => set("ticketSize", e.target.value as "" | "S" | "M" | "L")}>
-              <option value="">Not set</option>
-              <option value="S">S · small</option>
-              <option value="M">M · medium</option>
-              <option value="L">L · large</option>
-            </select>
-          </label>
-          <label>
-            How to cut the work <span className="help">Optional, in your words.</span>
-            <input value={f.sizeGuidance} placeholder="e.g. one species per ticket" onChange={(e) => set("sizeGuidance", e.target.value)} />
-          </label>
+          <div style={{ alignSelf: "end", display: "grid", gap: 6 }}>
+            <label className="chk" title="An independent reviewer judges every ticket the lead moves to review; off, the lead moves tickets to done itself. A ticket's own review setting wins."><input type="checkbox" checked={f.reviewer} onChange={(e) => set("reviewer", e.target.checked)} /> Independent review of each ticket</label>
+          </div>
           {(["leadMinutes", "leadTurns"] as const).map((k) => (
             <label key={k}>
               {{ leadMinutes: "Lead minutes (optional)", leadTurns: "Lead turns (optional)" }[k]}
@@ -2809,17 +2515,11 @@ const SessionSettings = ({ session, onSave, part = "all" }: { session: Session; 
               <input type="number" min={k === "leadMinutes" ? 10 : 20} placeholder="no cap" value={f[k]} onChange={(e) => set(k, e.target.value)} />
             </label>
           ))}
-          {(["budgetUsd", "goalRounds", "progressMinutes", "runTickets", "workerMinutes", "workerTurns", "sweepMaxLines", "sweepMaxFiles", "choreSweepAt"] as const).map((k) => (
-            <label key={k}>
-              {{ budgetUsd: "Budget USD per run", goalRounds: "Lead lives per run", progressMinutes: "Progress update every (min)", runTickets: "Tickets per run", workerMinutes: "Reviewer minutes", workerTurns: "Reviewer turns", sweepMaxLines: "Chore sweep: max lines", sweepMaxFiles: "Chore sweep: max files", choreSweepAt: "Chores: sweep at" }[k]}
-              <span className="help">{CAP_HELP[k]}</span>
-              <input type="number" min={k === "progressMinutes" || k === "choreSweepAt" ? 0 : 1} value={f[k]} onChange={(e) => set(k, e.target.value)} />
-            </label>
-          ))}
-          <div style={{ alignSelf: "end", display: "grid", gap: 6 }}>
-            <label className="chk" title="An independent reviewer judges every ticket the lead moves to review; off, the lead moves tickets to done itself."><input type="checkbox" checked={f.reviewer} onChange={(e) => set("reviewer", e.target.checked)} /> Independent review of each ticket</label>
-            <label className="chk" title="Chores filed by reviewers and workers wait for your approval before a sweep may take them. Off: they are swept as they come."><input type="checkbox" checked={f.choreApproval} onChange={(e) => set("choreApproval", e.target.checked)} /> Approve workers' chores before they are swept</label>
-          </div>
+          <label>
+            Progress update every (min)
+            <span className="help">{CAP_HELP.progressMinutes}</span>
+            <input type="number" min={0} value={f.progressMinutes} onChange={(e) => set("progressMinutes", e.target.value)} />
+          </label>
           <label>Memory <span className="help">Container limit, e.g. 4g</span><input value={f.memory} onChange={(e) => set("memory", e.target.value)} /></label>
           <label>CPUs<input type="number" step="0.5" min={0.5} value={f.cpus} onChange={(e) => set("cpus", e.target.value)} /></label>
         </div>
@@ -2840,7 +2540,7 @@ const SessionSettings = ({ session, onSave, part = "all" }: { session: Session; 
   if (part !== "all") return body;
   return (
     <details className="card">
-      <summary><strong>Session settings</strong><span className="muted small">network, caps, limits</span></summary>
+      <summary><strong>Session settings</strong><span className="muted small">network, review, limits</span></summary>
       {body}
     </details>
   );
@@ -2853,11 +2553,10 @@ const TicketDrawer = ({ ticket, board, repoNames, clock, held, sessionId, onClos
   const neededBy = board.tickets.filter((t) => t.deps.includes(ticket.id));
   const now = useNow();
   const timing = ticketTiming(ticket, now);
-  const drawerTiming = !timing ? "" : ticket.state === "done" ? timingLine(timing) : ticket.state === "in_progress" ? `Working for ${inProgressClock(ticket, now)} · ${fmtSpan(timing.total)} since the first claim` : "";
+  const drawerTiming = !timing ? "" : ticket.state === "done" ? timingLine(timing) : ticket.state === "in_progress" ? `In progress for ${inProgressClock(ticket, now)} · ${fmtSpan(timing.total)} since it first went into progress` : "";
   const [edit, setEdit] = useState(false);
-  const toDraft = (t: Ticket) => ({ title: t.title, spec: t.spec, acceptance: t.acceptance.join("\n"), priority: t.priority, size: t.size, repos: t.repos, deps: t.deps.join(", "), agentDriver: t.agent?.driver ?? "", agentModel: t.agent?.model ?? "", review: t.review ?? "" });
+  const toDraft = (t: Ticket) => ({ title: t.title, spec: t.spec, acceptance: t.acceptance.join("\n"), priority: t.priority, repos: t.repos, deps: t.deps.join(", "), review: t.review ?? "" });
   const [draft, setDraft] = useState(toDraft(ticket));
-  const drivers = useDrivers();
   const [reports, setReports] = useState<{ runId: number; text: string }[]>([]);
   useEffect(() => {
     setDraft(toDraft(ticket));
@@ -2880,10 +2579,8 @@ const TicketDrawer = ({ ticket, board, repoNames, clock, held, sessionId, onClos
         spec: draft.spec,
         acceptance: draft.acceptance.split(/\n/).map((s) => s.trim()).filter(Boolean),
         priority: Number(draft.priority),
-        size: draft.size,
         repos: draft.repos,
         deps: draft.deps.split(/[,\s]+/).filter(Boolean),
-        agent: draft.agentDriver ? { driver: draft.agentDriver, model: draft.agentModel.trim() || undefined } : null,
         review: draft.review || null,
       }),
     )
@@ -2899,10 +2596,9 @@ const TicketDrawer = ({ ticket, board, repoNames, clock, held, sessionId, onClos
           <span className={`pill ${tone}`}>{STATE_LABEL[ticket.state] ?? ticket.state}</span>
           <button className="quiet" onClick={onClose} title="Close (Esc)">✕</button>
         </div>
-        {drawerTiming && <div className="facts mono" title="From the first claim; agent time in lead mode is the lead's time on the ticket plus the reviewer's">{drawerTiming}</div>}
+        {drawerTiming && <div className="facts mono" title="From the first move into progress; agent time is the lead's time on the ticket plus the reviewer's">{drawerTiming}</div>}
         <div className="facts">
           <span>{ticket.kind}</span>
-          <span>size <b>{ticket.size}</b></span>
           <span>priority <b>{ticket.priority}</b></span>
           <TicketRepos ticket={ticket} />
           {ticket.deps.length > 0 && (
@@ -2919,17 +2615,13 @@ const TicketDrawer = ({ ticket, board, repoNames, clock, held, sessionId, onClos
               needed by {neededBy.map((t) => <a key={t.id} href="#" className="pill mono quiet" style={{ marginRight: 4 }} title={t.title} onClick={(ev) => { ev.preventDefault(); onOpen(t.id); }}>{t.id}</a>)}
             </span>
           )}
-          {ticket.attempts > 0 && <span>attempts <b>{ticket.attempts}</b></span>}
           {ticket.diff && !ticket.touched?.length && <span className="mono">+{ticket.diff.added} −{ticket.diff.removed} in {ticket.diff.files} file{ticket.diff.files === 1 ? "" : "s"}</span>}
           {ticket.cost?.usd ? <span>cost <b>{fmtUsd(ticket.cost.usd)}</b></span> : null}
-          {ticket.pinned && <span className="pill sig">pinned</span>}
           {ticket.review && <span title="Set by you for this ticket">{REVIEW_LABEL[ticket.review].toLowerCase()}</span>}
-          {ticket.agent && <span title="This ticket's implementer runs on its own agent; the reviewer stays the session's">agent <b>{ticket.agent.driver}</b>{ticket.agent.model ? <span className="mono"> {ticket.agent.model}</span> : null}</span>}
         </div>
-        {held && <div className="banner signal">A worker holds this ticket. Stop the run to edit or move it.</div>}
+        {held && <div className="banner signal">The lead is on this ticket. Stop the run to edit or move it.</div>}
         <div className="row">
           {USER_MOVES[ticket.state]?.map((s) => <button key={s} onClick={() => move(s)} disabled={held}>Move to {STATE_LABEL[s]?.toLowerCase()}</button>)}
-          <button onClick={() => onAction("pin", () => api("PUT", base, { pinned: !ticket.pinned })).catch(() => undefined)} title="A pinned ticket keeps its priority; the planner may not reorder it">{ticket.pinned ? "Unpin" : "Pin"}</button>
           <button onClick={() => setEdit(!edit)} disabled={held}>{edit ? "Cancel edit" : "Edit"}</button>
           <button className="quiet" onClick={onShowLog}>Show in log</button>
           <span className="end"><ConfirmButton label="Delete" confirm={`Delete ${ticket.id}`} disabled={held} onConfirm={() => onAction("deleting", () => api("DELETE", base)).then(onClose).catch(() => undefined)} /></span>
@@ -2940,26 +2632,11 @@ const TicketDrawer = ({ ticket, board, repoNames, clock, held, sessionId, onClos
             <label>Spec<textarea value={draft.spec} onChange={(e) => setDraft({ ...draft, spec: e.target.value })} style={{ minHeight: 160 }} /></label>
             <label>Acceptance criteria <span className="help">one per line</span><textarea value={draft.acceptance} onChange={(e) => setDraft({ ...draft, acceptance: e.target.value })} /></label>
             <div className="two">
-              <label>Priority <span className="help">1 is first</span><input type="number" min={1} value={draft.priority} onChange={(e) => setDraft({ ...draft, priority: Number(e.target.value) })} /></label>
-              <label>Size<select value={draft.size} onChange={(e) => setDraft({ ...draft, size: e.target.value })}><option>S</option><option>M</option><option>L</option></select></label>
-              <label>Expected repositories <span className="help">A hint; the worker may touch others</span><RepoPicker names={repoNames} value={draft.repos} onChange={(repos) => setDraft({ ...draft, repos })} /></label>
+              <label>Priority <span className="help">lower first; a hint the lead reads</span><input type="number" min={1} value={draft.priority} onChange={(e) => setDraft({ ...draft, priority: Number(e.target.value) })} /></label>
+              <label>Expected repositories <span className="help">A hint; the lead may touch others</span><RepoPicker names={repoNames} value={draft.repos} onChange={(repos) => setDraft({ ...draft, repos })} /></label>
               <label>Deps <span className="help">ticket ids, comma separated</span><input value={draft.deps} onChange={(e) => setDraft({ ...draft, deps: e.target.value })} /></label>
               <label>
-                Own agent <span className="help">Optional: this ticket's implementer runs on this agent instead of the session's worker (a fresh worker; the reviewer stays the session's). In lead mode the lead hands it over with board_run.</span>
-                <select value={draft.agentDriver} onChange={(e) => setDraft({ ...draft, agentDriver: e.target.value, agentModel: "" })}>
-                  <option value="">session's worker</option>
-                  {drivers.map((d) => <option key={d.name} value={d.name}>{d.title}{d.configured ? "" : " (no credential)"}</option>)}
-                </select>
-              </label>
-              {draft.agentDriver && (
-                <label>
-                  Model <span className="help">Any id that CLI accepts; empty uses the account's default</span>
-                  <input className="mono" list="ticket-agent-models" value={draft.agentModel} onChange={(e) => setDraft({ ...draft, agentModel: e.target.value })} placeholder="account default" />
-                  <datalist id="ticket-agent-models">{(drivers.find((d) => d.name === draft.agentDriver)?.models ?? []).map((m) => <option key={m} value={m} />)}</datalist>
-                </label>
-              )}
-              <label>
-                Review <span className="help">How the ticket is judged when it is submitted. Only you set this; agents' tickets take the session's.</span>
+                Review <span className="help">How the ticket is judged when the lead moves it to review. Only you set this; agents' tickets take the session's.</span>
                 <select value={draft.review} onChange={(e) => setDraft({ ...draft, review: e.target.value })}>
                   <ReviewOptions sessionReviewer={clock.review === "full"} />
                 </select>
@@ -2981,13 +2658,13 @@ const TicketDrawer = ({ ticket, board, repoNames, clock, held, sessionId, onClos
         )}
         {ticket.report && (
           <section>
-            <h4>Implementer's report</h4>
+            <h4>The lead's report</h4>
             <pre>{ticket.report}</pre>
           </section>
         )}
         {reports.length > 0 && (
           <details>
-            <summary className="muted small">Worker reports from {reports.length} run{reports.length === 1 ? "" : "s"}</summary>
+            <summary className="muted small">Reviews from {reports.length} run{reports.length === 1 ? "" : "s"}</summary>
             <div className="stack" style={{ marginTop: 8 }}>
               {reports.map((r) => (
                 <section key={r.runId}>
@@ -3005,7 +2682,7 @@ const TicketDrawer = ({ ticket, board, repoNames, clock, held, sessionId, onClos
             {ticket.notes.length === 0 && <li className="muted">none</li>}
           </ul>
           <div className="row" style={{ marginTop: 6 }}>
-            <input placeholder="Add a note for the next worker" value={note} onChange={(e) => setNote(e.target.value)} onKeyDown={(e) => e.key === "Enter" && note.trim() && onAction("note", () => api("POST", `${base}/notes`, { text: note })).then(() => setNote("")).catch(() => undefined)} />
+            <input placeholder="Add a note for the lead" value={note} onChange={(e) => setNote(e.target.value)} onKeyDown={(e) => e.key === "Enter" && note.trim() && onAction("note", () => api("POST", `${base}/notes`, { text: note })).then(() => setNote("")).catch(() => undefined)} />
             <button onClick={() => onAction("note", () => api("POST", `${base}/notes`, { text: note })).then(() => setNote("")).catch(() => undefined)} disabled={!note.trim()}>Add</button>
           </div>
         </section>

@@ -13,7 +13,7 @@ import path from "node:path";
 import type { Translated } from "./translate.js";
 
 export type Job = {
-  role: "reviewer" | "planner" | "setup" | "prompt" | "lead";
+  role: "reviewer" | "prompt" | "lead";
   ticket?: string;
   /** Which agent runs this job; absent means Claude Code. */
   driver?: "claude" | "codex" | "cursor";
@@ -21,7 +21,8 @@ export type Job = {
   promptFile: string;
   /** Path of the procedure text appended to the system prompt. */
   systemPromptFile: string;
-  caps: { minutes: number; turns: number; budgetUsd: number };
+  /** Liveness limits; each is optional, and absent means none. */
+  caps: { minutes?: number; turns?: number; budgetUsd?: number };
   /** The mcp config file the harness wrote; it names this image's board server. */
   mcpConfigFile: string;
   model?: string;

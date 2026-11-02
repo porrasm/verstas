@@ -1,14 +1,13 @@
 # Worker drivers
 
-A driver is what runs one ticket inside the session container. The
-reference driver is Claude Code (`src/worker/worker.ts`, shipped in the
-image as `/opt/verstas/worker.js`). The same worker also drives Codex CLI
-and Cursor CLI (`src/worker/driver-*.ts`): a session chooses its agents
-under "Agent options", per role, and the reviewer may be a different agent
-(a single ticket may also name its own agent, `docs/BOARD.md`, for work
-that needs that agent's particular strength)
-than the worker. Any other agent can replace the worker by honouring the
-same contract; the loop does not change.
+A driver is what runs one worker inside the session container: the lead,
+the reviewer of a ticket, or Ask the box. The reference driver is Claude
+Code (`src/worker/worker.ts`, shipped in the image as
+`/opt/verstas/worker.js`). The same worker also drives Codex CLI and Cursor
+CLI (`src/worker/driver-*.ts`): a session chooses its agents under "Agent
+options", and the reviewer may be a different agent than the lead. Any
+other agent can replace the worker by honouring the same contract; the
+loop does not change.
 
 ## The contract
 
@@ -25,11 +24,11 @@ a file. `job.json`:
 
 ```jsonc
 {
-  "role": "lead",                   // lead | reviewer | planner | setup | prompt
+  "role": "lead",                   // lead | reviewer | prompt
   "ticket": "T-12",                 // the reviewer's ticket; absent for the rest
   "promptFile": "/workspace/.verstas/jobs/4-7-lead/prompt.md",   // the task
   "systemPromptFile": "/workspace/.verstas/jobs/4-7-lead/system.md", // the rules
-  "caps": { "minutes": 25, "turns": 60, "budgetUsd": 5 },
+  "caps": { "minutes": 90, "turns": 400 },            // each optional; absent means no cap
   "mcpConfigFile": "/workspace/.verstas/mcp.json",       // board tools
   "driver": "claude",               // claude | codex | cursor; absent means claude
   "model": "claude-fable-5-1",      // optional; any id the chosen CLI accepts
@@ -94,12 +93,11 @@ lead life ends, commits whatever is left and starts the next life.
 
 `/opt/verstas/mcp-server.js` is a dependency-free stdio MCP server exposing
 the board tools: `board_list_tickets`, `board_get_ticket`, `board_add_note`,
-`board_report`, `board_create_ticket`, `chore`, `chores_list`, `chore_drop`,
-`board_set_priority`, `board_add_dep`, `request` (summary + actions:
-network, pack, resources, instruction, question), `halt`, `message`,
-`idea`, `artifact`, `budget`; for the lead also `board_move`, `done`,
-`handoff`, `board_changes`, `board_update_ticket`, `board_delete_ticket`,
-`chores_sweep`, `chores_submit`. Each is one call to the agent API under
+`board_report`, `board_create_ticket`, `board_set_priority`,
+`board_add_dep`, `request` (summary + actions: network, pack, resources,
+instruction, question), `halt`, `message`, `idea`, `artifact`, `budget`;
+for the lead also `board_move`, `done`, `handoff`, `board_changes`,
+`board_update_ticket`, `board_delete_ticket`. Each is one call to the agent API under
 `/agent/`; the API enforces every rule. A driver that
 speaks MCP can load it with:
 
@@ -122,7 +120,7 @@ Inside the box, plain HTTP must go through the proxy (`HTTP_PROXY` is set);
 | Pointers file | `CLAUDE.md` | `AGENTS.md` | `AGENTS.md` (and `CLAUDE.md`) |
 | Credential, env var | setup token, `CLAUDE_CODE_OAUTH_TOKEN` | `auth.json` contents, `VERSTAS_CODEX_AUTH` | user API key, `CURSOR_API_KEY` |
 | Network pack | `anthropic` | `openai` (`chatgpt.com` confirmed live) | `cursor` (`*.cursor.sh`, confirmed live) |
-| Reports USD cost | yes (`--max-budget-usd` applies) | tokens only; budget cap does not apply | no; budget cap does not apply |
+| Reports USD cost | yes | tokens only | no |
 | Quota exhausted | `result` line names it | `turn.failed` message text | `result` error text |
 
 The image installs all three (`images/devbox/Dockerfile`); the Codex and

@@ -5,7 +5,7 @@ import { verstasHome } from "../config.js";
 
 /**
  * The recipe library (formerly setup scripts): named bash you write once,
- * or save from a session whose setup worker wrote it, and tick at session
+ * and tick at session
  * creation. Stored as two files per script under
  * `~/.verstas/scripts/`: `<name>.sh` (the script, editable in any editor)
  * and `<name>.json` (description, hosts it downloads from, a note for the
@@ -24,8 +24,8 @@ export const setupScriptMetaSchema = z.object({
   note: z.string().max(2000).default(""),
   /**
    * root: run as root (hand-written scripts, apt-get without sudo).
-   * agent: run as the agent with sudo available (recipes a setup worker
-   * wrote: they mix project steps and sudo installs).
+   * agent: run as the agent with sudo available (recipes saved from a
+   * session before: they mix project steps and sudo installs).
    */
   runAs: z.enum(["root", "agent"]).default("root"),
   /** The environment description saved with a recipe; seeds notes/env.md of sessions that use it. */

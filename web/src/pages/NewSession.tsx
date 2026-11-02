@@ -9,19 +9,18 @@ import { ConnectAssistant } from "./ConnectAssistant";
  * container exists until you press Initialize there.
  *
  * With `draftId` (#/new?draft=<id>) the session takes the draft's
- * repositories, requirements, packs, recipes and board as well.
+ * repositories, packs, recipes, goal and board as well.
  *
  * With "Start from: Environment of <session>" (#/new?from=<id>) it starts on
  * a copy of that session's box instead: its settings, home volume, snapshot
- * and chosen notes, fresh clones of its repositories, and it comes up
+ * and notes, fresh clones of its repositories, and it comes up
  * initialized (docs/BOARD.md, Sessions from an environment).
  */
 export const NewSessionPage = ({ draftId = null, fromSession = null }: { draftId?: string | null; fromSession?: string | null }) => {
   const [cfg, setCfg] = useState<Config | null>(null);
   const [sources, setSources] = useState<SessionSummary[]>([]);
   const [from, setFrom] = useState(fromSession ?? "");
-  const [copy, setCopy] = useState({ projectNotes: true, allNotes: false, attachments: false });
-  const [requirements, setRequirements] = useState<string | null>(null);
+  const [copy, setCopy] = useState({ notes: true, attachments: false });
   const [branches, setBranches] = useState<Record<string, string>>({});
   const [unapplied, setUnapplied] = useState<Record<string, number | null>>({});
   const [name, setName] = useState("");
@@ -80,7 +79,6 @@ export const NewSessionPage = ({ draftId = null, fromSession = null }: { draftId
   }, []);
   const source = sources.find((r) => r.session.id === from)?.session;
   useEffect(() => {
-    setRequirements(source ? source.requirements : null);
     setBranches({});
     setUnapplied({});
     if (!source) return;
@@ -97,7 +95,6 @@ export const NewSessionPage = ({ draftId = null, fromSession = null }: { draftId
         const r = await api<{ session: { id: string } }>("POST", "/sessions", {
           name,
           board: board.trim() || undefined,
-          requirements: requirements ?? undefined,
           fromEnvironment: { session: source.id, ...copy, branches },
         });
         location.hash = `#/s/${encodeURIComponent(r.session.id)}`;
@@ -123,8 +120,6 @@ export const NewSessionPage = ({ draftId = null, fromSession = null }: { draftId
               packs: x.packs,
               allowlist: x.extraHosts,
               setupScripts: x.recipes,
-              requirements: x.requirements || undefined,
-              planning: x.planning,
               draftId: x.id,
             }
           : {}),
@@ -151,7 +146,7 @@ export const NewSessionPage = ({ draftId = null, fromSession = null }: { draftId
       {x && (
         <div className="banner info">
           <span>
-            From the draft <a href={`#/d/${encodeURIComponent(x.id)}`}><strong>{x.name}</strong></a>: {x.repos.length} repositor{x.repos.length === 1 ? "y" : "ies"}{x.repos.length ? ` (${x.repos.map((r) => r.name ?? r.target).join(", ")})` : ""}, {x.packs.length} network pack{x.packs.length === 1 ? "" : "s"}, {x.recipes.length} recipe{x.recipes.length === 1 ? "" : "s"}, {x.tickets.length} ticket{x.tickets.length === 1 ? "" : "s"}{x.requirements ? ", setup instructions" : ""}{x.goal ? ", and its goal as the first planning request" : ""}. All of it can be changed on the session page before you initialize.
+            From the draft <a href={`#/d/${encodeURIComponent(x.id)}`}><strong>{x.name}</strong></a>: {x.repos.length} repositor{x.repos.length === 1 ? "y" : "ies"}{x.repos.length ? ` (${x.repos.map((r) => r.name ?? r.target).join(", ")})` : ""}, {x.packs.length} network pack{x.packs.length === 1 ? "" : "s"}, {x.recipes.length} recipe{x.recipes.length === 1 ? "" : "s"}, {x.tickets.length} ticket{x.tickets.length === 1 ? "" : "s"}{x.goal ? ", and its goal" : ""}. All of it can be changed on the session page before you initialize.
           </span>
         </div>
       )}
@@ -174,10 +169,9 @@ export const NewSessionPage = ({ draftId = null, fromSession = null }: { draftId
           {source && (
             <>
               <p className="lead">
-                A fresh board on a copy of <strong>{source.name}</strong>'s box: its settings (image, recipes, network, agents, caps, limits), a copy of its home volume and snapshot, the notes below, and fresh clones of its repositories. It comes up initialized{requirements === null || requirements.trim() === source.requirements.trim() ? ", without a setup worker" : "; the setup worker checks the box against the changed setup instructions"}. {source.name} itself is not changed.
+                A fresh board on a copy of <strong>{source.name}</strong>'s box: its settings (image, recipes, network, agents, caps, limits), a copy of its home volume and snapshot, the notes below, and fresh clones of its repositories. It comes up initialized. {source.name} itself is not changed.
               </p>
-              <label className="chk"><input type="checkbox" checked={copy.projectNotes} onChange={(e) => setCopy({ ...copy, projectNotes: e.target.checked })} /> Copy brief.md and learnings.md (env.md, setup.sh, tools/ and INDEX.md always come along)</label>
-              <label className="chk"><input type="checkbox" checked={copy.allNotes} onChange={(e) => setCopy({ ...copy, allNotes: e.target.checked })} /> Copy all notes (never the last lead's handoff, state.md)</label>
+              <label className="chk"><input type="checkbox" checked={copy.notes} onChange={(e) => setCopy({ ...copy, notes: e.target.checked })} /> Copy the notes (never the last lead's state.md)</label>
               <label className="chk"><input type="checkbox" checked={copy.attachments} onChange={(e) => setCopy({ ...copy, attachments: e.target.checked })} /> Copy attachments ({source.attachments.length})</label>
               {source.repos.map((r) => (
                 <label key={r.name}>
@@ -188,10 +182,6 @@ export const NewSessionPage = ({ draftId = null, fromSession = null }: { draftId
                   </select>
                 </label>
               ))}
-              <label>
-                Setup instructions <span className="help">Unchanged, the box's confirmed readiness carries over. Changed, the setup worker checks the box again.</span>
-                <textarea value={requirements ?? ""} onChange={(e) => setRequirements(e.target.value)} style={{ minHeight: 90 }} />
-              </label>
             </>
           )}
         </section>
@@ -204,7 +194,7 @@ export const NewSessionPage = ({ draftId = null, fromSession = null }: { draftId
 
       <section className="card">
         <h3>Board</h3>
-        <p className="lead">Optional. Paste tickets as JSON or markdown (see <code>docs/BOARD.md</code>); they start as ready. You can also import later, write tickets by hand, or have the planner draft them once the session is initialized.</p>
+        <p className="lead">Optional. Paste tickets as JSON or markdown (see <code>docs/BOARD.md</code>); they start as ready. You can also import later, write tickets by hand, or plan them with the agent terminal once the session is initialized. With a goal, tickets are optional.</p>
         <textarea id="board" className={`mono ${preview && !preview.ok ? "invalid" : ""}`} value={board} onChange={(e) => setBoard(e.target.value)} placeholder={'{ "tickets": [ { "title": "…", "spec": "…", "acceptance": ["…"] } ] }'} style={{ minHeight: 160 }} />
         {preview && !preview.ok && <div className="banner warn"><span>{preview.error}</span></div>}
         {preview?.ok && preview.tickets && (

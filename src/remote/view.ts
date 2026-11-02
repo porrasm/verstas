@@ -53,7 +53,8 @@ export const flattenEvent = (e: VerstasEvent): RemoteEvent | null => {
     case "worker_done":
       return { ...base, text: `${e.role} finished: ${e.stopReason} · ${e.turns} turns · ${e.seconds} s`, ok: e.ok };
     case "chores":
-      return { ...base, text: cap(`sweep ${e.sweep} ${e.accepted ? `committed: ${e.done} done, ${e.dropped} dropped, ${e.promoted} promoted` : "refused"}: ${e.note}`, 300), ok: e.accepted };
+      // From before chores were removed: old run logs still carry sweep verdicts.
+      return { ...base, text: cap(`sweep ${e.sweep} ${e.accepted ? "committed" : "refused"}: ${e.note}`, 300), ok: e.accepted };
   }
 };
 
@@ -99,10 +100,8 @@ export const remoteSession = (x: RemoteSessionInput) => {
       kind: t.kind,
       state: t.state,
       priority: t.priority,
-      size: t.size,
       ...(t.repos.length ? { repo: t.repos.join(", ") } : {}),
       deps: t.deps,
-      attempts: t.attempts,
       spec: cap(t.spec, 4000),
       acceptance: t.acceptance.slice(0, 20).map((a) => cap(a, 500)),
       ...(t.report ? { report: cap(t.report, 4000) } : {}),

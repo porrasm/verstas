@@ -196,7 +196,10 @@ API's shape); `docs/DRIVERS.md` The board MCP server.
 
 ## Step 3 · Prompts are facts  (M)
 
-**Status: not started.**
+**Status: done 2026-11-02.** VERSTAS.md and the lead's system prompt
+carry facts only; the reviewer's prompt was kept close to what it was (your
+call): its two passes and the verdict contract stay, with chores replaced
+by notes and the brief by the repository's own check commands.
 
 **What.** The agent reads where it is, not how to work.
 
@@ -247,7 +250,11 @@ true and gets a line that the harness gives no working rules.
 
 ## Step 4 · Initialize is the box  (M)
 
-**Status: not started.**
+**Status: done 2026-11-02.** Initialization is the clones, the container
+and the recipes. The box is snapshotted at initialization and after every
+run, the one record of what the lead installed. A session started from
+another's environment copies the notes directory whole (never
+`state.md`). Save as recipe went with `notes/setup.sh`.
 
 **What.** No setup worker, no requirements, no readiness, no notes
 contract. Initialize clones, creates the container, runs the recipes,
@@ -306,7 +313,13 @@ record of system installs); `docs/DRAFTS.md` What a draft holds.
 
 ## Step 5 · The board loses its rails  (M)
 
-**Status: not started.**
+**Status: done 2026-11-02, with two changes to the plan.** The per-ticket
+`review` override stays (your call: too little data on how reviews work to
+drop it). The caps went further than planned: every cap but the optional
+`leadMinutes` and `leadTurns` is gone, the budget, `goalRounds` and the
+reviewer's minutes and turns included; `progressMinutes` and the reviewer
+switch remain as settings, not limits. `nextReady`, `canStart` and
+`describeBlockers` went with the harness's ordering.
 
 **What.** Chores, sweeps, kinds restrictions, pinned, attempts, size,
 planning guidance, a ticket's own agent, the per-ticket review override.
@@ -378,7 +391,7 @@ is sent.
 
 ## Step 6 · Remove Plan tickets  (S)
 
-**Status: not started.**
+**Status: done 2026-11-02.** Planning is the agent terminal's job.
 
 **What.** The planner role and the Plan tickets dialog go; the lead and
 the agent terminal write tickets.
@@ -396,7 +409,7 @@ terminal's ticket writing.
 
 ## Step 7 · Docs and the version  (S)
 
-**Status: not started.**
+**Status: done 2026-11-02.**
 
 Rewrite README's Running it section to the new flow (Settings, New
 session, Initialize, write a goal or tickets, Start; Publish PR). Prune

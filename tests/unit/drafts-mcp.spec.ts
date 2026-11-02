@@ -123,7 +123,7 @@ test("a draft is built step by step and every edit answers with its problems", a
     expect((await s.call("draft_set_network", { id, packs: ["node", "playwright", "debian"], extraHosts: ["fonts.googleapis.com"] })).json.ok).toBe(true);
     expect((await s.call("draft_set_recipes", { id, recipes: ["postgres"] })).text).toMatch(/Not in the library: postgres. Known: chromium/);
     expect((await s.call("draft_set_recipes", { id, recipes: ["chromium"] })).json.ok).toBe(true);
-    await s.call("draft_update", { id, requirements: "Chromium for Playwright launches", notes: "Free tier is one device" });
+    await s.call("draft_update", { id, notes: "Free tier is one device" });
 
     // A dependency on a ticket that is not there yet is allowed and reported.
     const first = await s.call("draft_add_tickets", { id, tickets: [{ title: "Toolchain", repo: "nuppi", spec: "npm ci", acceptance: ["gates pass"], deps: ["T-2"] }] });
@@ -133,7 +133,7 @@ test("a draft is built step by step and every edit answers with its problems", a
     expect(second.json.problems.errors).toEqual([]);
     expect((await s.call("draft_update_ticket", { id, ticketId: "T-2", deps: ["T-1"] })).json.problems.errors).toEqual(["Dependency cycle: T-1 -> T-2 -> T-1"]);
     await s.call("draft_update_ticket", { id, ticketId: "T-1", deps: [] });
-    await s.call("draft_update_ticket", { id, ticketId: "T-2", deps: ["T-1"], size: "S" });
+    await s.call("draft_update_ticket", { id, ticketId: "T-2", deps: ["T-1"], priority: 5 });
     expect((await s.call("draft_update_ticket", { id, ticketId: "T-1", repo: "elsewhere" })).json.problems.errors[0]).toContain('names repo "elsewhere"');
     await s.call("draft_update_ticket", { id, ticketId: "T-1", repo: "nuppi" });
 
@@ -141,8 +141,8 @@ test("a draft is built step by step and every edit answers with its problems", a
     expect(v.json).toMatchObject({ id, ready: true, errors: [] });
 
     const got = await s.call("draft_get", { id });
-    expect(got.json).toMatchObject({ name: "Nuppi MVP", requirements: "Chromium for Playwright launches", packs: ["node", "playwright", "debian"], recipes: ["chromium"], repos: [{ target: "nuppi" }, { target: "kapula", branch: "feature" }] });
-    expect(got.json.tickets[1]).toEqual({ id: "T-2", title: "Fader", kind: "feature", repos: ["kapula"], size: "S", priority: 100, deps: ["T-1"], state: "ready", pinned: false, acceptance: 1, specChars: 9 });
+    expect(got.json).toMatchObject({ name: "Nuppi MVP", notes: "Free tier is one device", packs: ["node", "playwright", "debian"], recipes: ["chromium"], repos: [{ target: "nuppi" }, { target: "kapula", branch: "feature" }] });
+    expect(got.json.tickets[1]).toEqual({ id: "T-2", title: "Fader", kind: "feature", repos: ["kapula"], priority: 5, deps: ["T-1"], state: "ready", acceptance: 1, specChars: 9 });
     expect((await s.call("draft_get_ticket", { id, ticketId: "T-2" })).json).toMatchObject({ spec: "add fader", acceptance: ["tests"] });
 
     const removed = await s.call("draft_remove_tickets", { id, ticketIds: ["T-1"] });

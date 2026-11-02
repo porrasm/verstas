@@ -6,7 +6,7 @@ const EMPTY: SetupScript = { name: "", description: "", hosts: [], note: "", run
 /**
  * The recipe library. A recipe runs once when a session's container is
  * created; sessions tick recipes at creation and get a copy. Recipes are
- * written here by hand, or saved from a session whose setup worker wrote one.
+ * written here by hand.
  */
 export const ScriptsPage = () => {
   const [list, setList] = useState<SetupScript[] | null>(null);
@@ -63,7 +63,7 @@ export const ScriptsPage = () => {
       <div>
         <h1>Recipes</h1>
         <p className="muted" style={{ marginTop: 6 }}>
-          Bash that runs once when a session's container is created, so the box starts set up. Write one here, or save one from a session page ("Save as recipe") after its setup worker built the environment. Tick recipes on the New session form. The hosts a recipe downloads from join that session's allowlist; the note tells the worker what was installed.
+          Bash that runs once when a session's container is created, so the box starts set up. Write one here and tick it on the New session form. The hosts a recipe downloads from join that session's allowlist; the note tells the lead what was installed. Anything a recipe does not install, the lead installs itself.
         </p>
       </div>
       {msg && (
@@ -112,7 +112,7 @@ export const ScriptsPage = () => {
             <textarea id="sc-script" className="mono" value={draft.script} onChange={(e) => setDraft({ ...draft, script: e.target.value })} style={{ minHeight: 360 }} spellCheck={false} />
           </label>
           <label>
-            Environment description <span className="help">Seeds notes/env.md of sessions that tick this recipe; the setup worker verifies it</span>
+            Environment description <span className="help">Seeds notes/env.md of sessions that tick this recipe, for the lead to read</span>
             <textarea id="sc-env" className="mono" value={draft.env} onChange={(e) => setDraft({ ...draft, env: e.target.value })} style={{ minHeight: 100 }} spellCheck={false} />
           </label>
           <div className="row">

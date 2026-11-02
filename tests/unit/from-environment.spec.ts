@@ -23,15 +23,12 @@ const source = (over: Partial<Session> = {}): Session =>
     createdAt: t,
     initializedAt: t,
     image: "verstas-devbox:local",
-    requirements: "  .NET 9 and Chromium  ",
-    setupMode: "agentic",
     agents: { worker: { driver: "claude", model: "opus" } },
     packs: ["dotnet"],
     allowlist: ["api.nuget.org"],
-    caps: { workerMinutes: 50, choreSweepAt: 7 },
+    caps: { leadMinutes: 50, reviewer: false },
     limits: { cpus: 6 },
     rootScripts: [{ script: "apt-get install -y fonts", at: t }],
-    readiness: { verdict: "ready", at: t, summary: "ok", checks: [], confirmedAt: t },
     snapshot: { image: "verstas-session-2026-10-01-old:latest", at: t, baseImageId: "sha256:base" },
     remote: true,
     prompts: [{ at: t, runId: 1, kind: "prompt", text: "hi", reply: "hello", stopReason: "success" }],
@@ -39,30 +36,18 @@ const source = (over: Partial<Session> = {}): Session =>
   });
 
 test("the settings carry over; the board, prompts, remote flag, id and name do not", () => {
-  const s = environmentSettings(source(), {}, t);
-  expect(s).toMatchObject({ image: "verstas-devbox:local", setupMode: "agentic", packs: ["dotnet"], allowlist: ["api.nuget.org"], agents: { worker: { driver: "claude", model: "opus" } } });
-  expect(s.caps).toMatchObject({ workerMinutes: 50, choreSweepAt: 7 });
+  const s = environmentSettings(source(), t);
+  expect(s).toMatchObject({ image: "verstas-devbox:local", packs: ["dotnet"], allowlist: ["api.nuget.org"], agents: { worker: { driver: "claude", model: "opus" } }, environmentFrom: { session: "2026-10-01-old", at: t } });
+  expect(s.caps).toMatchObject({ leadMinutes: 50, reviewer: false });
   expect(s.limits).toMatchObject({ cpus: 6 });
   expect(s.rootScripts.map((r) => r.script)).toEqual(["apt-get install -y fonts"]);
   for (const k of ["id", "name", "prompts", "remote", "repos", "snapshot", "initializedAt"]) expect(s).not.toHaveProperty(k);
 });
 
-test("readiness carries over only when it was confirmed ready and the requirements are the same", () => {
-  expect(environmentSettings(source(), {}, t)).toMatchObject({ readiness: { verdict: "ready" }, environmentFrom: { session: "2026-10-01-old", readinessCarried: true } });
-  // The same text with other surrounding whitespace is the same requirements.
-  expect(environmentSettings(source(), { requirements: ".NET 9 and Chromium" }, t).environmentFrom!.readinessCarried).toBe(true);
-  const changed = environmentSettings(source(), { requirements: ".NET 9, Chromium and Postgres" }, t);
-  expect(changed.readiness).toBeUndefined();
-  expect(changed.environmentFrom!.readinessCarried).toBe(false);
-  expect(changed.requirements).toBe(".NET 9, Chromium and Postgres");
-  expect(environmentSettings(source({ readiness: { verdict: "needs", at: t, summary: "", checks: [] } }), {}, t).readiness).toBeUndefined();
-});
-
-test("notes: the box's always, brief and learnings unless unticked, the rest only with all notes, never the handoff", () => {
-  const names = ["env.md", "setup.sh", "tools", "INDEX.md", "brief.md", "learnings.md", "state.md", "t12", "c23"];
-  expect(notesToCopy(names, { projectNotes: true, allNotes: false })).toEqual(["env.md", "setup.sh", "tools", "INDEX.md", "brief.md", "learnings.md"]);
-  expect(notesToCopy(names, { projectNotes: false, allNotes: false })).toEqual(["env.md", "setup.sh", "tools", "INDEX.md"]);
-  expect(notesToCopy(names, { projectNotes: false, allNotes: true })).toEqual(["env.md", "setup.sh", "tools", "INDEX.md", "brief.md", "learnings.md", "t12", "c23"]);
+test("notes: all of them when ticked, none when not, never the last lead's state.md", () => {
+  const names = ["env.md", "tools", "learnings.md", "state.md", "t12"];
+  expect(notesToCopy(names, { notes: true })).toEqual(["env.md", "tools", "learnings.md", "t12"]);
+  expect(notesToCopy(names, { notes: false })).toEqual([]);
 });
 
 test("copyEnvironmentFiles copies the chosen notes, directories included, and attachments only when asked", async () => {
@@ -77,12 +62,12 @@ test("copyEnvironmentFiles copies the chosen notes, directories included, and at
     await fs.writeFile(path.join(a.notes, "state.md"), "handoff");
     await fs.writeFile(path.join(a.notes, "learnings.md"), "learned");
     await fs.writeFile(path.join(a.attachments, "ref", "x.txt"), "x");
-    const out = await copyEnvironmentFiles(a, b, { projectNotes: true, allNotes: false, attachments: false });
+    const out = await copyEnvironmentFiles(a, b, { notes: true, attachments: false });
     expect(out.notes.sort()).toEqual(["env.md", "learnings.md", "tools"]);
     expect(await fs.readFile(path.join(b.notes, "tools", "svc.sh"), "utf8")).toBe("svc");
     await expect(fs.stat(path.join(b.notes, "state.md"))).rejects.toThrow();
     await expect(fs.stat(path.join(b.attachments, "ref"))).rejects.toThrow();
-    await copyEnvironmentFiles(a, b, { projectNotes: false, allNotes: false, attachments: true });
+    await copyEnvironmentFiles(a, b, { notes: false, attachments: true });
     expect(await fs.readFile(path.join(b.attachments, "ref", "x.txt"), "utf8")).toBe("x");
   } finally {
     await fs.rm(root, { recursive: true, force: true });

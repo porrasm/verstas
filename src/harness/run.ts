@@ -2,8 +2,8 @@ import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
-import { agentFor, DRIVER_NAMES, eventSchema, isInitialized, matchesAnyGlob, now, requestOutcome, runSchema, SWEEP_PROTECTED_GLOBS, type TouchedRepo, type Board, type DriverName, type Readiness, type Run, type Session, type SweepResult, type Ticket, type TicketState, type VerstasEvent } from "../core/types.js";
-import { addNote, getTicket, hasOpenWork, openChores, releaseSweep, replaceTicket, settleSweep, sweepInFlight, transition } from "../board/board.js";
+import { agentFor, DRIVER_NAMES, eventSchema, isInitialized, now, requestOutcome, runSchema, type TouchedRepo, type Board, type DriverName, type Run, type Session, type TicketState, type VerstasEvent } from "../core/types.js";
+import { addNote, getTicket, hasOpenWork, replaceTicket, transition } from "../board/board.js";
 import { classifyCommits, plannedVsTouched, reviewLevel, type RepoChange } from "./judging.js";
 import { writeJsonAtomic } from "../board/store.js";
 import type { SessionHandle, SessionHub } from "../sessions/hub.js";
@@ -11,7 +11,7 @@ import type { AgentRunHooks, RunToken, RunTokens } from "../agent-api/agent-api.
 import { workspaceSizeMb } from "../sessions/sessions.js";
 import { addArtifact, ARTIFACT_MAX_BYTES, type Artifact } from "../sessions/artifacts.js";
 import { allowlistFor } from "../network/packs.js";
-import { leadContinuePrompt, leadPrompt, mcpConfig, readLeadRules, notesIndexMd, plannerPrompt, reviewerPrompt, setupPrompt, sweepReviewerPrompt, systemMd, terminalMd, userPrompt, verstasMd, withContext, workspaceClaudeMd, type LeadPromptOptions } from "./prompts.js";
+import { leadContinuePrompt, leadPrompt, mcpConfig, readLeadRules, reviewerPrompt, systemMd, terminalMd, userPrompt, verstasMd, workspaceClaudeMd, type LeadPromptOptions } from "./prompts.js";
 import { driverInfo, missingCredentialError } from "./drivers.js";
 import { LiveTerminal, type TerminalRunner } from "./terminal.js";
 import type { Job } from "../worker/worker.js";
@@ -110,12 +110,9 @@ type LeadContext = {
 export type RunOptions = {
   /** Initialize the environment; see `RunManager.start`. */
   init?: boolean;
-  /** With init: go on to the tickets once initialization succeeds. */
+  /** With init: go on to the lead once initialization succeeds. */
   start?: boolean;
-  /** Your planning request: the planner turns it into tickets. */
-  plan?: string;
-  brief?: boolean;
-  setup?: boolean;
+  /** Ask the box: one worker with your text, no ticket. */
   prompt?: string;
   /** An agent terminal on this driver, at this size: you type to the agent until it exits or the run is stopped. */
   terminal?: { driver: DriverName; cols?: number; rows?: number };
@@ -135,15 +132,9 @@ const PAUSE_NUDGE = "The user asked the run to pause. Reach a sensible point (st
 const PROGRESS_NUDGE = "Progress check. Post a short update for the user with the `message` tool, 2 to 8 sentences: how far the work is, what is done since your last update, what you are on now, and what comes next. Then carry on; this does not end your turn.";
 /** Commits per repository in a fresh lead's prompt. */
 const LOG_LINES = 15;
-/** The lead's caps when the session sets none: far enough away that only the budget, a handoff or the user ends a life (the time cap is a setTimeout, so under 24 days). */
-const NO_CAP_MINUTES = 20 * 24 * 60;
-const NO_CAP_TURNS = 1_000_000;
-/** The setup worker's floor on the worker caps: it waits on installs and on every repository's check, so it needs time more than turns. */
-const SETUP_MIN_MINUTES = 60;
-const SETUP_MIN_TURNS = 120;
 
 /** What a worker of this role may do through the agent API (src/agent-api/agent-api.ts). */
-const tokenRole = (role: Job["role"]): "worker" | "planner" | "lead" => (role === "planner" ? "planner" : role === "lead" ? "lead" : "worker");
+const tokenRole = (role: Job["role"]): "worker" | "lead" => (role === "lead" ? "lead" : "worker");
 
 export class RunManager implements AgentRunHooks {
   private active = new Map<string, RunControl>();
@@ -196,24 +187,20 @@ export class RunManager implements AgentRunHooks {
   }
 
   /**
-   * init: initialize the environment (the container, the recipes, and the
-   * setup worker unless the session's setup mode skips it); with `start`,
-   * go on to the lead when it succeeds. plan: run the planner with your
-   * request first. brief: refresh the brief and stop. setup: run the setup
-   * worker again and stop. prompt: run one worker with your text, no
-   * ticket, and stop. Without any of them this is a work run: one lead on
-   * the goal and the board, which needs one of them to exist. Everything
-   * but init is refused while the session is not initialized: there is no
-   * environment to run in.
+   * init: initialize the environment (the clones, the container and the
+   * recipes); with `start`, go on to the lead when it succeeds. prompt: run
+   * one worker with your text, no ticket, and stop. Without either this is
+   * a work run: one lead on the goal and the board, which needs one of them
+   * to exist. Everything but init is refused while the session is not
+   * initialized: there is no environment to run in.
    */
   async start(sessionId: string, opts: RunOptions = {}): Promise<RunControl> {
     if (this.active.has(sessionId)) throw new Error("A run is already active for this session");
     const h = await this.deps.hub.get(sessionId);
     if (opts.prompt !== undefined && !opts.prompt.trim()) throw new Error("The prompt is empty");
-    if (opts.plan !== undefined && !opts.plan.trim()) throw new Error("Say what to plan");
     if (!opts.init && !isInitialized(h.session)) throw new Error("This session is not initialized: press Initialize on the session page first.");
     // A work run has nothing to do without a goal or tickets.
-    const works = (opts.init && opts.start) || (!opts.init && opts.plan === undefined && !opts.brief && !opts.setup && opts.prompt === undefined && !opts.terminal);
+    const works = (opts.init && opts.start) || (!opts.init && opts.prompt === undefined && !opts.terminal);
     if (works && !h.session.goal.trim() && !h.board.tickets.length) throw new Error("Nothing to work on: write a goal or add tickets to the board first.");
     if (opts.terminal) {
       if (!this.deps.terminal) throw new Error("Agent terminals need the Docker sandbox");
@@ -331,34 +318,6 @@ export class RunManager implements AgentRunHooks {
       .catch(() => undefined);
   }
 
-  sweepStarted(r: RunToken, ids: string[]): void {
-    const c = this.leadFor(r);
-    if (!c) return;
-    void c.log({ kind: "status", t: (this.deps.now ?? now)(), text: `sweep ${c.h.board.sweep?.n ?? "?"}: the lead took ${ids.length} chore${ids.length === 1 ? "" : "s"} (${ids.join(", ")})` }).catch(() => undefined);
-  }
-
-  /** Judge the submitted sweep while the lead waits: the checks, the size check, one commit or a refusal. */
-  sweepSubmitted(r: RunToken, results: SweepResult[]): void {
-    const c = this.leadFor(r);
-    if (!c) {
-      void this.deps.hub
-        .get(r.sessionId)
-        .then((h) => h.mutate((docs) => ({ next: { board: releaseSweep(docs.board, "Submitted after the run ended; the chores are open again and the changes stay in the working tree") } })))
-        .catch(() => undefined);
-      return;
-    }
-    c.queue = c.queue
-      .then(async () => {
-        try {
-          await this.judgeSweep(c.h, c.run, results, c.log, c.signal);
-        } catch (e) {
-          await c.log({ kind: "error", t: (this.deps.now ?? now)(), text: `judging the sweep failed: ${(e as Error).message}` });
-          await c.h.mutate((docs) => ({ next: { board: releaseSweep(docs.board, `Judging failed (${(e as Error).message.slice(0, 200)}); the chores are open again`) } })).catch(() => undefined);
-        }
-      })
-      .catch(() => undefined);
-  }
-
   /** The lead says the goal is met and the board is finished. Its life ends (after a grace period, by force) and the loop records the claim. */
   done(r: RunToken, note: string): void {
     const c = this.leadFor(r);
@@ -385,7 +344,6 @@ export class RunManager implements AgentRunHooks {
     if (c.halted) return "The run halts after you finish; stop now and reply with what you found.";
     if (c.rateLimited) return "The reviewer is rate limited: stop now and reply with one line. The run sleeps and a lead continues afterwards.";
     if (c.isPause()) return "The user asked the run to pause: start no new ticket. Reach a sensible point, bring notes/state.md up to date, then reply with one line and stop.";
-    if (c.run.ticketsDone >= c.h.session.caps.runTickets) return `This run's cap of ${c.h.session.caps.runTickets} tickets is reached; reply with one line and stop.`;
     return undefined;
   }
 
@@ -432,11 +390,10 @@ export class RunManager implements AgentRunHooks {
     const clock = d.now ?? now;
     const h = await d.hub.get(sessionId);
     const held = h.board.tickets.filter((t) => t.state === "in_progress" || t.state === "review");
-    const busy = ["running", "checking", "planning"].includes(h.session.state);
+    const busy = h.session.state === "running";
     const last = await lastRunFile(h.paths.runs);
     const runLeftOpen = last?.run.state === "running";
-    const sweep = sweepInFlight(h.board);
-    if (!held.length && !busy && !runLeftOpen && !sweep) return [];
+    if (!held.length && !busy && !runLeftOpen) return [];
     const did: string[] = [];
     const killed = await d.shell(sessionId).exec(["pkill", "-TERM", "-f", "/opt/verstas/worker.js"], { timeoutMs: 15_000 }).catch(() => null);
     if (killed?.code === 0) did.push("stopped a worker left running in the container");
@@ -450,10 +407,6 @@ export class RunManager implements AgentRunHooks {
         return { next: { board } };
       });
       did.push(`requeued ${held.map((t) => t.id).join(", ")}`);
-    }
-    if (sweep) {
-      await h.mutate((docs) => ({ next: { board: releaseSweep(docs.board, "The host app stopped during this sweep; the chores are open again and the changes stay in the working tree") } }));
-      did.push(`released sweep ${sweep.n} (${sweep.ids.join(", ")})`);
     }
     if (last && runLeftOpen) {
       const closed: Run = { ...last.run, state: "stopped", endedAt: clock(), currentTicket: undefined, pauseReason: "host app restarted" };
@@ -506,76 +459,28 @@ export class RunManager implements AgentRunHooks {
         await this.runTerminal(h, run, opts.terminal, log, ctl.signal);
       }
 
-      // Initialization and setup. init: the container and recipes are up
-      // (ensureSandbox above); a setup worker makes the box fit for the
-      // repositories unless the mode skips it. A "ready" verdict initializes
-      // the session, and with `start` the tickets follow; "needs" parks on
-      // its requests and the session stays uninitialized. setup alone (after
-      // initialization): the worker runs again and the run stops.
-      if (opts.init || opts.setup) {
+      // Initialization: the clones were made by the caller, the container and
+      // the recipes are up (ensureSandbox above). That is the environment; the
+      // lead installs what it needs as it goes. With `start`, the lead follows.
+      if (opts.init) {
         proceed = false;
-        // A session started from another's environment with the same requirements has that box's confirmed readiness: nothing for a setup worker to check.
-        const carried = Boolean(opts.init && h.session.environmentFrom?.readinessCarried && h.session.readiness?.confirmedAt);
-        const agentic = opts.setup || (h.session.setupMode !== "skip" && !carried);
-        if (opts.init) await status(agentic ? "init: container up; a setup worker makes the box fit for the repositories" : carried ? `init: container up from ${h.session.environmentFrom!.session}'s environment; its readiness carries over, no setup worker` : "init: container up; no setup worker (skipped)");
-        let ready = true;
-        if (agentic) {
-          await setSessionState("checking");
-          if (!opts.init) await status("setup: checking the environment again");
-          const answers = h.inbox.requests.filter((r) => r.state !== "open" && !r.ticketId).map(requestOutcome);
-          const done = await this.runJob(h, run, { role: "setup", promptText: setupPrompt(h.session, h.board, answers, "setup") }, log, ctl.signal);
-          addCost(run, done.costUsd);
-          await saveRun();
-          if (ctl.signal.aborted) {
-            run.state = "stopped";
-            ready = false;
-          } else {
-            const parsed = parseSetup(done.text);
-            const open = h.inbox.requests.some((r) => r.state === "open" && !r.ticketId);
-            ready = Boolean(parsed?.ready) && !open && done.ok;
-            const readiness: Readiness = {
-              verdict: ready ? "ready" : "needs",
-              at: clock(),
-              summary: parsed?.summary || (done.ok ? "the setup worker gave no SETUP line" : `the setup worker ended with ${done.stopReason}`),
-              checks: parsed?.checks ?? [],
-              confirmedAt: ready ? clock() : undefined,
-            };
-            await h.mutate((docs) => ({ next: { session: { ...docs.session, readiness } } }));
-            if (!ready) {
-              run.state = open ? "paused" : "halted";
-              run.pauseReason = open ? "requests" : `setup needs attention: ${readiness.summary.slice(0, 300)}`;
-              await status(open ? `setup needs you: ${readiness.summary.slice(0, 300)}` : `setup not ready: ${readiness.summary.slice(0, 300)}`);
-            } else await status(`setup: ready. ${readiness.summary.slice(0, 300)}`);
-          }
-        }
-        if (ready) {
-          if (opts.init) {
-            await h.mutate((docs) => ({ next: { session: { ...docs.session, initializedAt: docs.session.initializedAt ?? clock() } } }));
-            await status("init: done; the session is initialized");
-          }
-          // The box as it is now, committed: a recreated container starts from it instead of replaying the setup.
-          if (d.snapshotSandbox) {
-            const snap = await d.snapshotSandbox(h.session).catch((e: Error) => {
-              void status(`snapshot skipped: ${e.message.slice(0, 200)}`);
-              return undefined;
-            });
-            if (snap) await h.mutate((docs) => ({ next: { session: { ...docs.session, snapshot: { ...snap, at: clock() } } } }));
-          }
-          run.state = "finished";
-          if (opts.init && opts.start) {
-            proceed = true;
-            await setSessionState("running");
-          }
+        await h.mutate((docs) => ({ next: { session: { ...docs.session, initializedAt: docs.session.initializedAt ?? clock() } } }));
+        await status("init: container up; the session is initialized");
+        await this.snapshot(h, status);
+        run.state = "finished";
+        if (opts.start) {
+          proceed = true;
+          await setSessionState("running");
         }
       }
 
-      // Your prompt: one worker, your text, the notes in front, no ticket. Any
-      // repository change becomes one commit; the reply is kept on the session.
+      // Your prompt: one worker, your text, no ticket. Any repository change
+      // becomes one commit; the reply is kept on the session.
       if (opts.prompt !== undefined) {
         proceed = false;
         const text = opts.prompt;
         await status(`prompt: ${text.trim().split("\n")[0]!.slice(0, 120)}`);
-        const done = await this.runJob(h, run, { role: "prompt", promptText: await this.withNotes(h, userPrompt(text)) }, log, ctl.signal);
+        const done = await this.runJob(h, run, { role: "prompt", promptText: userPrompt(text) }, log, ctl.signal);
         addCost(run, done.costUsd);
         const leaked = await this.commitInContainer(h, `Prompt: ${text.trim().split("\n")[0]!.slice(0, 72)}`);
         if (leaked.length) await log({ kind: "error", t: clock(), text: `The Claude token appears in the changes to ${leaked.join(", ")}; nothing was committed there. Remove it from the files.` });
@@ -584,35 +489,12 @@ export class RunManager implements AgentRunHooks {
         run.state = ctl.signal.aborted ? "stopped" : "finished";
       }
 
-      // Brief only: refresh notes/brief.md with a setup worker in brief mode, then stop.
-      if (proceed && opts.brief) {
-        await setSessionState("checking");
-        await status("setup worker: refreshing the project brief");
-        const done = await this.runJob(h, run, { role: "setup", promptText: setupPrompt(h.session, h.board, [], "brief") }, log, ctl.signal);
-        addCost(run, done.costUsd);
-        await status(`brief ${(await this.readNote(h, "brief.md", 16_000)) ? "written" : "missing"} (${done.stopReason})`);
-        run.state = "finished";
-        proceed = false;
+      // The work run: one lead on the goal and the board. The box is
+      // committed to an image afterwards: the record of what the lead installed.
+      if (proceed) {
+        await this.leadLoop(h, run, ctl, log, saveRun, setSessionState);
+        await this.snapshot(h, status);
       }
-
-      // Planning: one planner worker turns your request into backlog tickets, then the run stops.
-      if (proceed && opts.plan !== undefined) {
-        proceed = false;
-        const request = opts.plan;
-        await setSessionState("planning");
-        await status(`planner: ${request.trim().split("\n")[0]!.slice(0, 120)}`);
-        const done = await this.runJob(h, run, { role: "planner", promptText: await this.withNotes(h, plannerPrompt(h.session, h.board, request)) }, log, ctl.signal);
-        addCost(run, done.costUsd);
-        await saveRun();
-        const backlog = h.board.tickets.filter((t) => t.state === "backlog").length;
-        await status(`planner finished (${done.stopReason}); ${backlog} tickets in backlog await your approval`);
-        const entry = { at: clock(), runId: run.id, kind: "plan" as const, text: request.slice(0, 20_000), reply: done.text.slice(0, 8000), stopReason: done.stopReason };
-        await h.mutate((docs) => ({ next: { session: { ...docs.session, prompts: [...docs.session.prompts, entry].slice(-20) } } }));
-        run.state = ctl.signal.aborted ? "stopped" : "finished";
-      }
-
-      // The work run: one lead on the goal and the board.
-      if (proceed) await this.leadLoop(h, run, ctl, log, saveRun, setSessionState);
       if (ctl.isStop()) {
         run.state = "stopped";
         // A stopped lead leaves its tickets in progress; put every one back, with the work kept.
@@ -625,7 +507,6 @@ export class RunManager implements AgentRunHooks {
               : {};
           });
         }
-        if (sweepInFlight(h.board)) await h.mutate((docs) => ({ next: { board: releaseSweep(docs.board, "Run stopped by the user; the chores are open again and the changes stay in the working tree") } }));
       }
     } catch (e) {
       run.state = "failed";
@@ -638,9 +519,9 @@ export class RunManager implements AgentRunHooks {
       await saveRun();
       let sessionState: Session["state"] =
         run.state === "halted" ? "halted" : run.state === "finished" ? "finished" : run.pauseReason === "requests" ? "waiting" : "paused";
-      // Not initialized: the session is still a plan, or its initialization needs you.
+      // Not initialized: the session is still a plan.
       if (!isInitialized(h.session) && sessionState !== "waiting") sessionState = "setup";
-      if (opts.terminal && run.state !== "failed" && !["running", "checking", "planning"].includes(stateBefore)) sessionState = stateBefore;
+      if (opts.terminal && run.state !== "failed" && stateBefore !== "running") sessionState = stateBefore;
       await setSessionState(sessionState).catch(() => undefined);
     }
     return run;
@@ -680,15 +561,13 @@ export class RunManager implements AgentRunHooks {
     let lastWords: string | undefined;
     let round = 0;
     let idle = 0;
-    /** A lead that was given only chores and swept none: the next life finishes instead of spending another lead. */
-    let choresIdle = false;
     let lastCommitted: string[] = [];
     /** The goal the previous life was given; a different text now means it was revised meanwhile. */
     let lastGoal: string | undefined;
     let lastDenialCheck = clock();
     const inProgress = () => h.board.tickets.filter((t) => t.state === "in_progress");
     const ready = () => h.board.tickets.filter((t) => t.state === "ready");
-    const fingerprint = () => JSON.stringify([h.board.tickets.map((t) => [t.id, t.state]), h.board.chores.map((c) => [c.id, c.state]), h.inbox.requests.length, h.inbox.messages.length]);
+    const fingerprint = () => JSON.stringify([h.board.tickets.map((t) => [t.id, t.state]), h.inbox.requests.length, h.inbox.messages.length]);
     // A continuing conversation hears only outcomes decided since its last life; a fresh lead, which remembers nothing, gets the recent ones.
     const answersSeen = new Set(h.inbox.requests.filter((r) => r.state !== "open").map((r) => r.id));
     const newAnswers = (): string[] => {
@@ -711,12 +590,6 @@ export class RunManager implements AgentRunHooks {
           run.pauseReason = `workspace is ${sizeMb} MB, over the ${h.session.limits.workspaceMb} MB limit`;
           break;
         }
-        if (round >= h.session.caps.goalRounds) {
-          run.state = "paused";
-          run.pauseReason = `${round} lead ${round === 1 ? "life" : "lives"} this run, the session's cap; look at the work, then start again`;
-          await status(run.pauseReason);
-          break;
-        }
         if (d.healSandbox) {
           const healed = await d.healSandbox(h.id).catch((e: Error) => [`heal failed: ${e.message}`]);
           for (const line of healed) await status(line);
@@ -724,17 +597,11 @@ export class RunManager implements AgentRunHooks {
         const goal = h.session.goal.trim();
         const holds = inProgress();
         const startable = ready();
-        const sweeping = Boolean(sweepInFlight(h.board));
-        const choresOpen = openChores(h.board).length;
         const openRequests = h.inbox.requests.filter((r) => r.state === "open");
-        // Only chores left on the board: one lead gets them; if it sweeps none, the run finishes rather than spend another.
-        const onlyChores = !holds.length && !startable.length && !sweeping && choresOpen > 0;
-        const boardWork = holds.length > 0 || startable.length > 0 || sweeping || (choresOpen > 0 && !choresIdle);
-        if (!goal && !boardWork) {
+        if (!goal && !holds.length && !startable.length) {
           run.state = hasOpenWork(h.board) || openRequests.length ? "paused" : "finished";
-          const blockers = describeBlockers(h.board);
-          run.pauseReason = openRequests.length ? "requests" : hasOpenWork(h.board) ? blockers || "waiting on dependencies" : undefined;
-          await status(openRequests.length ? "nothing to work on; waiting for your answers in the inbox" : run.state === "finished" ? (choresOpen ? `no ready tickets left; ${choresOpen} ${choresOpen === 1 ? "chore stays" : "chores stay"} open (the lead did not sweep them)` : "no ready tickets left") : `nothing can run: ${blockers}`);
+          run.pauseReason = openRequests.length ? "requests" : hasOpenWork(h.board) ? "waiting on the reviewer" : undefined;
+          await status(openRequests.length ? "nothing to work on; waiting for your answers in the inbox" : run.state === "finished" ? "no ready tickets left" : "nothing can run");
           break;
         }
         // A request about the work itself (not a ticket) waits on you; the lead goes on only while tickets can.
@@ -754,9 +621,8 @@ export class RunManager implements AgentRunHooks {
         const agentSession = agent.driver === "claude" ? (resume ? { id: convoId!, resume: true } : { id: randomUUID(), resume: false }) : undefined;
         const revised = lastGoal !== undefined && lastGoal !== goal;
         const sinceLastLife = newAnswers();
-        const sweepAt = h.session.caps.choreSweepAt;
-        const freshPrompt = async () => this.withNotes(h, leadPrompt(h.board, await this.leadPromptOptions(h, { round, goal, holds, handoff: handoffNote, lastWords, onlyChores, sweepAt, answers: recentAnswers() })));
-        const promptText = resume ? leadContinuePrompt(h.board, { round, committed: lastCommitted, holds, goal: revised ? goal : undefined, goalChangedAt: h.session.goalSince, answers: sinceLastLife, onlyChores, sweepAt }) : await freshPrompt();
+        const freshPrompt = async () => leadPrompt(h.board, await this.leadPromptOptions(h, { round, goal, holds, handoff: handoffNote, lastWords, answers: recentAnswers() }));
+        const promptText = resume ? leadContinuePrompt(h.board, { round, committed: lastCommitted, holds, goal: revised ? goal : undefined, goalChangedAt: h.session.goalSince, answers: sinceLastLife }) : await freshPrompt();
         lastGoal = goal;
         const leadAbort = new AbortController();
         const onStop = () => leadAbort.abort();
@@ -840,10 +706,7 @@ export class RunManager implements AgentRunHooks {
           convoId = lead.agentSession && lead.turns > 0 ? lead.agentSession : undefined;
         }
 
-        const boardMoved = fingerprint() !== before;
-        const moved = committed.length > 0 || boardMoved || noteAfter !== noteBefore || Boolean(handedOff);
-        // Given only chores, a lead that swept none is done with them whatever else it committed.
-        if (onlyChores) choresIdle = !boardMoved;
+        const moved = committed.length > 0 || fingerprint() !== before || noteAfter !== noteBefore || Boolean(handedOff);
         idle = moved ? 0 : idle + 1;
         if (idle >= 2) {
           run.state = "paused";
@@ -868,9 +731,19 @@ export class RunManager implements AgentRunHooks {
         for (const t of h.board.tickets.filter((x) => x.state === "in_progress")) {
           await h.mutate((docs) => (getTicket(docs.board, t.id).state === "in_progress" ? { next: { board: transition(docs.board, t.id, "ready", { by: "harness", text: "The lead's run ended while it worked this ticket; requeued with the work kept" }) } } : {})).catch(() => undefined);
         }
-        if (sweepInFlight(h.board)) await h.mutate((docs) => ({ next: { board: releaseSweep(docs.board, "The lead's run ended during this sweep; the chores are open again and the changes stay in the working tree") } })).catch(() => undefined);
       }
     }
+  }
+
+  /** The box as it is now, committed to an image: a recreated container starts from it, with what the lead installed. Best effort. */
+  private async snapshot(h: SessionHandle, status: (text: string) => Promise<void>): Promise<void> {
+    if (!this.deps.snapshotSandbox) return;
+    const clock = this.deps.now ?? now;
+    const snap = await this.deps.snapshotSandbox(h.session).catch((e: Error) => {
+      void status(`snapshot skipped: ${e.message.slice(0, 200)}`);
+      return undefined;
+    });
+    if (snap) await h.mutate((docs) => ({ next: { session: { ...docs.session, snapshot: { ...snap, at: clock() } } } }));
   }
 
   /**
@@ -919,75 +792,6 @@ export class RunManager implements AgentRunHooks {
       if (!noteAt || noteAt < s.goalSince) goalChange = { kind: last.outcome === "met" ? "next" : "revised", at: last.until, previous: last.text, note: last.note };
     }
     return { ...base, stateNote, goalChange, metBefore: base.goal && s.goalMet ? { at: s.goalMet.at, note: s.goalMet.note } : undefined, history };
-  }
-
-  /**
-   * The verdict on a chore sweep: a size check (lines, files, protected
-   * paths), then the session's reviewer over the batch when the session has
-   * one, then one commit for the batch, or a refusal that leaves the changes
-   * in the working tree. Without a reviewer the size check is all that
-   * stands in for one, so it is strict either way.
-   */
-  async judgeSweep(h: SessionHandle, run: Run, results: readonly SweepResult[], log: (e: VerstasEvent) => Promise<void>, signal: AbortSignal): Promise<"accepted" | "refused"> {
-    const clock = this.deps.now ?? now;
-    const sw = sweepInFlight(h.board);
-    if (!sw) return "refused";
-    const caps = h.session.caps;
-    const sh = this.deps.shell(h.id);
-    const changes = await this.collectChanges(h);
-    const added = sum(changes, "added");
-    const removed = sum(changes, "removed");
-    const files = sum(changes, "files");
-    const touched = changes.map((c) => c.repo);
-    const protectedHits = changes.flatMap((c) => c.paths.filter((p) => matchesAnyGlob(p, SWEEP_PROTECTED_GLOBS)).map((p) => `${c.repo}/${p}`));
-    const lines = added + removed;
-    let refusal: string | undefined;
-    if (signal.aborted) refusal = "the run stopped before the sweep was judged";
-    else if (protectedHits.length) refusal = `a sweep may not change ${protectedHits.slice(0, 6).join(", ")}${protectedHits.length > 6 ? ` and ${protectedHits.length - 6} more` : ""}: contract documents and fixtures change through a ticket, with a reviewer. Revert those files, or claim a ticket that covers the change.`;
-    else if (files > caps.sweepMaxFiles || lines > caps.sweepMaxLines) refusal = `too large for a sweep: ${files} files, ${lines} lines changed (limits ${caps.sweepMaxFiles} files, ${caps.sweepMaxLines} lines). The changes stay in the working tree: claim a ticket that covers them (file one with board_create_ticket if none fits), or revert.`;
-    const counts = { done: results.filter((r) => r.outcome === "done").length, dropped: results.filter((r) => r.outcome === "dropped").length, promoted: results.filter((r) => r.outcome === "promoted").length };
-    const settle = async (accepted: boolean, note: string) => {
-      const out = await h.mutate((docs) => {
-        const r = settleSweep(docs.board, results, { accepted, note, diff: { added, removed, files } });
-        return { next: { board: r.board }, result: r };
-      });
-      await log({ kind: "chores", t: clock(), sweep: sw.n, accepted, done: out.done.length, dropped: out.dropped.length, promoted: out.promoted.length, note });
-      await log({ kind: "status", t: clock(), text: `sweep ${sw.n} ${accepted ? "committed" : "refused"}: ${note.slice(0, 300)}` });
-      return out;
-    };
-    const refuse = async (why: string) => {
-      // Unstage but keep the working tree: the lead decides what becomes a ticket and what is reverted.
-      for (const repo of touched) await sh.exec(["git", "reset", "-q"], { workdir: `/workspace/${repo}`, timeoutMs: 60_000 });
-      await settle(false, why);
-      return "refused" as const;
-    };
-    if (refusal) return refuse(refusal);
-    const chores = h.board.chores;
-    // The session's reviewer judges the batch like a ticket's change; a sweep that changed nothing has nothing to review.
-    if (caps.reviewer && files) {
-      const rev = await this.runJob(h, run, { role: "reviewer", promptText: await this.withNotes(h, sweepReviewerPrompt(sw, chores, results, changes)) }, log, signal);
-      addCost(run, rev.costUsd);
-      if (signal.aborted) return refuse("the run stopped before the sweep was judged");
-      if (rev.rateLimited) return refuse("the reviewer was rate limited; sweep again later (the changes stay in the working tree)");
-      const parsed = parseVerdict(rev.text);
-      if (parsed?.verdict !== "ok") return refuse(`the reviewer did not accept the sweep (${parsed ? `${parsed.verdict}: ${parsed.reason}` : `no verdict, ${rev.stopReason}`}). Read its notes; fix and sweep again, split the change into a ticket, or revert.`);
-    }
-    const lineFor = (r: SweepResult) => {
-      const c = chores.find((x) => x.id === r.id);
-      return `- ${r.id} ${r.outcome}${r.outcome === "done" ? "" : ` (${r.note?.trim() || "no reason given"})`}: ${c?.text.split("\n")[0] ?? ""}${c?.where ? ` [${c.where}]` : ""}`;
-    };
-    const subject = `Chores (sweep ${sw.n}): ${[counts.done ? `${counts.done} done` : "", counts.dropped ? `${counts.dropped} dropped` : "", counts.promoted ? `${counts.promoted} promoted` : ""].filter(Boolean).join(", ") || "nothing settled"}`;
-    const message = `${subject}\n\n${results.map(lineFor).join("\n")}`;
-    const leaked = files ? await this.commitInContainer(h, message) : [];
-    if (leaked.length) {
-      await settle(false, `The Claude token appears in the changes to ${leaked.join(", ")}; nothing was committed. Remove it from the files and sweep again.`);
-      return "refused";
-    }
-    const note = `${subject}${files ? ` · ${files} files, +${added} −${removed}` : " · no files changed"}`;
-    const out = await settle(true, note);
-    if (out.promoted.length) await log({ kind: "status", t: clock(), text: `sweep ${sw.n}: promoted ${out.promoted.map((p) => `${p.chore} → ${p.ticket}`).join(", ")} to the backlog` });
-    addCost(run, 0);
-    return "accepted";
   }
 
   /** A ticket with open requests waits for them (or halts the run); its changes stay in the working tree and in the lead's commits. */
@@ -1052,10 +856,13 @@ export class RunManager implements AgentRunHooks {
       verdict = "ok";
     } else {
       if (signal.aborted) return "requeued";
-      const rev = await this.runJob(h, run, { role: "reviewer", ticket: ticketId, promptText: await this.withNotes(h, reviewerPrompt(getTicket(h.board, ticketId), changes, { why: level.why, planned })) }, log, signal);
+      const rev = await this.runJob(h, run, { role: "reviewer", ticket: ticketId, promptText: reviewerPrompt(getTicket(h.board, ticketId), changes, { why: level.why, planned }) }, log, signal);
       addCost(run, rev.costUsd);
       await this.writeTicketReport(h, run, ticketId, "reviewer", rev);
       if (rev.rateLimited) {
+        // Mark the lead's run first: the move below wakes a lead waiting on the verdict, and its next move into progress must already be refused.
+        const lead = this.leads.get(h.id);
+        if (lead && lead.runId === run.id) lead.rateLimited = true;
         await move("ready", "Reviewer was rate limited; requeued with the work kept");
         return "rate_limited";
       }
@@ -1065,11 +872,7 @@ export class RunManager implements AgentRunHooks {
       verdictNote = parsed?.reason ?? `reviewer gave no verdict (${rev.stopReason})`;
     }
 
-    // One judged attempt, whatever the verdict.
-    await h.mutate((docs) => {
-      const t = getTicket(docs.board, ticketId);
-      return { next: { board: replaceTicket(docs.board, { ...t, attempts: t.attempts + 1, touched }) } };
-    });
+    await h.mutate((docs) => ({ next: { board: replaceTicket(docs.board, { ...getTicket(docs.board, ticketId), touched }) } }));
 
     if (verdict === "ok") {
       // The lead's commits carry the ticket; what is still uncommitted is
@@ -1118,7 +921,7 @@ export class RunManager implements AgentRunHooks {
     const h = await this.deps.hub.get(sessionId);
     const ticket = ticketId ? h.board.tickets.find((t) => t.id === ticketId) : undefined;
     const changes = await this.collectChanges(h, ticket?.id);
-    const level = ticket ? reviewLevel(ticket, h.session.caps) : { mode: h.session.caps.reviewer ? ("full" as const) : ("none" as const), why: "a sweep takes the session's setting" };
+    const level = ticket ? reviewLevel(ticket, h.session.caps) : { mode: h.session.caps.reviewer ? ("full" as const) : ("none" as const), why: "the session's setting" };
     return {
       ticket: ticket?.id,
       touched: changes.map((c) => ({ repo: c.repo, files: c.files, added: c.added, removed: c.removed, paths: c.paths.slice(0, 50), commits: c.commits })),
@@ -1162,7 +965,7 @@ export class RunManager implements AgentRunHooks {
     const dir = path.join(h.paths.workspace, rel);
     await fs.mkdir(dir, { recursive: true });
     await fs.writeFile(path.join(dir, "prompt.md"), job.promptText);
-    await fs.writeFile(path.join(dir, "system.md"), systemMd(job.role, job.role === "lead" ? await readLeadRules() : undefined, h.session.planning));
+    await fs.writeFile(path.join(dir, "system.md"), systemMd(job.role, job.role === "lead" ? await readLeadRules() : undefined));
     // The reviewer may be a different agent than the worker (session.agents); everything else about the job is the same.
     const agent = agentFor(h.session, job.role);
     const spec: Job = {
@@ -1171,14 +974,8 @@ export class RunManager implements AgentRunHooks {
       driver: agent.driver,
       promptFile: `/workspace/${rel}/prompt.md`,
       systemPromptFile: `/workspace/${rel}/system.md`,
-      caps:
-        // The lead's caps are optional liveness limits; unset, only the budget, a handoff or the user ends a life.
-        job.role === "lead"
-          ? { minutes: h.session.caps.leadMinutes ?? NO_CAP_MINUTES, turns: h.session.caps.leadTurns ?? NO_CAP_TURNS, budgetUsd: h.session.caps.budgetUsd }
-          : job.role === "setup"
-            ? // Setup installs toolchains and runs every repository's check once; most of its time is waiting on those, not model turns.
-              { minutes: Math.max(h.session.caps.workerMinutes, SETUP_MIN_MINUTES), turns: Math.max(h.session.caps.workerTurns, SETUP_MIN_TURNS), budgetUsd: h.session.caps.budgetUsd }
-            : { minutes: h.session.caps.workerMinutes, turns: h.session.caps.workerTurns, budgetUsd: h.session.caps.budgetUsd },
+      // The lead's caps are optional liveness limits; nobody else has any.
+      caps: job.role === "lead" ? { minutes: h.session.caps.leadMinutes, turns: h.session.caps.leadTurns } : {},
       mcpConfigFile: `/workspace/${WORKSPACE_FILES}/mcp.json`,
       model: agent.model || undefined,
       budgetFile: `/workspace/${rel}/budget.json`,
@@ -1214,8 +1011,8 @@ export class RunManager implements AgentRunHooks {
 
   /**
    * An agent terminal, start to end: the rules and job file in a job
-   * directory, a run token with the terminal's permissions (it plans like
-   * the planner, holds no ticket, asks you directly), the agent's own
+   * directory, a run token with the terminal's permissions (it plans with
+   * you and asks you directly), the agent's own
    * interface on a TTY the page attaches to, and when it exits or the run
    * is stopped, one commit of whatever changed in the repositories.
    */
@@ -1228,7 +1025,7 @@ export class RunManager implements AgentRunHooks {
     const rel = `${WORKSPACE_FILES}/jobs/${name}`;
     const dir = path.join(h.paths.workspace, rel);
     await fs.mkdir(dir, { recursive: true });
-    await fs.writeFile(path.join(dir, "rules.md"), terminalMd(h.session, spec.driver));
+    await fs.writeFile(path.join(dir, "rules.md"), terminalMd(spec.driver));
     // The session's worker model when the worker runs on the same driver; else the CLI's default.
     const worker = agentFor(h.session, "lead");
     const job: TerminalJob = {
@@ -1284,11 +1081,6 @@ export class RunManager implements AgentRunHooks {
     return text.length > cap ? text.slice(0, cap) + `\n\n(${name} truncated at ${cap} characters; shorten it)` : text;
   }
 
-  /** The brief and the environment description in front of a worker's task. */
-  private async withNotes(h: SessionHandle, prompt: string): Promise<string> {
-    return withContext(await this.readNote(h, "brief.md", 16_000), await this.readNote(h, "env.md", 8_000), prompt);
-  }
-
   private async writeWorkspaceFiles(h: SessionHandle): Promise<void> {
     const ws = h.paths.workspace;
     // Job directories of earlier runs; no worker of this session is running now.
@@ -1303,10 +1095,6 @@ export class RunManager implements AgentRunHooks {
     // user-level file the Cursor driver writes for the run (src/worker/driver-cursor.ts). Remove one left by earlier versions.
     await fs.rm(path.join(ws, ".cursor", "mcp.json"), { force: true });
     await fs.mkdir(h.paths.notes, { recursive: true });
-    const index = path.join(h.paths.notes, "INDEX.md");
-    await fs.access(index).catch(() => fs.writeFile(index, notesIndexMd()));
-    const learnings = path.join(h.paths.notes, "learnings.md");
-    await fs.access(learnings).catch(() => fs.writeFile(learnings, "# Learnings\n\n"));
   }
 
   private async writeTicketReport(h: SessionHandle, run: Run, ticketId: string, role: string, done: WorkerDone): Promise<void> {
@@ -1465,39 +1253,6 @@ const nextRunId = async (runsDir: string): Promise<number | undefined> => {
   } catch {
     return undefined;
   }
-};
-
-/** "T-2, T-3 and 7 more wait on T-1 (blocked)" — why nothing is ready. */
-export const describeBlockers = (board: Board): string => {
-  const waiting = board.tickets.filter((t) => t.state === "ready" && t.deps.some((d) => !board.tickets.some((x) => x.id === d && x.state === "done")));
-  if (!waiting.length) return "";
-  const byDep = new Map<string, string[]>();
-  for (const t of waiting) {
-    for (const d of t.deps) {
-      const dep = board.tickets.find((x) => x.id === d);
-      if (dep?.state === "done") continue;
-      const key = dep ? `${dep.id} (${dep.state})` : `${d} (missing)`;
-      byDep.set(key, [...(byDep.get(key) ?? []), t.id]);
-    }
-  }
-  return [...byDep.entries()]
-    .map(([dep, ids]) => `${ids.length > 3 ? `${ids.slice(0, 3).join(", ")} and ${ids.length - 3} more` : ids.join(", ")} wait on ${dep}`)
-    .join("; ");
-};
-
-/** "SETUP: ready|needs", then "- [x] requirement (how)" lines, then a summary. */
-export const parseSetup = (text: string): { ready: boolean; checks: { text: string; ok: boolean }[]; summary: string } | null => {
-  const m = /SETUP:\s*(ready|needs)\b/i.exec(text);
-  if (!m) return null;
-  const rest = text.slice((m.index ?? 0) + m[0].length).split("\n").map((l) => l.trim()).filter(Boolean);
-  const checks: { text: string; ok: boolean }[] = [];
-  const other: string[] = [];
-  for (const l of rest) {
-    const c = /^[-*]\s*\[([ xX])\]\s*(.+)$/.exec(l);
-    if (c) checks.push({ ok: c[1] !== " ", text: c[2]!.slice(0, 1000) });
-    else other.push(l);
-  }
-  return { ready: m[1]!.toLowerCase() === "ready", checks: checks.slice(0, 60), summary: other.slice(0, 12).join(" ").slice(0, 2000) };
 };
 
 export const parseVerdict = (text: string): { verdict: "ok" | "fixable" | "blocked"; reason: string } | null => {

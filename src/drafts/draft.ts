@@ -3,7 +3,6 @@ import {
   importRepos,
   BOARD_FORMAT_VERSION,
   HOSTNAME_PATTERN,
-  planningSchema,
   TICKET_ID_PATTERN,
   ticketIdSchema,
   ticketImportSchema,
@@ -83,10 +82,8 @@ export const draftSchema = z.object({
   verstasDraft: z.literal(DRAFT_FORMAT_VERSION),
   id: z.string().regex(DRAFT_ID_PATTERN),
   name: z.string().trim().min(1).max(200),
-  /** The session goal: workers read it on every ticket; the planner drafts tickets from it. */
+  /** The session goal: what the lead works toward beside the board. */
   goal: z.string().max(20_000).default(""),
-  /** Session requirements, one per line: what the box must do before any ticket runs. */
-  requirements: z.string().max(20_000).default(""),
   /** For the person who reviews the draft: assumptions, open questions, what was left out. */
   notes: z.string().max(20_000).default(""),
   repos: z.array(draftRepoSchema).max(20).default([]),
@@ -95,8 +92,7 @@ export const draftSchema = z.object({
   /** Recipe names from the library, in the order they run. */
   recipes: z.array(z.string().regex(SCRIPT_NAME_PATTERN)).max(30).default([]),
   tickets: z.array(draftTicketSchema).max(MAX_DRAFT_TICKETS).default([]),
-  /** The ticket size the session's planning agents aim for; absent, they choose. */
-  planning: planningSchema.optional(),
+  // Drafts from before carry `requirements` and `planning`; they are dropped on parse.
   createdBy: z.enum(["agent", "user"]).default("agent"),
   createdAt: z.string(),
   updatedAt: z.string(),
@@ -143,7 +139,7 @@ const nextId = (taken: Iterable<string>): string => {
   return `T-${max + 1}`;
 };
 
-/** Input for a new ticket: the import shape, id optional. Defaults: kind feature, size M, priority 100, state ready. */
+/** Input for a new ticket: the import shape, id optional. Defaults: kind feature, priority 100, state ready. */
 export type NewTicket = TicketImport;
 
 /**
@@ -270,7 +266,7 @@ export const validateDraft = (draft: Draft, env: DraftEnv): DraftProblems => {
   for (const name of draft.recipes) if (!env.recipes.includes(name)) errors.push(`Recipe "${name}" is not in the library`);
   if (new Set(draft.recipes).size !== draft.recipes.length) warnings.push("A recipe is listed twice; it would run twice");
 
-  if (!draft.tickets.length && !draft.goal.trim()) errors.push("Nothing to work on: add tickets, or a goal the planner can draft tickets from");
+  if (!draft.tickets.length && !draft.goal.trim()) errors.push("Nothing to work on: add tickets, a goal for the lead, or both");
   const ids = new Set(draft.tickets.map((t) => t.id));
   for (const t of draft.tickets) {
     for (const r of draftRepos(t).filter((x) => !dirs.includes(x))) {
@@ -290,8 +286,6 @@ export const validateDraft = (draft: Draft, env: DraftEnv): DraftProblems => {
   if (noAcceptance.length) warnings.push(`No acceptance criteria: ${noAcceptance.join(", ")} (the reviewer has nothing to check)`);
   const noSpec = draft.tickets.filter((t) => !(t.spec ?? "").trim()).map((t) => t.id);
   if (noSpec.length) warnings.push(`No spec: ${noSpec.join(", ")} (a fresh worker sees only the title)`);
-  const large = draft.tickets.filter((t) => t.size === "L").map((t) => t.id);
-  if (large.length) warnings.push(`Size L: ${large.join(", ")} (consider splitting; one worker has a fixed time and turn budget)`);
   if (dirs.length > 1) {
     const noRepo = draft.tickets.filter((t) => !draftRepos(t).length).map((t) => t.id);
     if (noRepo.length) warnings.push(`No repo on ${noRepo.join(", ")} while the draft has ${dirs.length} repositories`);
@@ -311,7 +305,6 @@ export const draftBoard = (draft: Draft): BoardImport & { verstas: number } => (
   verstas: BOARD_FORMAT_VERSION,
   goal: draft.goal,
   tickets: draft.tickets.map((t) => ({ ...t, state: t.state ?? "ready" })),
-  chores: [],
 });
 
 export const draftBoardText = (draft: Draft): string => JSON.stringify(draftBoard(draft), null, 2) + "\n";
@@ -322,12 +315,9 @@ export const ticketSummary = (t: DraftTicket) => ({
   title: t.title,
   kind: t.kind ?? "feature",
   repos: draftRepos(t),
-  size: t.size ?? "M",
   priority: t.priority ?? 100,
   deps: t.deps ?? [],
   state: t.state ?? "ready",
-  pinned: t.pinned ?? false,
-  agent: t.agent,
   acceptance: (t.acceptance ?? []).length,
   specChars: (t.spec ?? "").length,
 });

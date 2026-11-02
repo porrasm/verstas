@@ -1,7 +1,7 @@
 import { test, expect } from "@playwright/test";
 import { translateLine } from "../../src/worker/translate.js";
 
-const ctx = { ticket: "T-7", role: "implementer" as const, now: () => "2026-10-03T10:00:00.000Z" };
+const ctx = { ticket: "T-7", role: "lead" as const, now: () => "2026-10-03T10:00:00.000Z" };
 
 test("init line becomes a status with model and mcp servers", () => {
   const out = translateLine(

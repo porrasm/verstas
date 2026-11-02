@@ -174,8 +174,8 @@ test("the terminal wrapper starts Claude Code with the board server and the term
 
 test("the agent in a terminal sees the planning tools but not reports, requests, halt or the lead's tools", () => {
   const names = visibleTools("terminal").map((t) => t.name);
-  expect(names).toEqual(expect.arrayContaining(["board_list_tickets", "board_get_ticket", "board_create_ticket", "board_add_note", "board_set_priority", "board_add_dep", "chore", "chores_list", "chore_drop", "idea", "message"]));
-  for (const hidden of ["board_report", "request", "halt", "budget", "board_move", "done", "chores_sweep", "handoff"]) expect(names).not.toContain(hidden);
+  expect(names).toEqual(expect.arrayContaining(["board_list_tickets", "board_get_ticket", "board_create_ticket", "board_add_note", "board_set_priority", "board_add_dep", "idea", "message"]));
+  for (const hidden of ["board_report", "request", "halt", "budget", "board_move", "done", "handoff"]) expect(names).not.toContain(hidden);
 });
 
 test("every agent creates tickets of any kind; the terminal agent may make one ready, the lead may start one, nobody else chooses a state", () => {
@@ -225,10 +225,10 @@ const mergeBoard = () => {
   return b;
 };
 
-test("a merge: the kept ticket is edited (pinned too), the others are deleted and their dependents follow", () => {
-  let b = editTicket(mergeBoard(), "T-1", { title: "Parser with tests", acceptance: ["parses", "tested"], size: "L", state: "backlog" }, "merged T-2 into it");
+test("a merge: the kept ticket is edited, the others are deleted and their dependents follow", () => {
+  let b = editTicket(mergeBoard(), "T-1", { title: "Parser with tests", acceptance: ["parses", "tested"], state: "backlog" }, "merged T-2 into it");
   const t1 = getTicket(b, "T-1");
-  expect(t1).toMatchObject({ title: "Parser with tests", acceptance: ["parses", "tested"], size: "L", state: "backlog", spec: "" });
+  expect(t1).toMatchObject({ title: "Parser with tests", acceptance: ["parses", "tested"], state: "backlog", spec: "" });
   expect(t1.notes.at(-1)?.text).toContain("merged T-2 into it");
   b = deleteTicket(b, "T-2", "merged into T-1", "T-1");
   expect(b.tickets.map((t) => t.id)).toEqual(["T-1", "T-3", "T-4", "T-5"]);
@@ -288,7 +288,7 @@ test("a terminal's token creates features into the backlog or, when asked, ready
     const filed = await fetch(`http://127.0.0.1:${port}/agent/tickets`, { method: "POST", headers: { authorization: `Bearer ${worker}`, "content-type": "application/json" }, body: JSON.stringify({ title: "Sneaky", kind: "bug", spec: "…", state: "ready" }) });
     expect(((await filed.json()) as { state: string }).state).toBe("backlog");
     // Only the lead and the terminal agent edit or delete.
-    for (const role of ["worker", "planner"] as const) {
+    for (const role of ["worker"] as const) {
       const other = tokens.issue({ sessionId: s.id, runId: 1, role });
       const del = await fetch(`http://127.0.0.1:${port}/agent/tickets/${made.json.id}`, { method: "DELETE", headers: { authorization: `Bearer ${other}`, "content-type": "application/json" }, body: JSON.stringify({ reason: "x" }) });
       expect(del.status).toBe(403);

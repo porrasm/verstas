@@ -1,5 +1,9 @@
 # Verstas web UI audit (2026-10-03)
 
+A record of the UI as it was then. Several things it mentions are gone since
+the one-lead change (docs/ONE-LEAD.md): ticket sizes, pins, attempts, the
+chore list, the setup worker and Plan tickets.
+
 Scope: the four pages of the React UI under `web/src` as served by the host
 app on 127.0.0.1:4700, viewed at 1440, 1100, 768 and 375 px wide, with the
 finished session `2026-10-03-capability-test-v5` (11 done tickets, 6 runs) and

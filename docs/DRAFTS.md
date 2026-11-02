@@ -8,15 +8,14 @@ only you create, start or run.
 
 | Field | Notes |
 | --- | --- |
-| Name, goal | The goal becomes the first planning request on the session page (Plan tickets); it is not part of the setup and workers do not read it. |
-| Session requirements | Instructions for the setup worker, on top of what it works out from the repositories and the board. |
+| Name, goal | The goal is what the lead works toward beside the board. A draft may have a goal, tickets, or both. |
 | Notes | For you: the assistant's assumptions and open questions. |
 | Repositories | GitHub repositories from Settings, with a branch and an optional directory name. A draft cannot add repositories. |
 | Network | Packs and extra hosts. The Claude API is always on. |
 | Recipes | Library recipes by name. A draft never carries a script of its own. |
-| Board | Tickets in the board format (`docs/BOARD.md`), including a ticket's optional `agent` (its own driver and model) and chores. |
+| Board | Tickets in the board format (`docs/BOARD.md`). |
 
-Left out on purpose: caps, budget, model, memory limits and attachments. You
+Left out on purpose: caps, model, memory limits and attachments. You
 set those on the session page, before you initialize.
 
 Drafts are files in `~/.verstas/drafts/<id>.json` (`$VERSTAS_HOME/drafts`),
@@ -54,7 +53,7 @@ validate it, and give you the review link.
 | `list_recipes` | The recipe library, optionally with the scripts. |
 | `draft_list`, `draft_get`, `draft_get_ticket` | Read drafts. |
 | `draft_create` | A new draft from a name and a goal. |
-| `draft_update` | Name, goal, requirements, notes. |
+| `draft_update` | Name, goal, notes. |
 | `draft_set_repositories`, `draft_set_network`, `draft_set_recipes` | Replace those lists. Unknown repositories, branches, packs and recipes are refused. |
 | `draft_add_tickets` | Up to 20 tickets per call. A dependency on a ticket added later is allowed and shows as a problem until it exists. |
 | `draft_update_ticket`, `draft_remove_tickets` | Edit tickets. Removing a ticket drops it from other tickets' deps and says which. |
@@ -71,8 +70,8 @@ list.
 1. The draft appears on the Sessions page as it is written; its page
    (`#/d/<id>`) follows the assistant's edits live.
 2. **Continue to create session** opens the New session form with the
-   draft's name and board; its repositories, requirements, packs and
-   recipes come along.
+   draft's name, goal and board; its repositories, packs and recipes come
+   along.
 3. **Create** is the normal create call with the draft's id. The session
    is a plan: change anything on its page (repositories, caps, agents,
    attachments), then press Initialize. The draft is marked with the

@@ -5,6 +5,11 @@ further context: what, why, how, what stays compatible, what to test, which
 docs to touch. Sizes: S under half a day, M about a day, L several days.
 Progress goes in a `Status:` line under the heading.
 
+**Direction (2026-11-02).** One lead, kept alive, works the session's
+goal and board with full autonomy; the harness keeps it alive and runs the
+independent review, nothing more (docs/ONE-LEAD.md). Items below that
+assume a setup worker, chores, ticket sizes or several modes are history.
+
 **Direction (2026-10-04).** Verstas is a loop manager: a box that can
 become any development environment, a loop that says "do the next item",
 and a boundary that makes it safe to walk away. Setup is the one place a

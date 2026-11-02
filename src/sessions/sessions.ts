@@ -11,7 +11,6 @@ import {
   type Session,
   type SessionAgents,
   type SessionSetupScript,
-  type SetupMode,
 } from "../core/types.js";
 import { writeJsonAtomic, saveBoard } from "../board/store.js";
 import { emptyBoard } from "../board/board.js";
@@ -102,16 +101,13 @@ export const makeSessionId = async (root: string, name: string, date = new Date(
 
 export type CreateSessionInput = {
   name: string;
-  /** A draft's goal, kept as the first suggestion for the Plan tickets box; nothing else reads it. */
+  /** The goal the lead works toward beside the board; empty when the board alone is the work. */
   goal?: string;
   repos: { target: WorkTarget; branch?: string; name?: string }[];
   zips: { name: string; file: string }[];
   /** Extra hosts beyond the packs; with no packs given, the whole allowlist (older callers). */
   allowlist?: string[];
   packs?: string[];
-  requirements?: string;
-  /** Absent means agentic, the schema's default. */
-  setupMode?: SetupMode;
   image: string;
   /** Legacy: the worker's Claude model. New callers pass `agents`. */
   model?: string;
@@ -119,14 +115,12 @@ export type CreateSessionInput = {
   setupScripts?: SessionSetupScript[];
   caps?: Partial<Session["caps"]>;
   limits?: Partial<Session["limits"]>;
-  /** How planning agents size tickets; absent, they choose. */
-  planning?: Session["planning"];
 };
 
 /** The packs plus the one each chosen agent's backend lives in (the Claude pack is always on through packHosts). */
-export const withAgentPacks = (packs: readonly string[], s: { model?: string; agents?: SessionAgents; caps?: { reviewer?: boolean } }, board?: Parameters<typeof sessionDrivers>[1]): string[] => {
+export const withAgentPacks = (packs: readonly string[], s: { model?: string; agents?: SessionAgents; caps?: { reviewer?: boolean } }): string[] => {
   const out = [...packs];
-  for (const d of sessionDrivers(s, board)) {
+  for (const d of sessionDrivers(s)) {
     const p = driverPack(d);
     if (!out.includes(p)) out.push(p);
   }
@@ -188,8 +182,6 @@ export const createSession = async (root: string, input: CreateSessionInput): Pr
     image: input.image,
     model: input.model?.trim() || undefined,
     agents: input.agents ?? {},
-    requirements: input.requirements?.trim() ?? "",
-    setupMode: input.setupMode,
     setupScripts: input.setupScripts ?? [],
     // Packs plus extra hosts; hosts the chosen scripts download from join too. The agents' own backends come with the agent choice.
     packs: withAgentPacks(input.packs ?? (input.allowlist ? [] : [...DEFAULT_PACKS]), input),
@@ -201,7 +193,6 @@ export const createSession = async (root: string, input: CreateSessionInput): Pr
     ],
     caps: input.caps ?? {},
     limits: input.limits ?? {},
-    planning: input.planning,
   });
 
   try {
@@ -233,8 +224,7 @@ export const createSession = async (root: string, input: CreateSessionInput): Pr
 /**
  * A copy of each recipe, readable in the session directory (the container
  * runs the copy), and the environment description a recipe brings along
- * for the setup worker to verify. Stale copies of recipes no longer chosen
- * are removed.
+ * for the lead to read. Stale copies of recipes no longer chosen are removed.
  */
 export const writeRecipeFiles = async (paths: SessionPaths, scripts: readonly SessionSetupScript[]): Promise<void> => {
   await fs.mkdir(paths.setup, { recursive: true });
@@ -244,7 +234,7 @@ export const writeRecipeFiles = async (paths: SessionPaths, scripts: readonly Se
   const envs = scripts.filter((sc) => sc.env.trim());
   const envFile = path.join(paths.notes, "env.md");
   const current = await fs.readFile(envFile, "utf8").catch(() => "");
-  // Only a recipe-written env.md is replaced; one the setup worker wrote is its own.
+  // Only a recipe-written env.md is replaced; one a lead wrote is its own.
   if (envs.length && (!current || current.startsWith("<!-- from recipe "))) {
     await fs.mkdir(paths.notes, { recursive: true });
     await fs.writeFile(envFile, envs.map((sc) => `<!-- from recipe ${sc.name}; true for the session it was saved from, verify here -->\n${sc.env.trim()}`).join("\n\n") + "\n");
@@ -334,36 +324,19 @@ export const writeAllowlist = async (paths: SessionPaths, allowlist: readonly st
   await fs.rename(tmp, paths.allowlist);
 };
 
-export const LEGACY_PREFLIGHT_REQUIREMENTS = "The goal and the board can be worked in this box: the tools, services and network hosts the tickets need are present and verified by running them.";
 
-/**
- * Sessions from before the setup phase: an "agentic initialization" tick
- * (caps.preflight) becomes generic requirements, and a passed check counts
- * as confirmed so a running session is not gated after an upgrade.
- *
- * Sessions from before initialization existed (no `initializedAt` field)
- * were cloned at creation, so they count as initialized from their creation,
- * unless they were still gated by unconfirmed requirements: those stay
- * uninitialized and finish through the Initialize button, which skips the
- * clones that exist.
- */
+/** Older session files keep loading: fields of removed features are dropped before the schema sees them. */
 export const migrateSession = (raw: unknown): unknown => {
   if (!raw || typeof raw !== "object") return raw;
   const r = { ...(raw as Record<string, unknown>) };
-  const caps = r.caps as Record<string, unknown> | undefined;
-  const pre = r.preflight as { ok?: boolean; at?: string; summary?: string } | undefined;
-  if (r.requirements === undefined && caps?.preflight === true) r.requirements = LEGACY_PREFLIGHT_REQUIREMENTS;
-  if (r.readiness === undefined && pre?.at) {
-    r.readiness = { verdict: pre.ok ? "ready" : "needs", at: pre.at, summary: pre.summary ?? "", checks: [], confirmedAt: pre.ok ? pre.at : undefined };
+  // From before one lead did everything: the modes, the setup worker and its verdict, the planning block. The removed caps drop on parse.
+  for (const k of ["preflight", "mode", "requirements", "setupMode", "readiness", "planning"]) delete r[k];
+  if (r.environmentFrom && typeof r.environmentFrom === "object") {
+    const { readinessCarried: _c, ...rest } = r.environmentFrom as Record<string, unknown>;
+    r.environmentFrom = rest;
   }
-  delete r.preflight;
-  // From before one lead did everything: loop and goal sessions run as the one mode.
-  delete r.mode;
-  if (r.initializedAt === undefined) {
-    const readiness = r.readiness as { confirmedAt?: string } | undefined;
-    const gated = Boolean(String(r.requirements ?? "").trim()) && !readiness?.confirmedAt;
-    r.initializedAt = gated ? null : (r.createdAt as string | undefined) ?? null;
-  }
+  // Sessions from before initialization existed were cloned at creation, so they count as initialized from their creation.
+  if (r.initializedAt === undefined) r.initializedAt = (r.createdAt as string | undefined) ?? null;
   return r;
 };
 

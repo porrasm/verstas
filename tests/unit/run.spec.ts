@@ -4,10 +4,10 @@ import os from "node:os";
 import path from "node:path";
 import { createAgentApi, RunTokens } from "../../src/agent-api/agent-api.js";
 import type net from "node:net";
-import { beginSweep, importBoard, emptyBoard, getTicket, transition } from "../../src/board/board.js";
+import { importBoard, emptyBoard, getTicket, transition } from "../../src/board/board.js";
 import { saveBoard, writeJsonAtomic } from "../../src/board/store.js";
 import { inboxSchema, now, requestSchema, reviseGoal, sessionSchema, type VerstasEvent } from "../../src/core/types.js";
-import { describeBlockers, parseSetup, parseVerdict, RunManager, type Shell, type WorkerDone, type WorkerRunner } from "../../src/harness/run.js";
+import { parseVerdict, RunManager, type Shell, type WorkerDone, type WorkerRunner } from "../../src/harness/run.js";
 import { SessionHub } from "../../src/sessions/hub.js";
 import { sessionPaths } from "../../src/sessions/sessions.js";
 import type { Job } from "../../src/worker/worker.js";
@@ -27,16 +27,12 @@ const makeSession = async (
   opts: {
     reviewer?: boolean;
     goal?: string;
-    /** Lives per run before the run pauses (the default is 25). */
-    goalRounds?: number;
     /** Minutes between progress checks (the default is 30; 0 is off). */
     progressMinutes?: number;
     leadMinutes?: number;
     leadTurns?: number;
-    requirements?: string;
     /** false: a plan that still needs Initialize (the default is an initialized session). */
     initialized?: boolean;
-    setupMode?: "agentic" | "skip";
     agents?: { worker?: { driver: "claude" | "codex" | "cursor"; model?: string }; reviewer?: { driver: "claude" | "codex" | "cursor"; model?: string } };
     /** The board; the default has T-1 ready and T-2 ready after T-1. */
     tickets?: unknown[];
@@ -56,14 +52,10 @@ const makeSession = async (
       createdAt: now(),
       initializedAt: opts.initialized === false ? null : now(),
       repos: [{ name: "app", sourcePath: "/x", branch: "main", runBranch: `verstas/${id}` }],
-      requirements: opts.requirements ?? "",
-      setupMode: opts.setupMode ?? "agentic",
       goal: opts.goal ?? "",
       agents: opts.agents ?? {},
       caps: {
         reviewer: opts.reviewer ?? true,
-        runTickets: 10,
-        ...(opts.goalRounds ? { goalRounds: opts.goalRounds } : {}),
         ...(opts.progressMinutes !== undefined ? { progressMinutes: opts.progressMinutes } : {}),
         ...(opts.leadMinutes ? { leadMinutes: opts.leadMinutes } : {}),
         ...(opts.leadTurns ? { leadTurns: opts.leadTurns } : {}),
@@ -123,7 +115,7 @@ const fakeShell = (): FakeShell => {
 const onHost = (s: { paths: { workspace: string } }, p: string): string => p.replace(/^\/workspace/, s.paths.workspace);
 
 type Api = (method: string, p: string, body?: unknown) => Promise<{ status: number; json: Record<string, unknown> }>;
-/** The script of every job but the reviewer: the lead, setup, the planner, a prompt. `n` counts the jobs so far. */
+/** The script of every job but the reviewer: the lead or a prompt. `n` counts the jobs so far. */
 type Script = (api: Api, job: Job, n: number, signal: AbortSignal) => Promise<Partial<WorkerDone>>;
 
 /**
@@ -241,15 +233,15 @@ test("one lead works the board: it moves tickets itself, the harness judges what
     expect(r.shell.commits.slice(0, 2)).toEqual(["T-1: Schema", "T-2: Engine"]);
     expect(r.shell.commitArgs[0]).toContain("Verstas-Ticket: T-1");
     const lead = r.jobs[0]!;
-    // No lead cap unless the session sets one.
-    expect(lead.caps).toMatchObject({ minutes: 20 * 24 * 60, turns: 1_000_000 });
+    // No lead cap unless the session sets one, and no budget.
+    expect(lead.caps).toEqual({});
     expect(lead.agentSession).toMatchObject({ resume: false });
-    expect(r.prompts[0]).toContain("# Work the session");
+    expect(r.prompts[0]).toContain("# The session");
     expect(r.prompts[0]).toContain("(No goal is written");
     expect(r.prompts[0]).toContain("T-2 [ready] Engine");
     const sys = await fs.readFile(onHost(s, lead.systemPromptFile), "utf8");
     expect(sys).toContain("Role: lead");
-    expect(sys).toContain("board_move");
+    expect(sys).toContain("how you work is yours to decide");
     const h = await s.hub.get(s.id);
     expect(h.board.tickets.map((t) => t.state)).toEqual(["done", "done"]);
     expect(h.board.tickets[0]!.baseline).toBeUndefined(); // cleared at done
@@ -288,7 +280,6 @@ test("a move into in_progress records the baseline the review reads from; a requ
     expect(r.shell.calls).toContainEqual(["git", "diff", "--cached", BASE]);
     expect(r.shell.commits.filter((c) => c.startsWith("T-1"))).toEqual(["T-1: Schema"]);
     const t1 = getTicket((await s.hub.get(s.id)).board, "T-1");
-    expect(t1.attempts).toBe(2);
     expect(t1.notes.map((n) => n.text).join("\n")).toContain("Not done yet (no test for the null case); the reviewer's notes are on the ticket");
   } finally {
     r.close();
@@ -352,7 +343,7 @@ test("a fixable verdict returns the ticket to ready with the notes every time (n
     // Nothing left that can run: the board's one ticket is blocked.
     expect(run.state).toBe("finished");
     const t1 = getTicket((await s.hub.get(s.id)).board, "T-1");
-    expect(t1.attempts).toBe(4);
+    expect(t1.notes.filter((n) => n.text.startsWith("Not done yet"))).toHaveLength(3);
     expect(t1.notes.at(-1)!.text).toContain("Reviewer: blocked. cannot be done as written");
     expect(r.shell.commits.filter((c) => c.startsWith("T-1"))).toEqual([]);
   } finally {
@@ -540,7 +531,7 @@ test("a handoff starts a fresh lead with the note and the tickets in progress; a
     expect(ids[2]!.resume).toBe(false);
     expect(ids[3]).toEqual({ id: ids[2]!.id, resume: true });
     expect(await fs.readFile(path.join(s.paths.notes, "state.md"), "utf8")).toContain("Halfway: the parser is done");
-    expect(r.prompts[1]).toContain("# Work the session");
+    expect(r.prompts[1]).toContain("# The session");
     expect(r.prompts[1]).toContain("Note from the previous lead");
     expect(r.prompts[1]).toContain("Halfway: the parser is done");
     expect(r.prompts[1]).toContain("## In progress: T-2");
@@ -567,7 +558,7 @@ test("a handoff starts a fresh lead with the note and the tickets in progress; a
   }
 });
 
-test("two lives with no commit, no board change and no change to the note pause the run; the lives cap pauses it; lead caps apply when set", async () => {
+test("two lives with no commit, no board change and no change to the note pause the run; lead caps apply when set", async () => {
   const quiet = fakeShell();
   quiet.dirty = false;
   const s = await makeSession({ goal: "Greet", tickets: [] });
@@ -581,14 +572,15 @@ test("two lives with no commit, no board change and no change to the note pause 
     await fs.rm(s.root, { recursive: true, force: true });
   }
 
-  const capped = await makeSession({ goal: "Greet", tickets: [], goalRounds: 1, leadMinutes: 90, leadTurns: 300 });
-  const r2 = await harness(capped, async () => ({ text: "one step" }));
+  const capped = await makeSession({ goal: "Greet", tickets: [], leadMinutes: 90, leadTurns: 300 });
+  const r2 = await harness(capped, async (api) => {
+    expect((await api("POST", "/done", { note: "greets" })).status).toBe(200);
+    return { text: "one step" };
+  });
   try {
     const run = await (await r2.mgr.start(capped.id)).done;
-    expect(run.state).toBe("paused");
-    expect(run.pauseReason).toContain("1 lead life this run, the session's cap");
-    expect(r2.shell.commits).toEqual(["Lead 1.1: one step"]);
-    expect(r2.jobs[0]!.caps).toMatchObject({ minutes: 90, turns: 300 });
+    expect(run.state).toBe("finished");
+    expect(r2.jobs[0]!.caps).toEqual({ minutes: 90, turns: 300 });
   } finally {
     r2.close();
     await fs.rm(capped.root, { recursive: true, force: true });
@@ -724,7 +716,7 @@ test("a lead that ignores its handoff is stopped after the grace period and a fr
   }
 });
 
-test("the lead's rules can be replaced by a file, read for every new lead; an empty file keeps the built-in rules", async () => {
+test("your rules for the lead come from a file, read for every new lead; an empty file adds nothing", async () => {
   const { readLeadRules, systemMd } = await import("../../src/harness/prompts.js");
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "verstas-rules-"));
   try {
@@ -736,9 +728,9 @@ test("the lead's rules can be replaced by a file, read for every new lead; an em
     const rules = await readLeadRules(file);
     const sys = systemMd("lead", rules);
     expect(sys).toContain("Always submit.");
-    expect(sys).not.toContain("Tickets move with");
-    expect(sys).toContain("Read /workspace/VERSTAS.md first"); // the box rules stay
-    expect(systemMd("lead")).toContain("Tickets move with");
+    expect(sys).toContain("Role: lead");
+    expect(sys).toContain("Read /workspace/VERSTAS.md first"); // the facts stay
+    expect(systemMd("lead")).not.toContain("Always submit.");
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }
@@ -856,143 +848,14 @@ test("every progressMinutes the running lead is asked for a progress update, whi
   }
 });
 
-// --- Chores and sweeps ---------------------------------------------------------
-
-/** What chores_submit does: submit, then wait until the harness settled the sweep. */
-const submitSweep = async (api: Api, results: unknown[]) => {
-  const r = await api("POST", "/chores/sweep/submit", { results });
-  if (r.status !== 200) return r.json;
-  for (;;) {
-    await new Promise((res) => setTimeout(res, 5));
-    const sw = (await api("GET", "/chores/sweep")).json;
-    if (sw.state === "accepted" || sw.state === "refused") return sw;
-  }
-};
-
-const withChores = async (s: Awaited<ReturnType<typeof makeSession>>, texts: string[]) => {
-  const h = await s.hub.get(s.id);
-  await h.mutate((d) => ({ next: { board: importBoard(d.board, { chores: texts.map((text) => ({ text })) }).board } }));
-};
-
-test("a sweep of chores is read by the session's reviewer and committed as one commit; promoted chores become backlog tickets", async () => {
+test("recover after a host crash: stops the orphaned worker, requeues tickets in progress, closes the run", async () => {
   const s = await makeSession();
-  await withChores(s, ["Rename tmp to pending", "Doc the exit codes", "Rework the loop"]);
-  const r = await harness(s, async (api) => {
-    expect(await finishTicket(api, "T-1")).toMatchObject({ state: "done" });
-    expect(await finishTicket(api, "T-2")).toMatchObject({ state: "done" });
-    const sw = await api("POST", "/chores/sweep", {});
-    expect(sw.status).toBe(200);
-    expect((sw.json.chores as { id: string }[]).map((c) => c.id)).toEqual(["C-1", "C-2", "C-3"]);
-    const out = await submitSweep(api, [
-      { id: "C-1", outcome: "done", note: "renamed" },
-      { id: "C-2", outcome: "dropped", note: "already in the README" },
-      { id: "C-3", outcome: "promoted", note: "the loop needs a redesign, not a nit" },
-    ]);
-    expect(out).toMatchObject({ n: 1, state: "accepted" });
-    return { text: "swept" };
-  });
-  try {
-    const run = await (await r.mgr.start(s.id)).done;
-    expect(run.state).toBe("finished");
-    expect(run.ticketsDone).toBe(2);
-    expect(r.jobs.map((j) => `${j.role}:${j.ticket ?? "-"}`)).toEqual(["lead:-", "reviewer:T-1", "reviewer:T-2", "reviewer:-"]);
-    const sweepPrompt = await fs.readFile(onHost(s, r.jobs[3]!.promptFile), "utf8");
-    expect(sweepPrompt).toContain("# Chore sweep 1");
-    expect(sweepPrompt).toContain("- C-1 done (renamed): Rename tmp to pending");
-    expect(r.shell.commits[2]).toMatch(/^Chores \(sweep 1\): 1 done, 1 dropped, 1 promoted\n\n- C-1 done: Rename tmp to pending\n- C-2 dropped \(already in the README\): Doc the exit codes\n- C-3 promoted \(the loop needs a redesign, not a nit\): Rework the loop$/);
-    const h = await s.hub.get(s.id);
-    expect(h.board.chores.map((c) => c.state)).toEqual(["done", "dropped", "promoted"]);
-    expect(h.board.tickets[2]).toMatchObject({ id: "T-3", kind: "followup", state: "backlog" });
-    expect(h.board.sweep).toMatchObject({ n: 1, state: "accepted", diff: { added: 3, removed: 1, files: 1 } });
-  } finally {
-    r.close();
-    await fs.rm(s.root, { recursive: true, force: true });
-  }
-});
-
-test("a sweep that is too large, touches a protected path, or the reviewer refuses is refused; nothing is committed and the chores reopen; a sweep is refused while a ticket is in progress", async () => {
-  const s = await makeSession();
-  await withChores(s, ["One", "Two"]);
-  const shell = fakeShell();
-  const r = await harness(
-    s,
-    async (api) => {
-      expect((await start(api, "T-1")).status).toBe(200);
-      expect((await api("POST", "/chores/sweep", {})).json.error).toContain("T-1 (in_progress) is in progress");
-      await api("POST", "/tickets/T-1/report", { report: "schema" });
-      expect(await move(api, "T-1", "review")).toMatchObject({ state: "done" });
-      shell.numstat = "300\t200\tsrc/big.ts\n";
-      expect((await api("POST", "/chores/sweep", {})).status).toBe(200);
-      const big = await submitSweep(api, [{ id: "C-1", outcome: "done" }]);
-      expect(big).toMatchObject({ n: 1, state: "refused" });
-      expect(String(big.note)).toContain("too large for a sweep: 1 files, 500 lines");
-      shell.numstat = "1\t1\tdocs/DESIGN.md\n";
-      expect((await api("POST", "/chores/sweep", {})).status).toBe(200);
-      const prot = await submitSweep(api, [{ id: "C-1", outcome: "done" }]);
-      expect(prot).toMatchObject({ n: 2, state: "refused" });
-      expect(String(prot.note)).toContain("may not change app/docs/DESIGN.md");
-      shell.numstat = "3\t1\tsrc/a.ts\n";
-      expect((await api("POST", "/chores/sweep", {})).status).toBe(200);
-      const no = await submitSweep(api, [{ id: "C-1", outcome: "done" }]);
-      expect(no).toMatchObject({ n: 3, state: "refused" });
-      expect(String(no.note)).toContain("the reviewer did not accept the sweep (fixable: the rename missed a call site)");
-      expect(((await api("GET", "/chores?state=open")).json.chores as unknown[]).length).toBe(2);
-      expect(await finishTicket(api, "T-2")).toMatchObject({ state: "done" });
-      return {};
-    },
-    { shell, verdict: (ticket) => (ticket ? "VERDICT: ok" : "VERDICT: fixable\nthe rename missed a call site") },
-  );
-  try {
-    const run = await (await r.mgr.start(s.id)).done;
-    expect(run.ticketsDone).toBe(2);
-    expect(r.shell.commits.filter((c) => c.startsWith("T-"))).toEqual(["T-1: Schema", "T-2: Engine"]);
-    expect(r.shell.calls.filter((c) => c.join(" ") === "git reset -q")).toHaveLength(3);
-    const h = await s.hub.get(s.id);
-    expect(h.board.chores.map((c) => c.state)).toEqual(["open", "open"]);
-    expect(h.board.sweep).toMatchObject({ n: 3, state: "refused" });
-  } finally {
-    r.close();
-    await fs.rm(s.root, { recursive: true, force: true });
-  }
-});
-
-test("when only chores remain the lead is asked to sweep once; if it sweeps nothing the run finishes", async () => {
-  const s = await makeSession();
-  const h0 = await s.hub.get(s.id);
-  await h0.mutate((d) => {
-    let board = transition(d.board, "T-1", "in_progress");
-    board = transition(board, "T-1", "review");
-    board = transition(board, "T-1", "done");
-    board = transition(board, "T-2", "in_progress");
-    board = transition(board, "T-2", "review");
-    board = transition(board, "T-2", "done");
-    return { next: { board } };
-  });
-  await withChores(s, ["Only a nit"]);
-  const r = await harness(s, async () => ({ text: "not now" }));
-  try {
-    const run = await (await r.mgr.start(s.id)).done;
-    expect(run.state).toBe("finished");
-    expect(r.jobs.filter((j) => j.role === "lead")).toHaveLength(1);
-    expect(r.prompts[0]).toContain("Only chores remain");
-    expect(r.prompts[0]).toContain("- C-1 Only a nit");
-    const ev = await events(s);
-    expect(ev.some((e) => e.kind === "status" && e.text.includes("1 chore stays open (the lead did not sweep them)"))).toBe(true);
-  } finally {
-    r.close();
-    await fs.rm(s.root, { recursive: true, force: true });
-  }
-});
-
-test("recover after a host crash: stops the orphaned worker, requeues tickets in progress, releases a sweep, closes the run", async () => {
-  const s = await makeSession();
-  await withChores(s, ["One"]);
   try {
     const h = await s.hub.get(s.id);
     await h.mutate((d) => ({
       next: {
         session: { ...d.session, state: "running" as const },
-        board: beginSweep({ ...d.board, tickets: d.board.tickets.map((t) => (t.id === "T-1" ? { ...t, state: "in_progress" as const } : t)) }).board,
+        board: { ...d.board, tickets: d.board.tickets.map((t) => (t.id === "T-1" ? { ...t, state: "in_progress" as const } : t)) },
       },
     }));
     await fs.mkdir(path.join(s.paths.runs, "1"), { recursive: true });
@@ -1001,7 +864,6 @@ test("recover after a host crash: stops the orphaned worker, requeues tickets in
     try {
       const did = await r.mgr.recover(s.id);
       expect(did.join("; ")).toContain("requeued T-1");
-      expect(did).toContain("released sweep 1 (C-1)");
       expect(r.shell.calls).toContainEqual(["pkill", "-TERM", "-f", "/opt/verstas/worker.js"]);
       expect((await s.hub.get(s.id)).board.tickets[0]!.state).toBe("ready");
       expect((await s.hub.get(s.id)).session.state).toBe("paused");
@@ -1114,18 +976,6 @@ test("parseVerdict reads the first verdict line and a short reason", () => {
   expect(parseVerdict("no verdict here")).toBeNull();
 });
 
-test("describeBlockers groups waiting tickets by what they wait on", () => {
-  const b = importBoard(emptyBoard(), {
-    tickets: [
-      { id: "T-1", title: "a" },
-      { id: "T-2", title: "b", state: "ready", deps: ["T-1"] },
-      { id: "T-3", title: "c", state: "ready", deps: ["T-1"] },
-      { id: "T-4", title: "d", state: "ready", deps: ["T-1", "T-2"] },
-    ],
-  }).board;
-  expect(describeBlockers(b)).toBe("T-2, T-3, T-4 wait on T-1 (backlog); T-4 wait on T-2 (ready)");
-});
-
 // --- Tokens, messages, other runs ---------------------------------------------------
 
 test("every worker gets its own run token, scoped to its role and revoked when it ends", async () => {
@@ -1144,9 +994,6 @@ test("every worker gets its own run token, scoped to its role and revoked when i
     expect(r.seen[0]!.info).toMatchObject({ role: "lead" });
     expect(r.seen[1]!.info).toMatchObject({ role: "worker", currentTicket: "T-1" });
     for (const x of r.seen) expect(r.tokens.lookup(x.token)).toBeUndefined();
-
-    await (await r.mgr.start(s.id, { plan: "add caching" })).done;
-    expect(r.seen.at(-1)!.info).toMatchObject({ role: "planner" });
   } finally {
     r.close();
     await fs.rm(s.root, { recursive: true, force: true });
@@ -1202,16 +1049,15 @@ test("a message from the user reaches the lead running now, is logged, and is re
   }
 });
 
-test("a prompt runs one worker with your text and the notes, commits a change as one commit, and keeps the reply", async () => {
-  const s = await makeSession({ requirements: "the e2e suite runs" });
-  await fs.writeFile(path.join(s.paths.notes, "env.md"), "# Environment\n- node 22\n");
+test("a prompt runs one worker with your text, commits a change as one commit, and keeps the reply", async () => {
+  const s = await makeSession();
   const r = await harness(s, async () => ({ text: "Installed the browsers; the e2e suite runs (12 passed). env.md updated." }));
   try {
     const run = await (await r.mgr.start(s.id, { prompt: "Make sure the e2e suite runs\nand update env.md" })).done;
     expect(run.state).toBe("finished");
     expect(r.jobs.map((j) => [j.role, j.ticket])).toEqual([["prompt", undefined]]);
     expect(r.prompts[0]).toContain("# Request from the user");
-    expect(r.prompts[0]).toContain("node 22");
+    expect(r.prompts[0]).toContain("Make sure the e2e suite runs");
     expect(r.shell.commits).toEqual(["Prompt: Make sure the e2e suite runs"]);
     const h = await s.hub.get(s.id);
     expect(h.session.prompts[0]).toMatchObject({ runId: 1, kind: "prompt", reply: expect.stringContaining("12 passed") });
@@ -1223,43 +1069,14 @@ test("a prompt runs one worker with your text and the notes, commits a change as
   }
 });
 
-test("the planner runs your request and leaves the backlog for approval", async () => {
-  const s = await makeSession({ reviewer: false, tickets: [] });
-  const r = await harness(s, async (api, job) => {
-    expect(job.role).toBe("planner");
-    const made = await api("POST", "/tickets", { title: "Cache layer", kind: "feature", spec: "x" });
-    expect(made.status).toBe(201);
-    return { text: "Planned one ticket." };
-  });
-  try {
-    const run = await (await r.mgr.start(s.id, { plan: "add caching" })).done;
-    expect(run.state).toBe("finished");
-    expect(r.prompts[0]).toContain("# What to plan\nadd caching");
-    const h = await s.hub.get(s.id);
-    expect(h.board.tickets.map((t) => t.state)).toEqual(["backlog"]);
-    expect(h.session.state).toBe("finished");
-    expect(h.session.prompts[0]).toMatchObject({ kind: "plan", text: "add caching" });
-  } finally {
-    r.close();
-    await fs.rm(s.root, { recursive: true, force: true });
-  }
-});
-
 // --- Initialization ----------------------------------------------------------------
 
-test("initialization: nothing runs before it; needs parks on its request and stays uninitialized; ready initializes and, with start, the lead follows", async () => {
-  const s = await makeSession({ reviewer: false, initialized: false, requirements: "Postgres 17 reachable\nthe e2e suite runs" });
+test("initialization is the container and the recipes: nothing runs before it, no worker runs in it, the box is snapshotted; with start the lead follows", async () => {
+  const s = await makeSession({ initialized: false });
   const snapshots: string[] = [];
-  let setups = 0;
   const r = await harness(
     s,
-    async (api, job) => {
-      if (job.role === "setup" && ++setups === 1) {
-        const h = await s.hub.get(s.id);
-        await h.mutate((d) => ({ next: { inbox: { ...d.inbox, requests: [...d.inbox.requests, requestSchema.parse({ id: "R-1", summary: "the e2e suite needs the Playwright CDN", actions: [{ id: "a1", detail: { kind: "pack", pack: "playwright" } }], createdAt: now() })] } } }));
-        return { text: "SETUP: needs\n- [x] Postgres 17 reachable (svc pg, psql -c 'select 1')\n- [ ] the e2e suite runs (browser download refused)\nFiled R-1." };
-      }
-      if (job.role === "setup") return { text: "SETUP: ready\n- [x] Postgres 17 reachable (psql)\n- [x] the e2e suite runs (12 passed)\nAll set." };
+    async (api) => {
       await finishTicket(api, "T-1");
       await finishTicket(api, "T-2");
       return {};
@@ -1268,135 +1085,57 @@ test("initialization: nothing runs before it; needs parks on its request and sta
   );
   try {
     await expect(r.mgr.start(s.id)).rejects.toThrow(/not initialized/);
-    await expect(r.mgr.start(s.id, { plan: "x" })).rejects.toThrow(/not initialized/);
     await expect(r.mgr.start(s.id, { prompt: "x" })).rejects.toThrow(/not initialized/);
 
-    const run1 = await (await r.mgr.start(s.id, { init: true, start: true })).done;
-    expect(run1.state).toBe("paused");
-    expect(run1.pauseReason).toBe("requests");
+    const run1 = await (await r.mgr.start(s.id, { init: true })).done;
+    expect(run1.state).toBe("finished");
     let h = await s.hub.get(s.id);
-    expect(h.session.initializedAt).toBeNull();
-    expect(h.session.readiness).toMatchObject({ verdict: "needs" });
-    expect(h.session.state).toBe("waiting");
-    expect(h.board.tickets.every((t) => t.state === "ready")).toBe(true);
-    expect(r.prompts[0]).toContain("# Setup instructions from the user\nPostgres 17 reachable");
-    expect(snapshots).toEqual([]);
-
-    await h.mutate((d) => ({ next: { inbox: { ...d.inbox, requests: d.inbox.requests.map((x) => ({ ...x, state: "resolved" as const, decidedAt: now(), actions: x.actions.map((a) => ({ ...a, state: "approved" as const, outcome: "allowed cdn.playwright.dev" })) })) } } }));
-    await fs.writeFile(path.join(s.paths.notes, "env.md"), "# Environment\n- postgres: svc pg, port 5432\n");
-    const run2 = await (await r.mgr.start(s.id, { init: true, start: true })).done;
-    expect(run2.state).toBe("finished");
-    h = await s.hub.get(s.id);
     expect(h.session.initializedAt).toBeTruthy();
-    expect(h.session.readiness).toMatchObject({ verdict: "ready", confirmedAt: expect.any(String) });
     expect(h.session.snapshot).toMatchObject({ image: "verstas-snap-x" });
-    expect(h.board.tickets.map((t) => t.state)).toEqual(["done", "done"]);
-    expect(r.prompts[1]).toContain("allowed cdn.playwright.dev");
-    expect(r.jobs.map((j) => j.role)).toEqual(["setup", "setup", "lead"]);
-    // The lead's prompt carries the environment note.
-    expect(r.prompts[2]).toContain("svc pg, port 5432");
-
-    const run3 = await (await r.mgr.start(s.id, { setup: true })).done;
-    expect(run3.state).toBe("finished");
-    expect(r.jobs.at(-1)!.role).toBe("setup");
-  } finally {
-    r.close();
-    await fs.rm(s.root, { recursive: true, force: true });
-  }
-});
-
-test("initialize without start: ready initializes and the run stops; skip mode is the container and the recipes, and with start the lead follows at once", async () => {
-  const s = await makeSession({ reviewer: false, initialized: false });
-  const r = await harness(s, async (_api, job) => {
-    expect(job.role).toBe("setup");
-    return { text: "SETUP: ready\n- [x] node 22 (node -v)\nFine." };
-  });
-  try {
-    const run = await (await r.mgr.start(s.id, { init: true })).done;
-    expect(run.state).toBe("finished");
-    const h = await s.hub.get(s.id);
-    expect(h.session.initializedAt).toBeTruthy();
+    expect(r.jobs).toHaveLength(0);
     expect(h.board.tickets.every((t) => t.state === "ready")).toBe(true);
-    expect(r.jobs).toHaveLength(1);
+    expect(snapshots).toHaveLength(1);
   } finally {
     r.close();
     await fs.rm(s.root, { recursive: true, force: true });
   }
 
-  const skip = await makeSession({ reviewer: false, initialized: false, setupMode: "skip" });
-  const r2 = await harness(skip, async (api) => {
-    await finishTicket(api, "T-1");
-    await finishTicket(api, "T-2");
-    return {};
-  });
+  const started = await makeSession({ initialized: false, goal: "Ship it", tickets: [] });
+  const snaps: string[] = [];
+  const r2 = await harness(
+    started,
+    async (api) => {
+      expect((await api("POST", "/done", { note: "shipped" })).status).toBe(200);
+      return { text: "shipped" };
+    },
+    { snapshots: snaps },
+  );
   try {
-    const run = await (await r2.mgr.start(skip.id, { init: true, start: true })).done;
+    const run = await (await r2.mgr.start(started.id, { init: true, start: true })).done;
     expect(run.state).toBe("finished");
     expect(r2.jobs.map((j) => j.role)).toEqual(["lead"]);
-    const h = await skip.hub.get(skip.id);
-    expect(h.session.initializedAt).toBeTruthy();
-    expect(h.session.readiness).toBeUndefined();
+    // Once at initialization, once after the work run: the snapshot keeps what the lead installed.
+    expect(snaps).toHaveLength(2);
   } finally {
     r2.close();
-    await fs.rm(skip.root, { recursive: true, force: true });
+    await fs.rm(started.root, { recursive: true, force: true });
   }
 });
 
-test("a session from another's environment with its readiness carried over initializes without a setup worker; without it, setup runs", async () => {
-  for (const carried of [true, false]) {
-    const s = await makeSession({ reviewer: false, initialized: false });
-    const h0 = await s.hub.get(s.id);
-    const at = now();
-    await h0.mutate((d) => ({
-      next: {
-        session: { ...d.session, environmentFrom: { session: "2026-10-01-old", at, readinessCarried: carried }, readiness: carried ? { verdict: "ready" as const, at, summary: "from the old box", checks: [], confirmedAt: at } : undefined },
-      },
-    }));
-    const r = await harness(s, async () => ({ text: "SETUP: ready\nFine." }));
-    try {
-      const run = await (await r.mgr.start(s.id, { init: true })).done;
-      expect(run.state).toBe("finished");
-      expect((await s.hub.get(s.id)).session.initializedAt).toBeTruthy();
-      expect(r.jobs.map((j) => j.role)).toEqual(carried ? [] : ["setup"]);
-    } finally {
-      r.close();
-      await fs.rm(s.root, { recursive: true, force: true });
-    }
-  }
-});
-
-test("parseSetup reads the verdict, the checklist and a summary", () => {
-  expect(parseSetup("SETUP: ready\n- [x] node 22 (node -v)\n* [X] tests pass\nAll good.")).toEqual({ ready: true, checks: [{ ok: true, text: "node 22 (node -v)" }, { ok: true, text: "tests pass" }], summary: "All good." });
-  expect(parseSetup("Preamble\nsetup: needs\n- [ ] redis (not installed)\nFiled R-2.")).toEqual({ ready: false, checks: [{ ok: false, text: "redis (not installed)" }], summary: "Filed R-2." });
-  expect(parseSetup("nothing")).toBeNull();
-});
-
-test("the project brief is put first in every prompt, and a brief-only run calls one orientation worker", async () => {
+test("VERSTAS.md and the workspace pointer files are written for every run; nothing is put in front of the lead's prompt", async () => {
   const s = await makeSession();
-  await fs.writeFile(path.join(s.paths.notes, "brief.md"), "# Project brief\n## app\n- Build / test / run: npm test (12 s)\n");
-  const r = await harness(s, async (api, job) => {
-    if (job.role === "setup") {
-      await fs.writeFile(path.join(s.paths.notes, "brief.md"), "# Project brief\nrefreshed\n");
-      return { text: "SETUP: ready\nbrief refreshed" };
-    }
+  await fs.writeFile(path.join(s.paths.notes, "brief.md"), "# Project brief\nold\n");
+  const r = await harness(s, async (api) => {
     await finishTicket(api, "T-1");
     await finishTicket(api, "T-2");
     return {};
   });
   try {
     await (await r.mgr.start(s.id)).done;
-    expect(r.prompts[0]!.startsWith("# Project brief (notes/brief.md")).toBe(true);
-    expect(r.prompts[0]).toContain("npm test (12 s)");
-    const review = await fs.readFile(onHost(s, r.jobs.find((j) => j.role === "reviewer")!.promptFile), "utf8");
-    expect(review.startsWith("# Project brief (notes/brief.md")).toBe(true);
-    expect(await fs.readFile(path.join(s.paths.workspace, "CLAUDE.md"), "utf8")).toContain("notes/brief.md");
-
-    const run = await (await r.mgr.start(s.id, { brief: true })).done;
-    expect(run.state).toBe("finished");
-    expect(r.jobs.at(-1)?.role).toBe("setup");
-    expect(r.prompts.at(-1)).toContain("# Brief only");
-    expect(await fs.readFile(path.join(s.paths.notes, "brief.md"), "utf8")).toContain("refreshed");
-    expect((await s.hub.get(s.id)).board.tickets.every((t) => t.state === "done")).toBe(true);
+    expect(r.prompts[0]!.startsWith("# The session")).toBe(true);
+    expect(r.prompts[0]).not.toContain("Project brief");
+    expect(await fs.readFile(path.join(s.paths.workspace, "CLAUDE.md"), "utf8")).toContain("/workspace/VERSTAS.md");
+    expect(await fs.readFile(path.join(s.paths.workspace, "AGENTS.md"), "utf8")).toContain("/workspace/VERSTAS.md");
   } finally {
     r.close();
     await fs.rm(s.root, { recursive: true, force: true });

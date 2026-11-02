@@ -18,7 +18,6 @@ import {
   type DraftEnv,
 } from "./draft.js";
 import type { DraftStore } from "./store.js";
-import { planningSchema } from "../core/types.js";
 
 /**
  * The tools an assistant gets through the draft MCP server. They read the
@@ -53,7 +52,7 @@ export type DraftToolDeps = {
 };
 
 export const DRAFT_SERVER_INSTRUCTIONS =
-  "Verstas draft sessions. Prepare a session for a person to review, step by step: a name, a goal, session requirements, repositories, network packs, recipes, notes and a board of tickets. You cannot create, start or run sessions: a person does that in the Verstas app from the review link these tools return. Call verstas_context first; it describes the sandbox, the board format and the workflow.";
+  "Verstas draft sessions. Prepare a session for a person to review, step by step: a name, a goal, repositories, network packs, recipes, notes and a board of tickets. You cannot create, start or run sessions: a person does that in the Verstas app from the review link these tools return. Call verstas_context first; it describes the sandbox, the board format and the workflow.";
 
 const str = (description: string, maxLength = 20_000) => ({ type: "string", description, maxLength });
 const obj = (properties: Record<string, unknown>, required: string[]) => ({ type: "object", properties, required, additionalProperties: false });
@@ -65,21 +64,12 @@ const TICKET_FIELDS = {
   title: str("Short imperative title", 200),
   kind: { type: "string", enum: ["feature", "bug", "followup", "chore"] },
   repos: { type: "array", items: str("Directory name of one of the draft's repositories", 100), maxItems: 20, description: "The repositories you expect the ticket to touch: a hint for the user and the worker, who may touch others" },
-  size: { type: "string", enum: ["S", "M", "L"], description: "S under half a day, M about a day, L several days (split L tickets when you can)" },
   priority: { type: "integer", minimum: 0, maximum: 1000, description: "Lower runs first" },
   deps: { type: "array", items: ticketIdProp, maxItems: 30, description: "Tickets that must be done first" },
   state: { type: "string", enum: ["ready", "backlog"], description: "ready runs when its deps are done; backlog waits for a person. Default ready" },
   spec: str("What to do, where (files, modules) and how to verify it. The worker sees only this, the acceptance criteria and recent reports", 50_000),
   acceptance: stringList("One criterion a reviewer can check by running or reading something", 30),
   notes: stringList("A note kept with the ticket", 10, 20_000),
-  pinned: { type: "boolean", description: "Workers may not reprioritise or re-dep a pinned ticket" },
-  agent: {
-    type: "object",
-    description: "Optional: run this ticket's implementer on another agent than the session's worker (a fresh worker on that driver and model; the reviewer stays the session's). For work that needs that agent's strength, e.g. judging rendered images. The driver needs a credential in the user's Settings.",
-    properties: { driver: { type: "string", enum: ["claude", "codex", "cursor"] }, model: str("Model id the CLI accepts; empty for the account's default", 100) },
-    required: ["driver"],
-    additionalProperties: false,
-  },
 };
 
 const ticketInputSchema = { ...obj({ id: str("Optional id T-<n> (must be free); leave out to get the next number", 20), ...TICKET_FIELDS }, ["title"]) };
@@ -184,30 +174,19 @@ export const createDraftTools = (d: DraftToolDeps): DraftTool[] => {
     },
     {
       name: "draft_update",
-      description: "Change a draft's name, goal, session requirements, notes or ticket size. Fields left out stay as they are. Requirements: one verifiable line per need; a setup worker makes the box meet them before tickets run. Notes are for the person who reviews the draft. Planning: the ticket size the session's planner and agent terminals aim for (S, M or L, see verstas_context) and the user's own words on how to cut the work; an empty object clears it.",
+      description: "Change a draft's name, goal or notes. Fields left out stay as they are. Notes are for the person who reviews the draft.",
       inputSchema: obj(
         {
           id: draftIdProp,
           name: str("Name", 200),
           goal: str("Goal"),
-          requirements: str("Session requirements, one per line, e.g. \"Chromium for Playwright launches\""),
           notes: str("For the reviewer: assumptions, open questions, what you left out"),
-          planning: obj({ ticketSize: { type: "string", enum: ["S", "M", "L"], description: "The size new tickets aim for" }, guidance: str("How to cut the work, e.g. \"one species per ticket\"", 4000) }, []),
         },
         ["id"],
       ),
       call: async (a) => {
-        const { id, planning, ...patch } = parseArgs(
-          z.object({ id: draftId, name: z.string().trim().min(1).max(200).optional(), goal: z.string().max(20_000).optional(), requirements: z.string().max(20_000).optional(), notes: z.string().max(20_000).optional(), planning: planningSchema.optional() }),
-          a,
-        );
-        const { draft } = await d.store.mutate(id, (x) => ({
-          draft: {
-            ...x,
-            ...Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined)),
-            ...(planning === undefined ? {} : { planning: planning.ticketSize || planning.guidance?.trim() ? { ticketSize: planning.ticketSize, guidance: planning.guidance?.trim() || undefined } : undefined }),
-          },
-        }));
+        const { id, ...patch } = parseArgs(z.object({ id: draftId, name: z.string().trim().min(1).max(200).optional(), goal: z.string().max(20_000).optional(), notes: z.string().max(20_000).optional() }), a);
+        const { draft } = await d.store.mutate(id, (x) => ({ draft: { ...x, ...Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined)) } }));
         return edited(draft);
       },
     },

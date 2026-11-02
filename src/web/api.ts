@@ -8,24 +8,18 @@ import express, { type Request, type Response } from "express";
 import { z } from "zod";
 import {
   agentFor,
-  agentSpecSchema,
   reviewModeSchema,
   capsSchema,
-  choreIdSchema,
-  planningSchema,
-  type Planning,
   DEFAULT_ALLOWLIST,
   DRIVER_NAMES,
   driverNameSchema,
   isInitialized,
   limitsSchema,
   sessionAgentsSchema,
-  setupModeSchema,
   now,
   ticketIdSchema,
   ticketImportSchema,
   ticketKindSchema,
-  ticketSizeSchema,
   reviseGoal,
   ticketStateSchema,
   type AgentRequest,
@@ -36,7 +30,7 @@ import {
   type SessionSetupScript,
   type Ticket,
 } from "../core/types.js";
-import { emptyBoard, addChore, addNote, BoardError, exportBoard, getTicket, importBoard, parseBoardPaste, promoteChore, replaceTicket, setChoreState, transition, validateDeps, validateRepos, canTransition } from "../board/board.js";
+import { emptyBoard, addNote, BoardError, exportBoard, getTicket, importBoard, parseBoardPaste, replaceTicket, transition, validateDeps, validateRepos, canTransition } from "../board/board.js";
 import { codexAuthRefreshedAt, configSchema, loadConfig, loadSecrets, saveConfig, saveSecrets, verstasHome, workTargetSchema, type Config } from "../config.js";
 import { codexAuthAgeDays, configuredDrivers, DRIVERS } from "../harness/drivers.js";
 import type { SessionHub } from "../sessions/hub.js";
@@ -50,7 +44,7 @@ import { syncCheck, syncInBox, type UnpublishedChoice } from "../sessions/sync.j
 import { artifactFile, clearArtifacts, deleteArtifact, loadArtifacts } from "../sessions/artifacts.js";
 import { importArchive, readArchive, writeArchive } from "../sessions/archive.js";
 import type { SessionHandle } from "../sessions/hub.js";
-import { copyHomeVolume, copyIntoSandbox, copySnapshot, listSandboxes, replacementOf, removeSandbox, sandboxStatus, snapshotSandbox, stopAllSandboxes, stopSandbox, type SandboxConfig } from "../sandbox/lifecycle.js";
+import { copyHomeVolume, copyIntoSandbox, copySnapshot, listSandboxes, replacementOf, removeSandbox, sandboxStatus, stopAllSandboxes, stopSandbox, type SandboxConfig } from "../sandbox/lifecycle.js";
 import { dockerAvailable } from "../sandbox/docker.js";
 import type { RunManager } from "../harness/run.js";
 import { dockerShell, ensureSessionSandbox, runSetup, type RunManagerConfig } from "../harness/docker-worker.js";
@@ -73,12 +67,7 @@ import type { McpSetup } from "../drafts/setup.js";
 
 const execFileP = promisify(execFile);
 
-/** A planning block with nothing in it is no block: the session then reads exactly as one that never had it. */
-export const cleanPlanning = (p: Planning | null | undefined): Planning | undefined => {
-  const guidance = p?.guidance?.trim();
-  if (!p?.ticketSize && !guidance) return undefined;
-  return { ...(p?.ticketSize ? { ticketSize: p.ticketSize } : {}), ...(guidance ? { guidance } : {}) };
-};
+
 
 export type UiApiDeps = {
   hub: SessionHub;
@@ -528,8 +517,7 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
         res.json({
           ok: true,
           goal: r.board.goal,
-          tickets: r.board.tickets.map((t) => ({ id: t.id, title: t.title, kind: t.kind, repos: t.repos, size: t.size, state: t.state, deps: t.deps, acceptance: t.acceptance.length })),
-          chores: r.chores.length,
+          tickets: r.board.tickets.map((t) => ({ id: t.id, title: t.title, kind: t.kind, repos: t.repos, state: t.state, deps: t.deps, acceptance: t.acceptance.length })),
         });
       } catch (e) {
         const msg = e instanceof z.ZodError ? `Invalid board: ${e.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}` : e instanceof SyntaxError ? `Not valid JSON: ${e.message}` : (e as Error).message;
@@ -654,21 +642,15 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
     setupScripts: z.array(z.string()).default([]),
     caps: capsSchema.partial().optional(),
     limits: limitsSchema.partial().optional(),
-    /** How planning agents size tickets (a draft's choice); absent, they choose. */
-    planning: planningSchema.optional(),
     board: z.string().optional(),
-    requirements: z.string().max(20_000).optional(),
-    setupMode: setupModeSchema.optional(),
     /** The draft this form was filled from; it is marked as having become this session. */
     draftId: z.string().max(90).optional(),
     /** Start from another session's environment instead of a blank plan (src/sessions/from-environment.ts). */
     fromEnvironment: z
       .object({
         session: z.string().min(1).max(200),
-        /** brief.md and learnings.md. */
-        projectNotes: z.boolean().default(true),
-        /** Every note but state.md. */
-        allNotes: z.boolean().default(false),
+        /** The source's notes, state.md excepted. */
+        notes: z.boolean().default(true),
         attachments: z.boolean().default(false),
         /** Branch to clone per repository name; default the source's branch. The source's run branch brings its unapplied commits. */
         branches: z.record(z.string(), z.string().max(200)).default({}),
@@ -692,9 +674,9 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
   };
 
   /**
-   * A new session on another session's environment: settings, the chosen
-   * notes, a copy of its home volume and its snapshot, fresh clones, then the
-   * usual initialization (no setup worker when the readiness carried over).
+   * A new session on another session's environment: settings, its notes, a
+   * copy of its home volume and its snapshot, fresh clones, then the usual
+   * initialization.
    * The source is never modified; on any failure everything made for the new
    * session goes.
    */
@@ -738,7 +720,7 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
         await fs.rm(bundle, { force: true });
         repos.push({ name: r.name, github: r.github, sourcePath: r.sourcePath, branch, runBranch, baseCommit });
       }
-      const settings = environmentSettings(src.session, { requirements: input.requirements }, now());
+      const settings = environmentSettings(src.session, now());
       const h = await d.hub.get(id);
       await h.mutate((docs) => ({ next: { session: { ...docs.session, ...settings, repos, snapshot, attachments: opts.attachments ? src.session.attachments : [] } } }));
       await writeRecipeFiles(dst, settings.setupScripts);
@@ -747,7 +729,7 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
       const { repos: provisioned, clones } = await provisionSession(cfg.sessionsRoot, h.session, cloneSource);
       await h.mutate((docs) => ({ next: { session: { ...docs.session, repos: provisioned } } }));
       const ctl = await d.runs.start(id, { init: true, start: false });
-      res.status(201).json({ session: h.session, run: ctl.run, clones, copied: { ...files, snapshot: Boolean(snapshot), readiness: settings.environmentFrom!.readinessCarried } });
+      res.status(201).json({ session: h.session, run: ctl.run, clones, copied: { ...files, snapshot: Boolean(snapshot) } });
     } catch (e) {
       d.runs.stopNow(id);
       await removeSandbox(d.sandbox, id, { everything: true }).catch(() => undefined);
@@ -783,7 +765,7 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
       for (const name of input.setupScripts) setupScripts.push(await getScript(name));
       await fs.mkdir(cfg.sessionsRoot, { recursive: true });
       // Nothing is cloned and no container exists: the session is a plan until you initialize it.
-      const created = await createSession(cfg.sessionsRoot, { ...input, planning: cleanPlanning(input.planning), repos, zips, setupScripts, image: cfg.devboxImage });
+      const created = await createSession(cfg.sessionsRoot, { ...input, repos, zips, setupScripts, image: cfg.devboxImage });
       for (const z of zips) await fs.rm(z.file, { force: true });
       let imported: { created: string[]; skipped: { title: string; reason: string }[] } | undefined;
       if (pasted) {
@@ -798,7 +780,7 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
     }),
   );
 
-  // --- the plan: repositories, attachments, recipes, setup mode, then Initialize ------------
+  // --- the plan: repositories, attachments, recipes, then Initialize ------------
 
   const notWhileRunning = (res: Response, id: string): boolean => {
     if (!d.runs.status(id)) return false;
@@ -951,7 +933,7 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
       await removeClones(d.getConfig().sessionsRoot, h.session);
       await h.mutate((docs) => ({
         next: {
-          session: { ...docs.session, initializedAt: null, readiness: undefined, snapshot: undefined, setup: [], repos: docs.session.repos.map(({ baseCommit: _b, ...r }) => r), state: "setup" },
+          session: { ...docs.session, initializedAt: null, snapshot: undefined, setup: [], repos: docs.session.repos.map(({ baseCommit: _b, ...r }) => r), state: "setup" },
         },
       }));
       res.json({ ok: true });
@@ -1027,16 +1009,16 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
   api.post(
     "/sessions/:id/run",
     wrap(async (req, res) => {
-      const { action, prompt } = z.object({ action: z.enum(["start", "plan", "brief", "setup", "prompt", "pause", "stop"]), prompt: z.string().max(20_000).optional() }).parse(req.body);
+      const { action, prompt } = z.object({ action: z.enum(["start", "prompt", "pause", "stop"]), prompt: z.string().max(20_000).optional() }).parse(req.body);
       const id = param(req, "id");
-      if (action === "start" || action === "plan" || action === "brief" || action === "setup" || action === "prompt") {
+      if (action === "start" || action === "prompt") {
         let ctl;
         let synced: string[] = [];
         try {
           // Starting anything ends an agent terminal first (its changes are committed); the page asked you before calling this.
           if (!(await d.runs.endTerminal(id))) throw new Error("The agent terminal did not end in time; try again");
-          if ((action === "start" || action === "plan") && !d.runs.status(id)) synced = await syncBeforeStart(await d.hub.get(id));
-          ctl = await d.runs.start(id, { plan: action === "plan" ? (prompt ?? "") : undefined, brief: action === "brief", setup: action === "setup", prompt: action === "prompt" ? (prompt ?? "") : undefined });
+          if (action === "start" && !d.runs.status(id)) synced = await syncBeforeStart(await d.hub.get(id));
+          ctl = await d.runs.start(id, { prompt: action === "prompt" ? (prompt ?? "") : undefined });
         } catch (e) {
           res.status(409).json({ error: (e as Error).message });
           return;
@@ -1200,16 +1182,10 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
       const h = await d.hub.get(param(req, "id"));
       const logs: Record<string, string> = {};
       for (const sc of h.session.setupScripts) logs[sc.name] = await fs.readFile(path.join(h.paths.setup, `${sc.name}.log`), "utf8").catch(() => "");
-      const note = (name: string) => fs.readFile(path.join(h.paths.notes, name), "utf8").catch(() => "");
       res.json({
         scripts: h.session.setupScripts.map(({ script, ...meta }) => ({ ...meta, lines: script.split("\n").length })),
         results: h.session.setup,
         logs,
-        requirements: h.session.requirements,
-        readiness: h.session.readiness ?? null,
-        env: await note("env.md"),
-        recipe: await note("setup.sh"),
-        recipeLog: await fs.readFile(path.join(h.paths.setup, "recipe.log"), "utf8").catch(() => ""),
       });
     }),
   );
@@ -1234,18 +1210,6 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
     }),
   );
 
-  /** The project brief the orientation worker wrote, with its age. */
-  api.get(
-    "/sessions/:id/brief",
-    wrap(async (req, res) => {
-      const h = await d.hub.get(param(req, "id"));
-      const file = path.join(h.paths.notes, "brief.md");
-      const text = await fs.readFile(file, "utf8").catch(() => "");
-      const st = text ? await fs.stat(file) : null;
-      res.json({ text, updatedAt: st?.mtime.toISOString() ?? null, words: text ? text.split(/\s+/).filter(Boolean).length : 0 });
-    }),
-  );
-
   /** The lead's plan and progress note (notes/state.md), with its age. */
   api.get(
     "/sessions/:id/state-note",
@@ -1266,89 +1230,6 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
       const text = await fs.readFile(path.join(h.paths.workspace, ".verstas", "logs", "sudo.log"), "utf8").catch(() => "");
       const commands = [...text.matchAll(/COMMAND=(.*)$/gm)].map((m) => m[1]!.trim());
       res.json({ count: commands.length, commands: commands.slice(-200) });
-    }),
-  );
-
-  /**
-   * Saves this session's recipe (notes/setup.sh) and environment description
-   * (notes/env.md) to the library under a name, to tick on the next session
-   * for the same repositories. It runs as the agent, with sudo, like here.
-   */
-  api.post(
-    "/sessions/:id/recipe/promote",
-    wrap(async (req, res) => {
-      const body = z.object({ name: z.string(), description: z.string().max(500).default("") }).parse(req.body);
-      const h = await d.hub.get(param(req, "id"));
-      const script = await fs.readFile(path.join(h.paths.notes, "setup.sh"), "utf8").catch(() => "");
-      if (!script.trim()) {
-        res.status(404).json({ error: "This session has no notes/setup.sh yet; the setup worker writes it." });
-        return;
-      }
-      const env = await fs.readFile(path.join(h.paths.notes, "env.md"), "utf8").catch(() => "");
-      const saved = await saveScript({
-        name: body.name,
-        description: body.description || `Recipe from session ${h.session.name}`,
-        hosts: [...new Set([...hostsFromScript(script), ...h.session.allowlist.filter((x) => !DEFAULT_ALLOWLIST.includes(x))])],
-        note: `Recipe saved from session ${h.session.name} (${h.session.repos.map((r) => r.name).join(", ") || "no repositories"}). It already ran; notes/env.md describes the result.`,
-        script,
-        runAs: "agent",
-        env,
-      });
-      res.json({ ok: true, name: saved.name });
-    }),
-  );
-
-  /** The setup mode and the instructions the setup worker gets on top of what it works out itself. */
-  api.put(
-    "/sessions/:id/requirements",
-    wrap(async (req, res) => {
-      const body = z.object({ requirements: z.string().max(20_000).optional(), setupMode: setupModeSchema.optional() }).parse(req.body);
-      const h = await d.hub.get(param(req, "id"));
-      const session = await h.mutate((docs) => {
-        const next = { ...docs.session, requirements: body.requirements === undefined ? docs.session.requirements : body.requirements.trim(), setupMode: body.setupMode ?? docs.session.setupMode };
-        return { next: { session: next }, result: next };
-      });
-      res.json({ ok: true, session });
-    }),
-  );
-
-  /**
-   * Accept the environment as it is: an initialization whose setup worker
-   * reported "needs" is completed by you, after you dealt with it by hand
-   * or decided it does not matter. Optionally starts the work run.
-   */
-  api.post(
-    "/sessions/:id/setup/confirm",
-    wrap(async (req, res) => {
-      const { start } = z.object({ start: z.boolean().default(false) }).parse(req.body ?? {});
-      const h = await d.hub.get(param(req, "id"));
-      if (notWhileRunning(res, h.id)) return;
-      if (!h.session.repos.every((r) => r.baseCommit)) {
-        res.status(409).json({ error: "The repositories are not cloned yet; press Initialize first" });
-        return;
-      }
-      // Commit the box as it is now, so a recreate starts from a set-up environment. Best effort: a failed snapshot leaves the recipe as the fallback.
-      let snapshot: { image: string; baseImageId: string } | undefined;
-      let snapshotError: string | undefined;
-      if ((await sandboxStatus(d.sandbox, h.id).catch(() => null))?.container === "running") {
-        snapshot = await snapshotSandbox(d.sandbox, h.session).catch((e: Error) => {
-          snapshotError = e.message;
-          return undefined;
-        });
-      } else snapshotError = "the container is not running; no snapshot taken";
-      await h.mutate((docs) => ({
-        next: {
-          session: {
-            ...docs.session,
-            initializedAt: docs.session.initializedAt ?? now(),
-            readiness: docs.session.readiness ? { ...docs.session.readiness, confirmedAt: now() } : undefined,
-            snapshot: snapshot ? { ...snapshot, at: now() } : docs.session.snapshot,
-            state: docs.session.state === "setup" ? "created" : docs.session.state,
-          },
-        },
-      }));
-      if (start) await d.runs.start(h.id);
-      res.json({ ok: true, snapshot: snapshot?.image ?? null, snapshotError });
     }),
   );
 
@@ -1959,87 +1840,26 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
       const result = await h.mutate((docs) => {
         const r = importBoard(docs.board, parsed, { by: "user", defaultState: state });
         validateRepos(r.board.tickets, docs.session.repos.map((x) => x.name), { ignoreDone: true });
-        return { next: { board: r.board }, result: { created: r.created, updated: r.updated, skipped: r.skipped, chores: r.chores } };
+        return { next: { board: r.board }, result: { created: r.created, updated: r.updated, skipped: r.skipped } };
       });
       res.json(result);
     }),
   );
 
-  /** Every ticket and chore goes; the goal stays. Not while a run is active: its worker holds a ticket. */
+  /** Every ticket goes; the goal stays. Not while a run is active: the lead may be on a ticket. */
   api.post(
     "/sessions/:id/board/clear",
     wrap(async (req, res) => {
       const h = await d.hub.get(param(req, "id"));
       if (d.runs.status(h.id)) {
-        res.status(409).json({ error: "Stop the run first; a worker may hold a ticket" });
+        res.status(409).json({ error: "Stop the run first; the lead may be on a ticket" });
         return;
       }
       const removed = await h.mutate((docs) => ({
-        next: { board: { ...docs.board, tickets: [], chores: [], sweep: undefined } },
-        result: { tickets: docs.board.tickets.length, chores: docs.board.chores.length },
+        next: { board: { ...docs.board, tickets: [] } },
+        result: { tickets: docs.board.tickets.length },
       }));
       res.json({ ok: true, removed });
-    }),
-  );
-
-  // --- chores: small fixes swept in batches (docs/BOARD.md) ------------------
-
-  api.post(
-    "/sessions/:id/chores",
-    wrap(async (req, res) => {
-      const input = z.object({ text: z.string().min(1).max(2000), where: z.string().max(500).optional(), repo: z.string().min(1).max(100).optional() }).parse(req.body);
-      const h = await d.hub.get(param(req, "id"));
-      const id = await h.mutate((docs) => {
-        if (input.repo && !docs.session.repos.some((x) => x.name === input.repo)) throw new BoardError(`No repository ${input.repo} in this session`, "unknown_repo");
-        const r = addChore(docs.board, input, "user", { state: "open" });
-        return { next: { board: r.board }, result: r.id };
-      });
-      res.status(201).json({ id });
-    }),
-  );
-
-  /** Approve a proposed chore (to open) or drop one. A chore in a sweep belongs to the lead until the sweep is settled. */
-  api.post(
-    "/sessions/:id/chores/:cid/state",
-    wrap(async (req, res) => {
-      const { state, note } = z.object({ state: z.enum(["open", "dropped"]), note: z.string().max(2000).optional() }).parse(req.body);
-      const cid = choreIdSchema.parse(param(req, "cid"));
-      const h = await d.hub.get(param(req, "id"));
-      await h.mutate((docs) => ({ next: { board: setChoreState(docs.board, cid, state, note) } }));
-      res.json({ ok: true });
-    }),
-  );
-
-  api.post(
-    "/sessions/:id/chores/approve-all",
-    wrap(async (req, res) => {
-      const h = await d.hub.get(param(req, "id"));
-      const ids = await h.mutate((docs) => {
-        let board = docs.board;
-        const moved: string[] = [];
-        for (const c of docs.board.chores) {
-          if (c.state !== "proposed") continue;
-          board = setChoreState(board, c.id, "open");
-          moved.push(c.id);
-        }
-        return { next: { board }, result: moved };
-      });
-      res.json({ ok: true, approved: ids });
-    }),
-  );
-
-  /** A chore that deserves a reviewer becomes a backlog ticket. */
-  api.post(
-    "/sessions/:id/chores/:cid/promote",
-    wrap(async (req, res) => {
-      const { note } = z.object({ note: z.string().max(2000).optional() }).parse(req.body ?? {});
-      const cid = choreIdSchema.parse(param(req, "cid"));
-      const h = await d.hub.get(param(req, "id"));
-      const ticketId = await h.mutate((docs) => {
-        const r = promoteChore(docs.board, cid, "user", { note });
-        return { next: { board: r.board }, result: r.ticketId };
-      });
-      res.status(201).json({ id: ticketId });
     }),
   );
 
@@ -2048,14 +1868,10 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
     kind: ticketKindSchema.optional(),
     /** Expected repositories, a hint; [] clears. */
     repos: z.array(z.string().min(1).max(100)).max(20).optional(),
-    size: ticketSizeSchema.optional(),
     priority: z.number().int().min(0).max(1000).optional(),
     deps: z.array(ticketIdSchema).optional(),
     spec: z.string().max(50_000).optional(),
     acceptance: z.array(z.string().min(1).max(2000)).optional(),
-    pinned: z.boolean().optional(),
-    /** null clears the ticket's own agent. */
-    agent: agentSpecSchema.nullable().optional(),
     /** null goes back to the session's review setting. */
     review: reviewModeSchema.nullable().optional(),
   });
@@ -2082,7 +1898,7 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
       const h = await d.hub.get(param(req, "id"));
       const ticket = await h.mutate((docs) => {
         const t = getTicket(docs.board, tid);
-        const next: Ticket = { ...t, ...Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined)), agent: patch.agent === null ? undefined : (patch.agent ?? t.agent), review: patch.review === null ? undefined : (patch.review ?? t.review), updatedAt: now() } as Ticket;
+        const next: Ticket = { ...t, ...Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined)), review: patch.review === null ? undefined : (patch.review ?? t.review), updatedAt: now() } as Ticket;
         const board = replaceTicket(docs.board, next);
         validateDeps(board.tickets);
         validateRepos([next], docs.session.repos.map((x) => x.name));
@@ -2110,9 +1926,7 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
       const t = await h.mutate((docs) => {
         const cur = getTicket(docs.board, tid);
         if (!canTransition(cur.state, state)) throw new BoardError(`Cannot move ${tid} from ${cur.state} to ${state}`, "illegal_transition");
-        let board = transition(docs.board, tid, state, { by: "user", text: note ?? `Moved to ${state}` });
-        // A user putting a blocked or done ticket back in play starts its attempt count over.
-        if (state === "ready" && (cur.state === "blocked" || cur.state === "done")) board = replaceTicket(board, { ...getTicket(board, tid), attempts: 0 });
+        const board = transition(docs.board, tid, state, { by: "user", text: note ?? `Moved to ${state}` });
         return { next: { board }, result: getTicket(board, tid) };
       });
       res.json(t);
@@ -2209,14 +2023,11 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
           model: z.string().max(100).nullable().optional(),
           /** Replaces the agents block. Applies to the next worker that starts. */
           agents: sessionAgentsSchema.optional(),
-          /** How planning agents size tickets; replaces the block, null (or nothing set) clears it. Applies to the next planner or terminal. */
-          planning: planningSchema.nullable().optional(),
         })
         .parse(req.body);
       const h = await d.hub.get(param(req, "id"));
       await h.mutate((docs) => {
         const s = docs.session;
-        const planning = body.planning === undefined ? s.planning : cleanPlanning(body.planning);
         let agents = body.agents ?? s.agents;
         if (body.model !== undefined && !body.agents) {
           const worker = agentFor(s, "lead");
@@ -2228,7 +2039,6 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
           limits: limitsSchema.parse({ ...s.limits, ...body.limits }),
           model: body.model === undefined ? s.model : body.model?.trim() || undefined,
           agents,
-          planning,
         };
         // A newly chosen agent's backend joins the allowlist; the proxy picks it up before the next worker.
         const packs = withAgentPacks(next.packs, next);
@@ -2300,11 +2110,8 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
           } else if (det.kind === "pack") {
             session = { ...session, packs: [...new Set([...session.packs, det.pack])], allowlist: [...new Set([...session.allowlist, ...packHosts([det.pack])])] };
           } else if (det.kind === "resources") {
-            session = {
-              ...session,
-              caps: capsSchema.parse({ ...session.caps, ...(det.workerMinutes ? { workerMinutes: det.workerMinutes } : {}), ...(det.workerTurns ? { workerTurns: det.workerTurns } : {}) }),
-              limits: limitsSchema.parse({ ...session.limits, ...(det.memoryMb ? { memory: `${det.memoryMb}m` } : {}) }),
-            };
+            // Minutes and turns from before are read and ignored: the lead has no such caps.
+            session = { ...session, limits: limitsSchema.parse({ ...session.limits, ...(det.memoryMb ? { memory: `${det.memoryMb}m` } : {}) }) };
           }
         }
         if (resolved && next.ticketId) {
@@ -2315,12 +2122,6 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
         if (resolved && (session.state === "halted" || session.state === "waiting")) session = { ...session, state: isInitialized(session) ? "paused" : "setup" };
         return { next: { inbox, board, session }, result: next };
       });
-      // Initialization keeps going while you answer: once every setup
-      // request is decided, the setup worker runs again with the outcomes.
-      const after = await d.hub.get(h.id);
-      if (result.state === "resolved" && !result.ticketId && !isInitialized(after.session) && !after.inbox.requests.some((r) => r.state === "open" && !r.ticketId) && !d.runs.status(h.id)) {
-        await d.runs.start(h.id, { init: true }).catch((e: Error) => console.warn(`[ui] could not continue initialization for ${h.id}: ${e.message}`));
-      }
       res.json({ ok: true, request: result });
     }),
   );

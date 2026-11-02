@@ -1,4 +1,4 @@
-import { attachmentLines, capsSchema, TICKET_SIZE_GUIDE, type Session } from "../core/types.js";
+import { attachmentLines, type Session } from "../core/types.js";
 import type { Config } from "../config.js";
 import type { SetupScript } from "../scripts/library.js";
 import type { DockerRunner } from "../sandbox/docker.js";
@@ -74,13 +74,13 @@ const RULES = [
   "Setup scripts run once as root when the session's container is created (bash -e, non-interactive), with their output logged. The agent can also install with sudo during the session.",
   "No systemd and no Docker inside the box. Services (Postgres, Redis, dev servers) run as plain processes under `svc` (svc start <name> --port N -- <cmd>), which remembers them and restarts them after a container restart.",
   "Repositories arrive as fresh git clones under /workspace/<name> on a run branch; git-ignored files (.env, keys) are not there. Zip attachments are extracted under /workspace/attachments.",
-  "The agent commits nothing; the harness commits once per ticket. The person takes the work to GitHub as a pull request and later syncs the clones to the merged result; the agent never pushes or pulls.",
+  "One lead works the session's goal and board. It commits its own work (the ticket id in the subject); the harness commits what it leaves when a lead life ends. The person takes the work to GitHub as a pull request and later syncs the clones to the merged result; the agent never pushes or pulls.",
 ];
 
 export const buildContext = (i: ContextInput): string => {
   const out: string[] = [];
   out.push("# Verstas sandbox: context for an assistant", "");
-  out.push("Verstas runs coding agents inside a Docker container on the user's machine, one container per session, working through a kanban board of tickets. What follows is true for this installation today.", "");
+  out.push("Verstas runs one coding agent, the lead, inside a Docker container on the user's machine, one container per session. The lead works toward the session's goal and its board of tickets; an independent reviewer judges the tickets it finishes. What follows is true for this installation today.", "");
 
   out.push("## The box", "");
   if (i.facts) {
@@ -105,7 +105,7 @@ export const buildContext = (i: ContextInput): string => {
     out.push(`- Attachments:${s.attachments.length ? `\n${attachmentLines(s.attachments, "  ")}` : " none"}`);
     out.push(`- Network allowlist: ${s.allowlist.join(", ") || "none"}`);
     out.push(`- Setup scripts chosen: ${s.setupScripts.length ? s.setupScripts.map((x) => x.name).join(", ") : "none"}`);
-    out.push(`- Caps per worker: ${s.caps.workerMinutes} min, ${s.caps.workerTurns} turns, ${s.caps.budgetUsd} USD; model ${s.model ?? "token default"}; reviewer ${s.caps.reviewer ? "on" : "off"}.`);
+    out.push(`- One lead works the goal and the board; reviewer ${s.caps.reviewer ? "on" : "off"}; lead caps: ${s.caps.leadMinutes || s.caps.leadTurns ? [s.caps.leadMinutes ? `${s.caps.leadMinutes} min` : "", s.caps.leadTurns ? `${s.caps.leadTurns} turns` : ""].filter(Boolean).join(", ") : "none"}; model ${s.model ?? "token default"}.`);
     out.push("");
   }
 
@@ -142,23 +142,18 @@ export const buildContext = (i: ContextInput): string => {
 };
 
 /** The board format and the rules a good board follows; shared by the "board" and "draft" tails. */
-const boardFormat = (repos: readonly string[]): string[] => {
-  const caps = capsSchema.parse({});
-  return [
-    "## Board format",
-    "",
-    "```json",
-    JSON.stringify({ verstas: 1, goal: "…", tickets: [{ id: "T-1", title: "…", kind: "feature", repo: repos[0] ?? "name", size: "S", priority: 10, deps: [], state: "ready", spec: "…", acceptance: ["…"] }] }, null, 2),
-    "```",
-    "- `kind`: feature | bug | followup | chore. `size`: S (under half a day) | M | L. Lower `priority` runs first. `deps` are ids that must be done first. `state`: backlog or ready.",
-    `- \`repo\` must be one of: ${repos.length ? repos.join(", ") : "(the session's repository names)"}; a ticket with another name is refused.`,
-    "- Acceptance criteria must be checkable by a reviewer who did not write the code. Prefer ten small tickets over thirty vague ones. Each ticket is worked by a fresh agent with the spec, the acceptance criteria and the last five reports as its only context, so specs must say where and how.",
-    '- `agent` (optional): `{ "driver": "claude" | "codex" | "cursor", "model": "…" }` runs this ticket\'s implementer on that agent instead of the session\'s worker: a fresh worker, judged by the session\'s reviewer. Use it only for tickets that need that agent\'s particular strength (for example judging rendered images); the driver needs a credential in the user\'s Settings. In lead mode the lead hands such a ticket to its agent with `board_run` rather than doing it itself.',
-    "- Chores (small fixes not worth a ticket) can be listed under `chores` (`{ \"text\": …, \"where\": … }`); a lead sweeps them in batches; the session's reviewer reads the batch.",
-    `- One worker gets ${caps.workerMinutes} minutes and ${caps.workerTurns} model turns by default, then the ticket goes back to the board. Size tickets so one worker finishes one.`,
-    `- Ticket size: every ticket pays a fixed cost however small it is (a worker reads its way in, a reviewer runs the checks and reads the change, a commit), so many tiny tickets run slower than fewer coherent ones. A session can set the size its planner and agent terminals aim for (\`planning.ticketSize\`, with optional \`guidance\` in your words; draft_update sets it): ${(["S", "M", "L"] as const).map((k) => `${k}, ${TICKET_SIZE_GUIDE[k]}`).join("; ")}. Raise the worker caps to match when you choose L.`,
-  ];
-};
+const boardFormat = (repos: readonly string[]): string[] => [
+  "## Board format",
+  "",
+  "```json",
+  JSON.stringify({ verstas: 1, goal: "…", tickets: [{ id: "T-1", title: "…", kind: "feature", repo: repos[0] ?? "name", priority: 10, deps: [], state: "ready", spec: "…", acceptance: ["…"] }] }, null, 2),
+  "```",
+  "- `kind`: feature | bug | followup | chore, a label. Lower `priority` first and `deps` are hints the lead reads; the harness orders nothing by them. `state`: backlog (waits for the person) or ready.",
+  `- \`repo\` must be one of: ${repos.length ? repos.join(", ") : "(the session's repository names)"}; a ticket with another name is refused.`,
+  "- Acceptance criteria must be checkable by a reviewer who did not write the code. The lead reads the whole board and decides how to work it, so a spec should say what and where, not how to proceed.",
+  "- `review` (optional, the person's choice): `full` runs the independent reviewer on this ticket, `none` skips it; absent, the session's setting applies.",
+  "- The goal is optional: the lead works toward it beside the tickets, so a session can be a goal alone, a board alone, or both.",
+];
 
 /** What an assistant needs to prepare a draft session through the draft tools. */
 const draftGuide = (repos: readonly string[]): string[] => [
@@ -172,17 +167,16 @@ const draftGuide = (repos: readonly string[]): string[] => [
   "",
   "## Drafts",
   "",
-  "A draft is a session that does not exist yet: a name, a goal, setup instructions, repositories, network packs, recipes, notes for the person, and a board. You prepare it; a person reviews it in the Verstas app, creates the session and initializes it. You cannot create, start or change a session, and you cannot run anything in the box.",
+  "A draft is a session that does not exist yet: a name, a goal, repositories, network packs, recipes, notes for the person, and a board. You prepare it; a person reviews it in the Verstas app, creates the session and initializes it. You cannot create, start or change a session, and you cannot run anything in the box.",
   "",
   "Work in small steps and read the problems every tool returns:",
   "",
-  "1. `draft_create` with a name and the goal. The goal becomes the person's first planning request (the planner drafts tickets from it); write the tickets yourself when you can, since workers read tickets, not the goal.",
+  "1. `draft_create` with a name and the goal. One lead works the goal and the board together; tickets are optional, so add them when the work splits into pieces a reviewer should judge one by one.",
   "2. `draft_set_repositories` with repositories from `list_repositories`. The ticket `repo` field is the directory name (the target name unless you rename it).",
-  "3. `draft_update` with `requirements`: instructions for the setup worker, one verifiable line per need (\"Chromium for Playwright launches\", \"Postgres 17 reachable on 5432\"), on top of what it works out from the repositories and the board. It runs at initialization, before any ticket, so tickets do not install toolchains.",
-  "4. `draft_set_network` for the toolchains the repositories download from, and `draft_set_recipes` for library recipes that already set up part of the box.",
-  "5. `draft_add_tickets` a few at a time, in dependency order. Give each ticket a spec that names files and commands, and acceptance criteria a reviewer can check by running something.",
-  "6. `draft_validate` until there are no errors. Put assumptions and open questions in `notes` for the person.",
-  "7. Tell the person the draft is ready and give them the review link from the tool results. They create the session; you do not.",
+  "3. `draft_set_network` for the toolchains the repositories download from, and `draft_set_recipes` for library recipes that already set up part of the box.",
+  "4. `draft_add_tickets` a few at a time, in dependency order. Give each ticket a spec that names files and commands, and acceptance criteria a reviewer can check by running something.",
+  "5. `draft_validate` until there are no errors. Put assumptions and open questions in `notes` for the person.",
+  "6. Tell the person the draft is ready and give them the review link from the tool results. They create the session; you do not.",
   "",
-  "Leave caps, budget, model, memory and attachments out: the person sets them on the session page before initializing.",
+  "Leave caps, model, memory and attachments out: the person sets them on the session page before initializing.",
 ];

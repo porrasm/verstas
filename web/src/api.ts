@@ -6,19 +6,14 @@ export type Ticket = {
   id: string;
   title: string;
   kind: string;
-  /** The repositories the planner expects it to touch: a hint, not a limit. */
+  /** The repositories it is expected to touch: a hint, not a limit. */
   repos: string[];
-  size: string;
   priority: number;
   deps: string[];
   state: string;
   spec: string;
   acceptance: string[];
   notes: { at: string; by: string; text: string }[];
-  attempts: number;
-  pinned: boolean;
-  /** Runs this ticket's implementer on its own agent instead of the session's worker. */
-  agent?: AgentSpec;
   /** How the ticket is judged; absent, the session's setting (reviewer on: full, off: none). "checks" is an old value that reads as none. */
   review?: ReviewMode;
   report?: string;
@@ -66,13 +61,11 @@ export const fmtSpan = (secs: number): string => {
   if (m < 60) return `${m}m`;
   return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, "0")}m`;
 };
-export type Chore = { id: string; text: string; where?: string; repo?: string; state: "proposed" | "open" | "sweeping" | "done" | "dropped" | "promoted"; by: string; fromTicket?: string; outcome?: string; promotedTo?: string; sweep?: number; createdAt: string; updatedAt: string };
-export type Sweep = { n: number; ids: string[]; state: "working" | "judging" | "accepted" | "refused"; startedAt: string; endedAt?: string; note?: string; diff?: { added: number; removed: number; files: number } };
-export type Board = { goal: string; tickets: Ticket[]; chores: Chore[]; sweep?: Sweep };
+export type Board = { goal: string; tickets: Ticket[] };
 export type ActionDetail =
   | { kind: "network"; host: string; port?: number }
   | { kind: "pack"; pack: string }
-  | { kind: "resources"; workerMinutes?: number; workerTurns?: number; memoryMb?: number }
+  | { kind: "resources"; memoryMb?: number }
   | { kind: "instruction"; text: string }
   | { kind: "question"; text: string; options?: string[] };
 export type RequestAction = { id: string; detail: ActionDetail; state: "open" | "approved" | "declined"; outcome?: string; decidedAt?: string };
@@ -104,17 +97,11 @@ export type Session = {
   attachments: { name: string; dir: string; bytes: number; skipped: string[]; description?: string }[];
   allowlist: string[];
   packs: string[];
-  caps: { workerMinutes: number; workerTurns: number; runTickets: number; budgetUsd: number; ticketAttempts: number; reviewer: boolean; resumeWorker?: boolean; /** Optional liveness limits on one lead life; unset means none. */ leadMinutes?: number; leadTurns?: number; sweepMaxLines?: number; sweepMaxFiles?: number; choreApproval?: boolean; choreSweepAt?: number; goalRounds?: number; progressMinutes?: number };
-  /** The ticket size planning agents aim for; absent, they choose. */
-  planning?: { ticketSize?: "S" | "M" | "L"; guidance?: string };
+  caps: { reviewer: boolean; /** Optional liveness limits on one lead life; unset means none. */ leadMinutes?: number; leadTurns?: number; progressMinutes: number };
   limits: { memory: string; cpus: number; pids: number; workspaceMb: number };
   rootScripts: { script: string; cwd?: string; at: string; requestId?: string }[];
   setupScripts: { name: string; description: string; hosts: string[]; note: string; script: string; runAs: "root" | "agent" }[];
   setup: { name: string; ok: boolean; code: number; at: string; tail: string }[];
-  /** Setup instructions for the setup worker (agentic mode). */
-  requirements: string;
-  setupMode: "agentic" | "skip";
-  readiness?: Readiness;
   prompts: { at: string; runId: number; kind: "prompt" | "plan"; text: string; reply: string; stopReason: string }[];
   state: string;
   /** Shown on the remote dashboard; off by default. */
@@ -126,8 +113,7 @@ export type RemoteSettings = {
   hasToken: boolean;
   status: { state: "off" | "unconfigured" | "connecting" | "connected" | "error"; error?: string; lastPushAt?: string; lastCommandAt?: string; shared: number };
 };
-export type Readiness = { verdict: "ready" | "needs"; at: string; summary: string; checks: { text: string; ok: boolean }[]; confirmedAt?: string };
-/** The environment exists: clones, container, setup done or skipped. Mirrors src/core/types.ts. */
+/** The environment exists: clones, container, recipes. Mirrors src/core/types.ts. */
 export const isInitialized = (s: { initializedAt: string | null }): boolean => Boolean(s.initializedAt);
 export type NetworkPack = { name: string; title: string; hosts: string[]; /** Set on the packs that follow an agent choice instead of being ticked. */ agent?: DriverName };
 export type SetupScript = { name: string; description: string; hosts: string[]; note: string; script: string; runAs: "root" | "agent"; env: string };
@@ -142,7 +128,7 @@ export type SessionDetail = { session: Session; board: Board; inbox: Inbox; run?
 export type DriverName = "claude" | "codex" | "cursor";
 export type AgentSpec = { driver: DriverName; model?: string };
 export type SessionAgents = { worker?: AgentSpec; reviewer?: AgentSpec };
-export type WorkerRole = "implementer" | "reviewer" | "planner" | "setup" | "prompt" | "lead";
+export type WorkerRole = "reviewer" | "prompt" | "lead";
 /** Mirrors src/core/types.ts agentFor: the reviewer defaults to the worker; sessions from before `agents` ran Claude with `model`. */
 export const agentFor = (s: { model?: string; agents?: SessionAgents }, role: WorkerRole): AgentSpec => {
   const worker: AgentSpec = s.agents?.worker ?? { driver: "claude", model: s.model || undefined };
@@ -201,19 +187,17 @@ type WsMessage =
   | { type: "draft"; draftId: string; deleted: boolean };
 
 /** A draft session (src/drafts/draft.ts): prepared by an assistant, created by you. */
-export type DraftTicket = { id: string; title: string; kind?: string; repos?: string[]; /** Drafts from before `repos`. */ repo?: string; size?: string; priority?: number; deps?: string[]; state?: string; spec?: string; acceptance?: string[]; notes?: string[]; pinned?: boolean };
+export type DraftTicket = { id: string; title: string; kind?: string; repos?: string[]; /** Drafts from before `repos`. */ repo?: string; priority?: number; deps?: string[]; state?: string; spec?: string; acceptance?: string[]; notes?: string[] };
 export type Draft = {
   id: string;
   name: string;
   goal: string;
-  requirements: string;
   notes: string;
   repos: { target: string; branch?: string; name?: string }[];
   packs: string[];
   extraHosts: string[];
   recipes: string[];
   tickets: DraftTicket[];
-  planning?: { ticketSize?: "S" | "M" | "L"; guidance?: string };
   createdBy: "agent" | "user";
   createdAt: string;
   updatedAt: string;

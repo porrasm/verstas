@@ -34,33 +34,14 @@ export const ticketStateSchema = z.enum([
   "in_progress", // a worker holds it
   "review", // implementer finished, the reviewer running
   "waiting", // a request is open; returns to ready when answered
-  "blocked", // gave up (attempts exhausted, cap hit, reviewer said no)
+  "blocked", // the reviewer said no, or the lead gave up
   "done",
 ]);
 export type TicketState = z.infer<typeof ticketStateSchema>;
 
-/**
- * Who may create which kind: workers file bug/followup/chore; only the
- * planner creates feature tickets, and only from the goal. Enforced by the
- * agent API, not just the prompt.
- */
+/** A label on a ticket: anyone may use any kind. */
 export const ticketKindSchema = z.enum(["feature", "bug", "followup", "chore"]);
 export type TicketKind = z.infer<typeof ticketKindSchema>;
-
-export const ticketSizeSchema = z.enum(["S", "M", "L"]);
-export type TicketSize = z.infer<typeof ticketSizeSchema>;
-
-/**
- * What each size means when a session asks its planning agents for one (see
- * `planningSchema`). Every ticket pays a fixed cost (a worker reads in, a
- * reviewer reads in and runs the checks, a commit), so the size is the main
- * lever on how fast a board goes.
- */
-export const TICKET_SIZE_GUIDE: Record<TicketSize, string> = {
-  S: "one change in one place (a fix, a guard, one test, a doc section); under about 150 changed lines, under 15 minutes of agent time",
-  M: "one feature slice through the layers it needs (code, tests, docs) with its obvious follow-ups folded in; about 150 to 800 changed lines, 15 to 45 minutes of agent time",
-  L: "a whole feature or a family of related changes that one reviewer can still judge in one pass; about 800 to 2,000 changed lines, 45 to 120 minutes of agent time",
-};
 
 export const TICKET_ID_PATTERN = /^T-\d+$/;
 export const ticketIdSchema = z.string().regex(TICKET_ID_PATTERN, "Ticket ids look like T-12");
@@ -106,7 +87,7 @@ const legacyRepo = (v: unknown): unknown => {
   return { ...rest, repos };
 };
 
-/** What the judge found in one repository for a ticket or a sweep: the change. */
+/** What the judge found in one repository for a ticket: the change. */
 export const touchedRepoSchema = z.object({
   repo: z.string().min(1).max(100),
   added: z.number().int().nonnegative(),
@@ -122,21 +103,18 @@ export const ticketSchema = z.preprocess(legacyRepo, z.object({
   title: z.string().min(1).max(200),
   kind: ticketKindSchema.default("feature"),
   /**
-   * The clones under /workspace the planner expects the ticket to touch. A
-   * hint for you and the worker, never a limit: the judge acts on whatever
-   * repositories actually changed (`touched`).
+   * The clones under /workspace the ticket is expected to touch. A hint for
+   * you and the lead, never a limit: the judge acts on whatever repositories
+   * actually changed (`touched`).
    */
   repos: z.array(z.string().min(1).max(100)).max(20).default([]),
-  size: ticketSizeSchema.default("M"),
-  /** Lower runs first. Ties break on creation order. */
+  /** Lower first, as the lead reads it; the harness orders nothing by it. Ties break on creation order. */
   priority: z.number().int().min(0).max(1000).default(100),
   deps: z.array(ticketIdSchema).default([]),
   state: ticketStateSchema.default("backlog"),
   spec: z.string().max(50_000).default(""),
   acceptance: z.array(z.string().min(1).max(2000)).default([]),
   notes: z.array(noteSchema).default([]),
-  /** Judged attempts: counted when a verdict is given, never when a ticket parks, is stopped or is rate limited. */
-  attempts: z.number().int().nonnegative().default(0),
   /**
    * Each repository's HEAD when the ticket entered in_progress, recorded by
    * the harness. The reviewer reads the commits since then that carry the
@@ -145,16 +123,6 @@ export const ticketSchema = z.preprocess(legacyRepo, z.object({
    * when it is done.
    */
   baseline: z.record(z.string(), z.string()).optional(),
-  /** The agent may not reprioritize or re-dep a pinned ticket. */
-  pinned: z.boolean().default(false),
-  /**
-   * Run this ticket's implementer on this agent instead of the session's
-   * worker: a fresh worker on that driver and model, judged by the session's
-   * reviewer as usual. For tickets that need a particular strength (visual
-   * judgement of rendered output, say). In lead mode the lead hands such a
-   * ticket over with board_run instead of doing it itself.
-   */
-  agent: agentSpecSchema.optional(),
   /** How the ticket is judged; absent, the session's setting applies (see reviewModeFor). Set by you only. */
   review: reviewModeSchema.optional(),
   report: z.string().max(20_000).optional(),
@@ -174,7 +142,7 @@ export const ticketSchema = z.preprocess(legacyRepo, z.object({
   timeIn: z.partialRecord(ticketStateSchema, z.number().nonnegative()).optional(),
   agentSeconds: z.number().nonnegative().optional(),
   firstClaimAt: z.string().optional(),
-  /** Seconds in ready before the first claim (queueing), so the requeued time can leave it out. */
+  /** Seconds in ready before the first move into progress (queueing), so the requeued time can leave it out. */
   readyBeforeClaim: z.number().nonnegative().optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
@@ -211,92 +179,25 @@ export const ticketTiming = (t: Ticket, at: string = now()): TicketTiming | null
   return { working, judging, waitingOnYou, requeued, agent, total };
 };
 
-// --- Chores ----------------------------------------------------------------
-
-/**
- * A chore is a small, self-contained fix that is not worth a ticket: a nit,
- * a rename, a missing guard, a doc line. Reviewers, workers and you file
- * them; a lead sweeps a batch at a time and the harness commits the batch
- * as one commit after the repository's own checks and a size check. No
- * reviewer. Anything bigger is promoted to a ticket.
- */
-export const CHORE_ID_PATTERN = /^C-\d+$/;
-export const choreIdSchema = z.string().regex(CHORE_ID_PATTERN, "Chore ids look like C-3");
-
-export const choreStateSchema = z.enum([
-  "proposed", // filed by an agent while the session asks you to approve chores first
-  "open", // may be swept
-  "sweeping", // a lead holds it in the current sweep
-  "done",
-  "dropped", // not worth doing, with the reason
-  "promoted", // became a ticket (promotedTo)
-]);
-export type ChoreState = z.infer<typeof choreStateSchema>;
-
-export const choreSchema = z.object({
-  id: choreIdSchema,
-  text: z.string().min(1).max(2000),
-  /** Where to look: a file, a function, a page. Free text. */
-  where: z.string().max(500).optional(),
-  repo: z.string().min(1).max(100).optional(),
-  state: choreStateSchema.default("open"),
-  by: noteAuthorSchema,
-  /** The ticket whose work surfaced it. */
-  fromTicket: ticketIdSchema.optional(),
-  /** What the sweep said: done how, or dropped why. */
-  outcome: z.string().max(4000).optional(),
-  promotedTo: ticketIdSchema.optional(),
-  /** The sweep it was settled in. */
-  sweep: z.number().int().positive().optional(),
-  createdAt: z.string(),
-  updatedAt: z.string(),
-});
-export type Chore = z.infer<typeof choreSchema>;
-
-export const sweepStateSchema = z.enum(["working", "judging", "accepted", "refused"]);
-
-/** The current or last sweep: which chores a lead took, and how it ended. */
-export const sweepSchema = z.object({
-  n: z.number().int().positive(),
-  ids: z.array(choreIdSchema),
-  state: sweepStateSchema,
-  startedAt: z.string(),
-  endedAt: z.string().optional(),
-  /** Why it was refused, or what was committed. */
-  note: z.string().max(4000).optional(),
-  diff: diffStatSchema.optional(),
-});
-export type Sweep = z.infer<typeof sweepSchema>;
-
-export const SWEEP_OUTCOMES = ["done", "dropped", "promoted"] as const;
-export const sweepResultSchema = z.object({
-  id: choreIdSchema,
-  outcome: z.enum(SWEEP_OUTCOMES),
-  /** One line: what was done, why it was dropped, or what the ticket should say. */
-  note: z.string().max(2000).optional(),
-});
-export type SweepResult = z.infer<typeof sweepResultSchema>;
-
 export const BOARD_FORMAT_VERSION = 1;
 
 export const boardSchema = z.object({
   verstas: z.literal(BOARD_FORMAT_VERSION),
   goal: z.string().max(20_000).default(""),
   tickets: z.array(ticketSchema).default([]),
-  chores: z.array(choreSchema).default([]),
-  /** The sweep in flight, or the last one. */
-  sweep: sweepSchema.optional(),
+  // Boards from before carry `chores` and `sweep`; they are dropped on parse (the schema is not strict).
 });
 export type Board = z.infer<typeof boardSchema>;
 
 /**
- * What a paste or a planner may import: a subset of a ticket with loose
+ * What a paste or an agent may import: a subset of a ticket with loose
  * requirements. Ids are optional: an empty, missing or foreign id (one that
  * is not `T-n`, say a generator's `J-1`) gets the next free id on import, so
  * a board made outside Verstas can be pasted into an existing session; only
  * a `T-n` id that the board already has updates that ticket. The only
  * states accepted are backlog and ready, since the others describe a run in
- * flight.
+ * flight. Fields from before (`size`, `pinned`, `agent`) are accepted and
+ * dropped, so an old board pastes clean.
  */
 export const ticketImportSchema = z.object({
   id: z.string().max(40).optional(),
@@ -306,15 +207,12 @@ export const ticketImportSchema = z.object({
   repos: z.array(z.string().min(1).max(100)).max(20).optional(),
   /** The older single-repository form: read as `repos: [repo]` (see importRepos). */
   repo: z.string().min(1).max(100).optional(),
-  size: ticketSizeSchema.optional(),
   priority: z.number().int().min(0).max(1000).optional(),
   deps: z.array(ticketIdSchema).optional(),
   state: z.enum(["backlog", "ready"]).optional(),
   spec: z.string().max(50_000).optional(),
   acceptance: z.array(z.string().min(1).max(2000)).optional(),
   notes: z.array(z.string().min(1).max(20_000)).optional(),
-  pinned: z.boolean().optional(),
-  agent: agentSpecSchema.optional(),
   /** Yours only: the agent API leaves it out, and an agent's import ignores it. */
   review: reviewModeSchema.optional(),
 });
@@ -323,24 +221,13 @@ export type TicketImport = z.infer<typeof ticketImportSchema>;
 /** An import's expected repositories: `repos`, or the older `repo` as a list of one; undefined when it names neither. */
 export const importRepos = (t: Pick<TicketImport, "repos" | "repo">): string[] | undefined => t.repos ?? (t.repo ? [t.repo] : undefined);
 
-/** A chore as pasted or filed: text and where; the state only for your own imports. */
-export const choreImportSchema = z.object({
-  id: choreIdSchema.optional(),
-  text: z.string().min(1).max(2000),
-  where: z.string().max(500).optional(),
-  repo: z.string().min(1).max(100).optional(),
-  state: z.enum(["proposed", "open"]).optional(),
-});
-export type ChoreImport = z.infer<typeof choreImportSchema>;
-
 export const boardImportSchema = z
   .object({
     verstas: z.literal(BOARD_FORMAT_VERSION).optional(),
     goal: z.string().max(20_000).optional(),
     tickets: z.array(ticketImportSchema).default([]),
-    chores: z.array(choreImportSchema).default([]),
   })
-  .refine((b) => b.tickets.length > 0 || b.chores.length > 0, { message: "Nothing to import: no tickets and no chores", path: ["tickets"] });
+  .refine((b) => b.tickets.length > 0, { message: "Nothing to import: no tickets", path: ["tickets"] });
 export type BoardImport = z.infer<typeof boardImportSchema>;
 
 // --- Inbox: requests, messages, ideas ---------------------------------------
@@ -362,10 +249,11 @@ export const actionDetailSchema = z.discriminatedUnion("kind", [
       .refine((h) => !/^\d{1,3}(\.\d{1,3}){3}$/.test(h), "IP literals are not allowed"),
     port: z.number().int().min(1).max(65535).optional(),
   }),
+  /** More memory for the box; minutes and turns from before are read and ignored (the lead has no such caps). */
   z.object({
     kind: z.literal("resources"),
-    workerMinutes: z.number().int().min(1).max(600).optional(),
-    workerTurns: z.number().int().min(1).max(500).optional(),
+    workerMinutes: z.number().int().optional(),
+    workerTurns: z.number().int().optional(),
     memoryMb: z.number().int().min(256).max(65536).optional(),
   }),
   /** A named bundle of hosts (src/network/packs.ts), e.g. "playwright"; approval adds them all. */
@@ -526,19 +414,15 @@ export type Attachment = z.infer<typeof attachmentSchema>;
 export const attachmentLines = (attachments: readonly Attachment[], indent = ""): string =>
   attachments.map((a) => `${indent}- \`/workspace/attachments/${a.dir}\`${a.description?.trim() ? `: ${a.description.trim().replace(/\s+/g, " ")}` : ""}`).join("\n");
 
+/**
+ * What the harness enforces. Not much: an independent reviewer on or off,
+ * optional liveness limits on one lead life, and how often the lead is
+ * asked for a progress update. The lead decides everything else. Caps from
+ * before (worker minutes and turns, tickets per run, attempts, a budget,
+ * the chore caps, lives per run) are dropped on parse.
+ */
 export const capsSchema = z.object({
-  workerMinutes: z.number().int().min(1).max(600).default(25),
-  workerTurns: z.number().int().min(1).max(500).default(60),
-  runTickets: z.number().int().min(1).max(1000).default(40),
-  budgetUsd: z.number().min(0).max(10_000).default(50),
-  ticketAttempts: z.number().int().min(1).max(5).default(2),
   reviewer: z.boolean().default(true),
-  /**
-   * Implementers of one run continue one agent conversation instead of
-   * starting fresh per ticket (Claude Code only; others start fresh). The
-   * reviewer always starts fresh.
-   */
-  resumeWorker: z.boolean().default(false),
   /**
    * Optional liveness limits on one lead life: at a cap the lead is stopped
    * and a fresh lead continues from its note. Unset (the default), a life
@@ -546,24 +430,6 @@ export const capsSchema = z.object({
    */
   leadMinutes: z.number().int().min(10).max(1440).optional(),
   leadTurns: z.number().int().min(20).max(5000).optional(),
-  /** A chore sweep's commit may change at most this many lines (added plus removed) and files; over it, the sweep is refused and the work belongs in a ticket. */
-  sweepMaxLines: z.number().int().min(10).max(100_000).default(400),
-  sweepMaxFiles: z.number().int().min(1).max(1000).default(15),
-  /** Chores filed by agents wait for your approval before a sweep may take them. */
-  choreApproval: z.boolean().default(false),
-  /**
-   * With this many chores open, the lead sweeps before it starts the next
-   * ticket: claims and hand-overs are refused until the list is below the
-   * line again (sweep a batch, or drop what is not worth doing). 0 turns the
-   * line off; the lead then sweeps when it sees fit.
-   */
-  choreSweepAt: z.number().int().min(0).max(1000).default(10),
-  /**
-   * Lead lives (one start to exit, then the backup commit) per run before
-   * it pauses for a look. A run that keeps going without `done` is bounded
-   * by this and the budget, nothing else.
-   */
-  goalRounds: z.number().int().min(1).max(1000).default(25),
   /**
    * Every this many minutes of a run, the running lead is asked for a short
    * progress update, which it posts as a `message` to the inbox (Claude
@@ -572,47 +438,6 @@ export const capsSchema = z.object({
   progressMinutes: z.number().int().min(0).max(1440).default(30),
 });
 export type Caps = z.infer<typeof capsSchema>;
-
-/**
- * How the session's planning agents (the planner, an agent terminal) cut
- * work into tickets. Optional, and so is every field: absent, they choose
- * the size themselves as before.
- */
-export const planningSchema = z.object({
-  /** The size new tickets aim for (TICKET_SIZE_GUIDE). */
-  ticketSize: ticketSizeSchema.optional(),
-  /** Your own words on how to cut the work ("one species per ticket"). */
-  guidance: z.string().max(4000).optional(),
-});
-export type Planning = z.infer<typeof planningSchema>;
-
-/**
- * Paths a sweep may not change, as globs against the path inside the
- * repository: the documents a project treats as its contract and golden
- * files. Changing one of them is a ticket's job, with a reviewer.
- */
-export const SWEEP_PROTECTED_GLOBS: readonly string[] = ["**/DESIGN.md", "**/SPEC.md", "**/ARCHITECTURE.md", "**/fixtures/**", "**/__snapshots__/**", "**/*.snap"];
-
-/** A tiny glob: `**` spans directories, `*` one path segment; anchored at both ends. */
-export const globToRegExp = (glob: string): RegExp => {
-  let re = "";
-  for (let i = 0; i < glob.length; i++) {
-    const c = glob[i]!;
-    if (c === "*") {
-      if (glob[i + 1] === "*") {
-        if (glob[i + 2] === "/") {
-          re += "(?:.*/)?";
-          i += 2;
-        } else {
-          re += ".*";
-          i += 1;
-        }
-      } else re += "[^/]*";
-    } else re += /[.+^${}()|[\]\\?]/.test(c) ? `\\${c}` : c;
-  }
-  return new RegExp(`^${re}$`);
-};
-export const matchesAnyGlob = (p: string, globs: readonly string[]): boolean => globs.some((g) => globToRegExp(g).test(p));
 
 export const limitsSchema = z.object({
   memory: z.string().regex(/^\d+[mg]$/).default("4g"),
@@ -654,27 +479,12 @@ export const rootScriptRecordSchema = z.object({
   requestId: z.string().optional(),
 });
 
-export const readinessSchema = z.object({
-  verdict: z.enum(["ready", "needs"]),
-  at: z.string(),
-  summary: z.string().max(4000).default(""),
-  /** One line per requirement as the setup worker checked it. */
-  checks: z.array(z.object({ text: z.string().max(1000), ok: z.boolean() })).max(60).default([]),
-  /** Set when you confirmed a "ready" verdict; the gate is open from then on. */
-  confirmedAt: z.string().optional(),
-});
-export type Readiness = z.infer<typeof readinessSchema>;
-
 /**
  * A session is initialized once its environment exists: the repositories
- * are cloned, the container was created, and the setup step ran (or was
- * skipped). Until then it is a plan: a name, a board and settings, and
- * nothing can run in it.
+ * are cloned, the container was created and the recipes ran. Until then it
+ * is a plan: a name, a goal, a board and settings, and nothing can run in it.
  */
 export const isInitialized = (s: { initializedAt?: string | null }): boolean => Boolean(s.initializedAt);
-
-/** How the environment is set up at initialization: a setup worker, or nothing beyond the container and the recipes. */
-export const setupModeSchema = z.enum(["agentic", "skip"]);
 
 /** How an earlier goal ended: the lead said it was met, or you rewrote or dropped it. */
 export const goalOutcomeSchema = z.enum(["met", "revised", "abandoned"]);
@@ -690,13 +500,10 @@ export type GoalRecord = z.infer<typeof goalRecordSchema>;
 /** The lead's claim that the goal is met: when, in which run, and its assessment. Cleared when the goal changes. */
 export const goalMetSchema = z.object({ at: z.string(), runId: z.number().int(), note: z.string().max(8000) });
 export type GoalMet = z.infer<typeof goalMetSchema>;
-export type SetupMode = z.infer<typeof setupModeSchema>;
 
 export const sessionStateSchema = z.enum([
   "created", // initialized, no run yet
-  "setup", // not initialized: a plan, or an initialization that needs you
-  "checking", // the setup worker is running
-  "planning", // planner worker running
+  "setup", // not initialized: a plan
   "running",
   "paused", // by you, or by a rate limit / size check
   "halted", // by the agent (request kind halt)
@@ -705,15 +512,15 @@ export const sessionStateSchema = z.enum([
 ]);
 export type SessionState = z.infer<typeof sessionStateSchema>;
 
-/** Per-role agents. `worker` runs the lead, the planner, setup and prompts; `reviewer` defaults to the worker's agent. */
+/** Per-role agents. `worker` runs the lead and Ask the box; `reviewer` defaults to the worker's agent. */
 export const sessionAgentsSchema = z.object({
   worker: agentSpecSchema.optional(),
   reviewer: agentSpecSchema.optional(),
 });
 export type SessionAgents = z.infer<typeof sessionAgentsSchema>;
 
-/** The jobs the harness starts. Logs of old runs also carry `implementer` and `goal`, from before one lead did everything. */
-export type WorkerRole = "reviewer" | "planner" | "setup" | "prompt" | "lead";
+/** The jobs the harness starts. Logs of old runs also carry `implementer`, `goal`, `planner` and `setup`, from before one lead did everything. */
+export type WorkerRole = "reviewer" | "prompt" | "lead";
 
 /**
  * The agent for a role. Older sessions carry only `model`; that is the
@@ -725,17 +532,13 @@ export const agentFor = (s: { model?: string; agents?: SessionAgents }, role: Wo
   return worker;
 };
 
-/** Drivers named by tickets that are not done yet. */
-export const boardDrivers = (board: { tickets: readonly { agent?: AgentSpec; state: TicketState }[] }): DriverName[] => [...new Set(board.tickets.filter((t) => t.agent && t.state !== "done").map((t) => t.agent!.driver))];
-
-/** Every driver a session uses, worker first; with the board, the tickets' own agents too. */
-export const sessionDrivers = (s: { model?: string; agents?: SessionAgents; caps?: { reviewer?: boolean } }, board?: { tickets: readonly { agent?: AgentSpec; state: TicketState }[] }): DriverName[] => {
+/** Every driver a session uses, worker first. */
+export const sessionDrivers = (s: { model?: string; agents?: SessionAgents; caps?: { reviewer?: boolean } }): DriverName[] => {
   const out = [agentFor(s, "lead").driver];
   if (s.caps?.reviewer !== false) {
     const r = agentFor(s, "reviewer").driver;
     if (!out.includes(r)) out.push(r);
   }
-  for (const d of board ? boardDrivers(board) : []) if (!out.includes(d)) out.push(d);
   return out;
 };
 
@@ -771,39 +574,24 @@ export const sessionSchema = z.object({
   /** Network packs the allowlist was built from (src/network/packs.ts); the allowlist is what the proxy enforces. */
   packs: z.array(z.string()).default([]),
   caps: capsSchema.prefault({}),
-  /** How planning agents size tickets; absent, they choose (see planningSchema). */
-  planning: planningSchema.optional(),
   limits: limitsSchema.prefault({}),
   rootScripts: z.array(rootScriptRecordSchema).default([]),
   setupScripts: z.array(sessionSetupScriptSchema).default([]),
-  /** Results of the last setup run, one per script, in order. Empty until the container was first created. */
+  /** Results of the last recipe run, one per script, in order. Empty until the container was first created. */
   setup: z.array(setupResultSchema).default([]),
-  /**
-   * Setup instructions for the setup worker, on top of what it works out
-   * itself from the repositories and the board ("Postgres 17 reachable with
-   * the schema migrated; the e2e suite runs"). Used when `setupMode` is
-   * agentic; empty is fine.
-   */
-  requirements: z.string().max(20_000).default(""),
-  setupMode: setupModeSchema.default("agentic"),
-  /** Prompts you ran from the session page (one worker, no ticket) and planning requests, with their replies; newest last, at most 20. */
+  /** Prompts you ran from the session page (Ask the box: one worker, no ticket) with their replies; newest last, at most 20. Planning requests from before keep their kind. */
   prompts: z
     .array(z.object({ at: z.string(), runId: z.number().int(), kind: z.enum(["prompt", "plan"]).default("prompt"), text: z.string().max(20_000), reply: z.string().max(8000).default(""), stopReason: z.string().default("") }))
     .default([]),
   /**
-   * The box as it was when you confirmed the environment, committed to an
-   * image. A recreated container starts from it instead of replaying the
-   * setup, as long as the base image has not changed since.
+   * The box as it was at the end of the last run (and at initialization),
+   * committed to an image: the one record of what the lead installed
+   * system-wide. A recreated container starts from it instead of a bare
+   * image, as long as the base image has not changed since.
    */
   snapshot: z.object({ image: z.string(), at: z.string(), baseImageId: z.string() }).optional(),
-  /**
-   * Set on a session started from another session's environment: which one,
-   * when, and whether its confirmed readiness came along (the requirements
-   * were the same), in which case initialization skips the setup worker.
-   */
-  environmentFrom: z.object({ session: z.string(), at: z.string(), readinessCarried: z.boolean() }).optional(),
-  /** The setup worker's last verdict, and when it was accepted (at initialization, or by you). */
-  readiness: readinessSchema.optional(),
+  /** Set on a session started from another session's environment: which one and when. */
+  environmentFrom: z.object({ session: z.string(), at: z.string() }).optional(),
   /** Per-session auto-approval rules (P2); present in the schema so files stay forward-compatible. */
   preapprove: z
     .object({
@@ -884,7 +672,7 @@ export const eventSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("cost"), t: z.string(), ticket: ticketIdSchema.optional(), cost: costSchema }),
   z.object({ kind: z.literal("run"), t: z.string(), state: runStateSchema, reason: z.string().optional() }),
   z.object({ kind: z.literal("error"), t: z.string(), ticket: ticketIdSchema.optional(), text: z.string() }),
-  /** A chore sweep was judged: committed as one commit, or refused with the reason. */
+  /** From before chores were removed: logs of old runs still carry sweep verdicts. */
   z.object({ kind: z.literal("chores"), t: z.string(), sweep: z.number().int(), accepted: z.boolean(), done: z.number().int(), dropped: z.number().int(), promoted: z.number().int(), note: z.string() }),
   /** The last line a worker writes; the harness reads it to decide what happens to the ticket. */
   z.object({

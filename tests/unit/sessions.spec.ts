@@ -46,19 +46,6 @@ const makeSourceRepo = async (dir: string) => {
   await git(dir, "checkout", "-q", "main");
 };
 
-test("createSession keeps the setup mode it is given; agentic when none is", async () => {
-  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "verstas-sessions-"));
-  try {
-    const root = path.join(tmp, "sessions");
-    const skip = await createSession(root, { name: "Skip", repos: [], zips: [], image: "img", setupMode: "skip" });
-    expect((await loadSession(root, skip.session.id)).setupMode).toBe("skip");
-    const plain = await createSession(root, { name: "Plain", repos: [], zips: [], image: "img" });
-    expect((await loadSession(root, plain.session.id)).setupMode).toBe("agentic");
-  } finally {
-    await fs.rm(tmp, { recursive: true, force: true });
-  }
-});
-
 test("createSession records the plan; provisionSession clones fresh, without secrets, hooks, origin or other branches", async () => {
   const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "verstas-sessions-"));
   const src = path.join(tmp, "src-repo");
@@ -278,24 +265,18 @@ test("setup scripts are copied into the session and their hosts join the allowli
   }
 });
 
-test("sessions from before initialization existed migrate: cloned at creation, they count as initialized unless they were still gated by setup", async () => {
-  const { migrateSession, LEGACY_PREFLIGHT_REQUIREMENTS } = await import("../../src/sessions/sessions.js");
+test("older session files migrate: from before initialization they count as initialized; the setup worker's and the modes' fields are dropped", async () => {
+  const { migrateSession } = await import("../../src/sessions/sessions.js");
   const { sessionSchema, isInitialized } = await import("../../src/core/types.js");
   const base = { id: "2026-10-03-old", name: "old", goal: "g", createdAt: "2026-10-03T10:00:00Z" };
-  const passed = sessionSchema.parse(migrateSession({ ...base, caps: { preflight: true }, preflight: { ok: true, at: "2026-10-03T11:00:00Z", summary: "fine" } }));
-  expect(passed.requirements).toBe(LEGACY_PREFLIGHT_REQUIREMENTS);
-  expect(passed.readiness).toMatchObject({ verdict: "ready", confirmedAt: "2026-10-03T11:00:00Z" });
-  expect(passed.initializedAt).toBe("2026-10-03T10:00:00Z");
-  const failed = sessionSchema.parse(migrateSession({ ...base, caps: { preflight: true }, preflight: { ok: false, at: "2026-10-03T11:00:00Z", summary: "no pg" } }));
-  expect(isInitialized(failed)).toBe(false);
-  const gated = sessionSchema.parse(migrateSession({ ...base, requirements: "pg runs" }));
-  expect(isInitialized(gated)).toBe(false);
-  const plain = sessionSchema.parse(migrateSession({ ...base, caps: { preflight: false } }));
-  expect(plain.requirements).toBe("");
-  expect(isInitialized(plain)).toBe(true);
+  const old = sessionSchema.parse(migrateSession({ ...base, mode: "goal", requirements: "pg runs", setupMode: "skip", readiness: { verdict: "ready", at: "x" }, planning: { ticketSize: "L" }, caps: { preflight: true, workerMinutes: 40, choreSweepAt: 3, goalRounds: 9, leadMinutes: 90 }, preflight: { ok: true }, environmentFrom: { session: "a-b-c", at: "x", readinessCarried: true } }));
+  expect(isInitialized(old)).toBe(true);
+  expect(old.initializedAt).toBe("2026-10-03T10:00:00Z");
+  for (const k of ["mode", "requirements", "setupMode", "readiness", "planning", "preflight"]) expect(k in old).toBe(false);
+  expect(old.caps).toEqual({ reviewer: true, leadMinutes: 90, progressMinutes: 30 });
+  expect(old.environmentFrom).toEqual({ session: "a-b-c", at: "x" });
   // A session written by this version says so itself.
   expect(sessionSchema.parse(migrateSession({ ...base, initializedAt: null })).initializedAt).toBeNull();
-  expect("preflight" in plain.caps).toBe(false);
 });
 
 test("restoreClone replaces the clone with a fresh clone from its source; a failed clone leaves the old one", async () => {

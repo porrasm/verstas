@@ -73,7 +73,7 @@ test("importIntoDraft merges by id or replaces, and takes the goal from the past
   expect(merged.draft.tickets.map((t) => t.title)).toEqual(["A", "B2", "C"]);
   const replaced = importIntoDraft(base, "# Goal here\n\n## T-1 · First (S)\nRepo: nuppi\nDo it.\n- [ ] works\n", "replace");
   expect(replaced.draft.tickets).toHaveLength(1);
-  expect(replaced.draft.tickets[0]).toMatchObject({ id: "T-1", title: "First", size: "S", repos: ["nuppi"], acceptance: ["works"] });
+  expect(replaced.draft.tickets[0]).toMatchObject({ id: "T-1", title: "First", repos: ["nuppi"], acceptance: ["works"] });
   expect(() => importIntoDraft(base, "{ not json", "merge")).toThrow(DraftError);
 });
 
@@ -93,17 +93,16 @@ test("validateDraft reports what creation would refuse as errors", () => {
       expect.stringContaining("Dependency cycle"),
     ]),
   );
-  expect(validateDraft(blank(), env).errors).toEqual(["Nothing to work on: add tickets, or a goal the planner can draft tickets from"]);
+  expect(validateDraft(blank(), env).errors).toEqual(["Nothing to work on: add tickets, a goal for the lead, or both"]);
   expect(validateDraft(blank({ repos: [{ target: "nuppi", name: "notes" }], goal: "g" }), env).errors[0]).toContain('"notes" is reserved');
 });
 
 test("validateDraft warns about weak tickets without blocking", () => {
-  const d = addTickets(blank({ repos: [{ target: "nuppi" }, { target: "kapula" }] }), [{ title: "Big", size: "L", state: "backlog" }]).draft;
+  const d = addTickets(blank({ repos: [{ target: "nuppi" }, { target: "kapula" }] }), [{ title: "Big", state: "backlog" }]).draft;
   const p = validateDraft(d, env);
   expect(p.errors).toEqual([]);
   expect(p.warnings.join("\n")).toMatch(/No acceptance criteria: T-1/);
   expect(p.warnings.join("\n")).toMatch(/No spec: T-1/);
-  expect(p.warnings.join("\n")).toMatch(/Size L: T-1/);
   expect(p.warnings.join("\n")).toMatch(/No repo on T-1/);
   expect(p.warnings.join("\n")).toMatch(/Every ticket is in backlog/);
 });
