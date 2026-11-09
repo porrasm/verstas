@@ -11,7 +11,8 @@ import type { AgentRunHooks, RunToken, RunTokens } from "../agent-api/agent-api.
 import { workspaceSizeMb } from "../sessions/sessions.js";
 import { addArtifact, ARTIFACT_MAX_BYTES, type Artifact } from "../sessions/artifacts.js";
 import { allowlistFor } from "../network/packs.js";
-import { leadContinuePrompt, leadPrompt, mcpConfig, readLeadRules, reviewerPrompt, systemMd, terminalMd, userPrompt, verstasMd, workspaceClaudeMd, type LeadPromptOptions } from "./prompts.js";
+import { leadContinuePrompt, leadPrompt, mcpConfig, readLeadRules, reviewerPrompt, systemMd, terminalMd, userPrompt, verstasMd, workspaceClaudeMd, type LeadPromptOptions, type WorkingMode } from "./prompts.js";
+import { getTemplate } from "../templates/library.js";
 import { driverInfo, missingCredentialError } from "./drivers.js";
 import { LiveTerminal, type TerminalRunner } from "./terminal.js";
 import type { Job } from "../worker/worker.js";
@@ -78,6 +79,8 @@ export type RunDeps = {
   copyOut?: (sessionId: string, boxPath: string, hostFile: string, maxBytes: number) => Promise<number>;
   /** Whether a driver has a credential, so a terminal on one without fails before anything starts. */
   hasCredential?: (driver: DriverName) => Promise<boolean>;
+  /** The text of a goal template by name, or null when there is none; the library by default (src/templates/library.ts). */
+  template?: (name: string) => Promise<string | null>;
   /** For tests: a fixed clock. */
   now?: () => string;
   /** For tests: how long to sleep on a rate limit (ms). */
@@ -172,6 +175,14 @@ export class RunManager implements AgentRunHooks {
   /** The session's agent terminal while its run is active; pages attach to it (src/server.ts). */
   terminal(sessionId: string): LiveTerminal | undefined {
     return this.terminals.get(sessionId);
+  }
+
+  /** Stops the active run, whatever it is, and waits until it has ended and its changes are committed. True when nothing is active afterwards. */
+  async stopAndWait(sessionId: string, timeoutMs = 60_000): Promise<boolean> {
+    const c = this.active.get(sessionId);
+    if (!c) return true;
+    c.stopNow();
+    return Promise.race([c.done.then(() => true, () => true), new Promise<boolean>((r) => setTimeout(() => r(false), timeoutMs).unref())]);
   }
 
   /**
@@ -334,6 +345,14 @@ export class RunManager implements AgentRunHooks {
     c.handoff = note;
     const lead = c.leadAbort;
     setTimeout(() => lead?.abort(), this.deps.handoffGraceMs ?? 120_000).unref();
+  }
+
+  /** Sessions whose lead was asked for a progress update and has not posted it yet. */
+  private progressAsked = new Set<string>();
+
+  /** True once after a progress check: the message the lead posts next is its answer, and the inbox marks it so. */
+  progressAnswer(sessionId: string): boolean {
+    return this.progressAsked.delete(sessionId);
   }
 
   /** Why the lead may not start another ticket now. */
@@ -564,6 +583,8 @@ export class RunManager implements AgentRunHooks {
     let lastCommitted: string[] = [];
     /** The goal the previous life was given; a different text now means it was revised meanwhile. */
     let lastGoal: string | undefined;
+    /** The goal template the previous life was given (name and text); a different one now is told to a continuing lead. */
+    let lastMode: string | undefined;
     let lastDenialCheck = clock();
     const inProgress = () => h.board.tickets.filter((t) => t.state === "in_progress");
     const ready = () => h.board.tickets.filter((t) => t.state === "ready");
@@ -621,9 +642,14 @@ export class RunManager implements AgentRunHooks {
         const agentSession = agent.driver === "claude" ? (resume ? { id: convoId!, resume: true } : { id: randomUUID(), resume: false }) : undefined;
         const revised = lastGoal !== undefined && lastGoal !== goal;
         const sinceLastLife = newAnswers();
-        const freshPrompt = async () => leadPrompt(h.board, await this.leadPromptOptions(h, { round, goal, holds, handoff: handoffNote, lastWords, answers: recentAnswers() }));
-        const promptText = resume ? leadContinuePrompt(h.board, { round, committed: lastCommitted, holds, goal: revised ? goal : undefined, goalChangedAt: h.session.goalSince, answers: sinceLastLife }) : await freshPrompt();
+        // The goal template is read at every life, so an edit in Settings or another pick reaches the next lead.
+        const mode = await this.workingMode(h, (text) => status(text));
+        const modeKey = mode ? `${mode.name}\n${mode.text}` : "";
+        const modeChanged = lastMode !== undefined && lastMode !== modeKey;
+        const freshPrompt = async () => leadPrompt(h.board, await this.leadPromptOptions(h, { round, goal, holds, handoff: handoffNote, lastWords, answers: recentAnswers(), mode }));
+        const promptText = resume ? leadContinuePrompt(h.board, { round, committed: lastCommitted, holds, goal: revised ? goal : undefined, goalChangedAt: h.session.goalSince, answers: sinceLastLife, mode: modeChanged ? (mode ?? null) : undefined }) : await freshPrompt();
         lastGoal = goal;
+        lastMode = modeKey;
         const leadAbort = new AbortController();
         const onStop = () => leadAbort.abort();
         ctl.signal.addEventListener("abort", onStop, { once: true });
@@ -722,6 +748,7 @@ export class RunManager implements AgentRunHooks {
       }
     } finally {
       clearInterval(progressTimer);
+      this.progressAsked.delete(h.id);
       await ctx.queue;
       this.leads.delete(h.id);
       // A pause, a halt or an idle lead can end the run while tickets are in
@@ -766,12 +793,30 @@ export class RunManager implements AgentRunHooks {
       const w = this.workers.get(h.id);
       if (!w || w.role !== "lead" || w.driver !== "claude") return;
       if (!w.send(PROGRESS_NUDGE, "verstas")) return;
+      this.progressAsked.add(h.id);
       due = Date.now() + interval;
       void log({ kind: "status", t: (this.deps.now ?? now)(), text: `progress check: the lead was asked for a short update (every ${minutes} min, to the inbox)` }).catch(() => undefined);
     };
     const timer = setInterval(tick, Math.min(minuteMs, interval));
     timer.unref?.();
     return timer;
+  }
+
+  /**
+   * The session's goal template, read now. A session without one, or with
+   * a name the library no longer has, works without: the run goes on and
+   * the log says so once per life.
+   */
+  private async workingMode(h: SessionHandle, say?: (text: string) => Promise<void>): Promise<WorkingMode | undefined> {
+    const name = h.session.goalTemplate?.trim();
+    if (!name) return undefined;
+    const read = this.deps.template ?? (async (n: string) => (await getTemplate(n))?.text ?? null);
+    const text = await read(name).catch(() => null);
+    if (!text?.trim()) {
+      await say?.(`the goal template "${name}" no longer exists; the lead works without it`).catch(() => undefined);
+      return undefined;
+    }
+    return { name, text };
   }
 
   /** What a fresh lead is told besides the board: the note it inherits, what changed since the note was written, and the recent commits. */
@@ -856,7 +901,7 @@ export class RunManager implements AgentRunHooks {
       verdict = "ok";
     } else {
       if (signal.aborted) return "requeued";
-      const rev = await this.runJob(h, run, { role: "reviewer", ticket: ticketId, promptText: reviewerPrompt(getTicket(h.board, ticketId), changes, { why: level.why, planned }) }, log, signal);
+      const rev = await this.runJob(h, run, { role: "reviewer", ticket: ticketId, promptText: reviewerPrompt(getTicket(h.board, ticketId), changes, { why: level.why, planned, mode: await this.workingMode(h) }) }, log, signal);
       addCost(run, rev.costUsd);
       await this.writeTicketReport(h, run, ticketId, "reviewer", rev);
       if (rev.rateLimited) {

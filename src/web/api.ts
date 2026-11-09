@@ -13,6 +13,7 @@ import {
   DEFAULT_ALLOWLIST,
   DRIVER_NAMES,
   driverNameSchema,
+  inboxCleared,
   isInitialized,
   limitsSchema,
   sessionAgentsSchema,
@@ -23,6 +24,7 @@ import {
   reviseGoal,
   ticketStateSchema,
   type AgentRequest,
+  type Board,
   type RequestAction,
   type Inbox,
   type Run,
@@ -38,10 +40,12 @@ import { createSession, deleteSessionDir, listSessions, makeSessionId, provision
 import { GithubError, githubApi, parseGithubRepo } from "../github/api.js";
 import type { Mirrors } from "../github/mirror.js";
 import { copyEnvironmentFiles, environmentSettings } from "../sessions/from-environment.js";
-import { loadRepoStateCache, readBoxRepoState, saveRepoStateCache } from "../sessions/repo-state.js";
-import { bundleForPublish, changedPaths, defaultPullText, flaggedPaths, publishTarget, remoteBranchFor } from "../sessions/publish.js";
+import { loadRepoStateCache, readBoxRepoState, saveRepoStateCache, type BoxRepoState } from "../sessions/repo-state.js";
+import { bundleForPublish, changedPaths, defaultPullText, flaggedPaths, publishAll, publishTarget, remoteBranchFor } from "../sessions/publish.js";
 import { syncCheck, syncInBox, type UnpublishedChoice } from "../sessions/sync.js";
 import { artifactFile, clearArtifacts, deleteArtifact, loadArtifacts } from "../sessions/artifacts.js";
+import { archiveCleared, clearPlanNote, clearSession } from "../sessions/new-work.js";
+import { deleteTemplate, getTemplate, listTemplates, saveTemplate, templateNameSchema } from "../templates/library.js";
 import { importArchive, readArchive, writeArchive } from "../sessions/archive.js";
 import type { SessionHandle } from "../sessions/hub.js";
 import { copyHomeVolume, copyIntoSandbox, copySnapshot, listSandboxes, replacementOf, removeSandbox, sandboxStatus, stopAllSandboxes, stopSandbox, type SandboxConfig } from "../sandbox/lifecycle.js";
@@ -492,6 +496,61 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
     }),
   );
 
+  // --- goal templates (src/templates/library.ts) -------------------------------
+
+  /** Sessions that use a template, by template name; a running one is marked, since its next lead life reads an edit. */
+  const templateUse = async (): Promise<Map<string, { id: string; name: string; running: boolean }[]>> => {
+    const use = new Map<string, { id: string; name: string; running: boolean }[]>();
+    for (const s of await listSessions(d.getConfig().sessionsRoot).catch(() => [])) {
+      if (!s.goalTemplate) continue;
+      use.set(s.goalTemplate, [...(use.get(s.goalTemplate) ?? []), { id: s.id, name: s.name, running: Boolean(d.runs.status(s.id)) }]);
+    }
+    return use;
+  };
+
+  /** Every template with its text and the sessions that use it. */
+  api.get(
+    "/templates",
+    wrap(async (_req, res) => {
+      const use = await templateUse();
+      res.json((await listTemplates()).map((t) => ({ ...t, usedBy: use.get(t.name) ?? [] })));
+    }),
+  );
+
+  /** Create or replace a template. Sessions that use it read the new text at their next lead life and review. */
+  api.put(
+    "/templates/:name",
+    wrap(async (req, res) => {
+      const { text } = z.object({ text: z.string().max(20_000) }).parse(req.body ?? {});
+      res.json(await saveTemplate({ name: param(req, "name"), text }));
+    }),
+  );
+
+  /** Delete a template. Sessions that named it keep the name and work without it until you pick another. */
+  api.delete(
+    "/templates/:name",
+    wrap(async (req, res) => {
+      await deleteTemplate(templateNameSchema.parse(param(req, "name")));
+      res.json({ ok: true });
+    }),
+  );
+
+  /** Pick this session's goal template by name, or null for none. The next lead life and review read it. */
+  api.put(
+    "/sessions/:id/goal-template",
+    wrap(async (req, res) => {
+      const { template } = z.object({ template: templateNameSchema.nullable() }).parse(req.body ?? {});
+      if (template && !(await getTemplate(template))) throw Object.assign(new Error(`No template named "${template}"`), { status: 404 });
+      const h = await d.hub.get(param(req, "id"));
+      await h.mutate((docs) => {
+        if ((docs.session.goalTemplate ?? null) === template) return {};
+        const { goalTemplate: _t, ...rest } = docs.session;
+        return { next: { session: template ? { ...rest, goalTemplate: template } : rest } };
+      });
+      res.json({ ok: true, template, running: Boolean(d.runs.status(h.id)) });
+    }),
+  );
+
   /** Markdown to paste into any assistant. tail = script | board | free; session optional. */
   api.get(
     "/context",
@@ -504,6 +563,10 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
       res.type("text/markdown").send(buildContext({ tail, config: cfg, facts, scripts: await listScripts(), session, repoNames }));
     }),
   );
+
+  /** Why a pasted board cannot be read or imported, in words for the page. */
+  const pasteError = (e: unknown): string =>
+    e instanceof z.ZodError ? `Invalid board: ${e.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}` : e instanceof SyntaxError ? `Not valid JSON: ${e.message}` : (e as Error).message;
 
   /** Parses a pasted board without saving it: what would be imported, or why it is invalid. */
   api.post(
@@ -520,8 +583,7 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
           tickets: r.board.tickets.map((t) => ({ id: t.id, title: t.title, kind: t.kind, repos: t.repos, state: t.state, deps: t.deps, acceptance: t.acceptance.length })),
         });
       } catch (e) {
-        const msg = e instanceof z.ZodError ? `Invalid board: ${e.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}` : e instanceof SyntaxError ? `Not valid JSON: ${e.message}` : (e as Error).message;
-        res.json({ ok: false, error: msg });
+        res.json({ ok: false, error: pasteError(e) });
       }
     }),
   );
@@ -602,7 +664,7 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
       counts,
       run,
       openRequests: h.inbox.requests.filter((r) => r.state === "open").length,
-      ideas: h.inbox.ideas.filter((i) => !i.promotedTo).length,
+      ideas: h.inbox.ideas.filter((i) => !i.promotedTo && !inboxCleared(h.inbox).ideas.has(i.id)).length,
       totals: runTotals(live ? [...runs.filter((r) => r.id !== live.id), live] : runs, h.session.createdAt),
     };
   };
@@ -1031,6 +1093,13 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
     }),
   );
 
+  /** A lead running now hears a revised goal in its conversation; answers who was told, if anyone. */
+  const tellGoalRevised = async (id: string, goal: string): Promise<string | undefined> => {
+    if (!d.runs.status(id)) return undefined;
+    const r = await d.runs.message(id, `The goal was revised. It now reads:\n\n${goal.trim()}\n\nReconcile notes/state.md with it before you continue; earlier work may have aimed at the old text.`);
+    return r.ok ? r.to : undefined;
+  };
+
   /**
    * The goal the lead works toward beside the board. Saved at any time: the
    * next lead life reads it fresh, the goal it replaces goes to the
@@ -1049,11 +1118,7 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
         return next === docs.session ? {} : { next: { session: next } };
       });
       const changed = h.session.goal.trim() !== before;
-      let told: string | undefined;
-      if (changed && d.runs.status(id)) {
-        const r = await d.runs.message(id, `The goal was revised. It now reads:\n\n${h.session.goal.trim()}\n\nReconcile notes/state.md with it before you continue; earlier work may have aimed at the old text.`);
-        told = r.ok ? r.to : undefined;
-      }
+      const told = changed ? await tellGoalRevised(id, h.session.goal) : undefined;
       res.json({ ok: true, changed, told });
     }),
   );
@@ -1371,11 +1436,58 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
   );
 
   /**
-   * Publish: the run branch's commits since the base go to GitHub as
-   * verstas/<session>-<round> and a draft pull request into the base branch,
-   * or update the open one. Only on your click; the token is used here, on
-   * the host, and the push can name only a verstas/ branch.
+   * One repository's commits to GitHub: the bundle leaves the container,
+   * goes into the mirror, is pushed to verstas/<session>-<round>, and a
+   * draft pull request into the base branch is opened, or the open one
+   * updated. The caller has read the clone (`st`), refreshed the pull
+   * request states and made sure no run is active. The token is used here,
+   * on the host, and the push can name only a verstas/ branch.
    */
+  const publishRepo = async (h: SessionHandle, repo: Session["repos"][number] & { github: string }, st: BoxRepoState, text: { title: string; body: string; draft: boolean }) => {
+    const client = await gh();
+    const sh = dockerShell(d.sandbox, h.id);
+    const target = publishTarget(repo.prs);
+    const bundle = await bundleForPublish(sh, repo, h.paths.workspace, h.paths.exportDir);
+    const ref = `refs/verstas/${h.id}/${repo.name}`;
+    let sha: string;
+    try {
+      sha = await d.mirrors.importBundle(repo.github, bundle, repo.runBranch, ref);
+    } finally {
+      await fs.rm(bundle, { force: true });
+    }
+    const remoteBranch = target.update?.remoteBranch ?? remoteBranchFor(h.id, target.round);
+    // The branch is Verstas's own; one left by a publish that failed after its push is taken over at the sha GitHub has.
+    try {
+      const expect = target.update ? target.update.headSha : await d.mirrors.remoteSha(repo.github, remoteBranch);
+      await d.mirrors.push(repo.github, ref, remoteBranch, expect);
+    } catch (e) {
+      throw Object.assign(new Error((e as Error).message), { status: 502 });
+    }
+    let pull;
+    try {
+      if (target.update) pull = await client.updatePull(repo.github, target.update.number, { title: text.title, ...(text.body.trim() ? { body: text.body } : {}) });
+      else pull = (await client.findPull(repo.github, remoteBranch).then((p) => (p?.state === "open" ? p : null))) ?? (await client.createPull(repo.github, { head: remoteBranch, base: repo.branch, title: text.title, body: text.body, draft: text.draft }));
+    } catch (e) {
+      throw Object.assign(new Error(`Pushed ${remoteBranch}, but the pull request failed: ${(e as Error).message}`), { status: 502 });
+    }
+    const at = now();
+    const record = { round: target.round, number: pull.number, url: pull.url, remoteBranch, headSha: sha, base: pull.base, title: pull.title, state: pull.state, publishedAt: at, checkedAt: at };
+    await h.mutate((docs) => ({
+      next: {
+        session: {
+          ...docs.session,
+          repos: docs.session.repos.map((r) => {
+            if (r.name !== repo.name) return r;
+            const prs = r.prs ?? [];
+            return { ...r, prs: prs.at(-1)?.number === record.number ? [...prs.slice(0, -1), record] : [...prs, record] };
+          }),
+        },
+      },
+    }));
+    return { pr: record, updated: Boolean(target.update), commits: st.ahead };
+  };
+
+  /** Publish PR for one repository, with the title and body from the dialog. Only on your click. */
   api.post(
     "/sessions/:id/repos/:name/publish",
     wrap(async (req, res) => {
@@ -1384,55 +1496,48 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
       if (notWhileRunning(res, h.id)) return;
       const spec = githubRepoOf(h, String(param(req, "name")));
       if (!(await loadSecrets()).githubToken) throw Object.assign(new Error("Save a GitHub token in Settings first: pushing needs one"), { status: 400 });
-      const client = await gh();
       await refreshPulls(h, true).catch(() => undefined);
-      const fresh = (await d.hub.get(h.id)).session.repos.find((r) => r.name === spec.name)!;
-      const target = publishTarget(fresh.prs);
-
+      const fresh = (await d.hub.get(h.id)).session.repos.find((r) => r.name === spec.name)! as typeof spec;
       await ensureSessionSandbox(d.runConfig, h.session, path.join(h.paths.dir, "sandbox.env"), false);
-      const sh = dockerShell(d.sandbox, h.id);
-      const st = await readBoxRepoState(sh, fresh);
+      const st = await readBoxRepoState(dockerShell(d.sandbox, h.id), fresh);
       if (!st) throw Object.assign(new Error(`Could not read ${spec.name}'s clone in the container`), { status: 500 });
       if (st.ahead === 0) throw Object.assign(new Error(`${spec.name} has no commits since ${fresh.branch} @ ${fresh.baseCommit?.slice(0, 7)}: nothing to publish`), { status: 409 });
+      res.json(await publishRepo(h, fresh, st, body));
+    }),
+  );
 
-      const bundle = await bundleForPublish(sh, fresh, h.paths.workspace, h.paths.exportDir);
-      const ref = `refs/verstas/${h.id}/${spec.name}`;
-      let sha: string;
-      try {
-        sha = await d.mirrors.importBundle(spec.github, bundle, fresh.runBranch, ref);
-      } finally {
-        await fs.rm(bundle, { force: true });
-      }
-      const remoteBranch = target.update?.remoteBranch ?? remoteBranchFor(h.id, target.round);
-      // The branch is Verstas's own; one left by a publish that failed after its push is taken over at the sha GitHub has.
-      try {
-        const expect = target.update ? target.update.headSha : await d.mirrors.remoteSha(spec.github, remoteBranch);
-        await d.mirrors.push(spec.github, ref, remoteBranch, expect);
-      } catch (e) {
-        throw Object.assign(new Error((e as Error).message), { status: 502 });
-      }
-      let pull;
-      try {
-        if (target.update) pull = await client.updatePull(spec.github, target.update.number, { title: body.title, ...(body.body.trim() ? { body: body.body } : {}) });
-        else pull = (await client.findPull(spec.github, remoteBranch).then((p) => (p?.state === "open" ? p : null))) ?? (await client.createPull(spec.github, { head: remoteBranch, base: fresh.branch, title: body.title, body: body.body, draft: body.draft }));
-      } catch (e) {
-        throw Object.assign(new Error(`Pushed ${remoteBranch}, but the pull request failed: ${(e as Error).message}`), { status: 502 });
-      }
-      const at = now();
-      const record = { round: target.round, number: pull.number, url: pull.url, remoteBranch, headSha: sha, base: pull.base, title: pull.title, state: pull.state, publishedAt: at, checkedAt: at };
-      await h.mutate((docs) => ({
-        next: {
-          session: {
-            ...docs.session,
-            repos: docs.session.repos.map((r) => {
-              if (r.name !== spec.name) return r;
-              const prs = r.prs ?? [];
-              return { ...r, prs: prs.at(-1)?.number === record.number ? [...prs.slice(0, -1), record] : [...prs, record] };
-            }),
+  /**
+   * Publish all, in one click: a draft pull request for every repository
+   * with commits and an update for every open one, with default titles and
+   * bodies (src/sessions/publish.ts, publishAll). The pull request states
+   * are refreshed and the container is brought up once for all of them.
+   * When the changes touch build or CI files, nothing is pushed and the
+   * answer lists them; the same call with `acknowledgeFlagged` publishes.
+   */
+  api.post(
+    "/sessions/:id/publish-all",
+    wrap(async (req, res) => {
+      const { acknowledgeFlagged } = z.object({ acknowledgeFlagged: z.boolean().default(false) }).parse(req.body ?? {});
+      const h = await d.hub.get(param(req, "id"));
+      if (notWhileRunning(res, h.id)) return;
+      if (!isInitialized(h.session)) throw Object.assign(new Error("The session is not initialized: nothing to publish"), { status: 409 });
+      if (!(await loadSecrets()).githubToken) throw Object.assign(new Error("Save a GitHub token in Settings first: pushing needs one"), { status: 400 });
+      await refreshPulls(h, true).catch(() => undefined);
+      await ensureSessionSandbox(d.runConfig, h.session, path.join(h.paths.dir, "sandbox.env"), false);
+      const sh = dockerShell(d.sandbox, h.id);
+      const result = await publishAll(
+        (await d.hub.get(h.id)).session.repos,
+        {
+          read: async (repo) => ({ st: await readBoxRepoState(sh, repo), paths: await changedPaths(sh, repo) }),
+          publish: (repo, st) => {
+            const target = publishTarget(repo.prs);
+            const text = target.update ? { title: target.update.title || h.session.name, body: "" } : defaultPullText(h.session, st.commits, Math.max(0, (st.ahead ?? 0) - st.commits.length));
+            return publishRepo(h, repo as typeof repo & { github: string }, st, { ...text, draft: true });
           },
         },
-      }));
-      res.json({ pr: record, updated: Boolean(target.update), commits: st.ahead });
+        { acknowledgeFlagged },
+      );
+      res.json(result);
     }),
   );
 
@@ -1528,19 +1633,122 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
       const body = z.object({ branches: z.record(z.string(), z.string().min(1).max(200)).default({}), onUnpublished: z.enum(["refuse", "rebase", "discard"]).default("refuse") }).parse(req.body ?? {});
       const h = await d.hub.get(param(req, "id"));
       if (!(await readyForSync(res, h))) return;
-      await refreshPulls(h, true).catch(() => undefined);
-      const targets = d.getConfig().workTargets;
-      const results = [];
-      for (const r of h.session.repos.filter((x) => x.github)) {
-        const branch = body.branches[r.name] ?? targets.find((t) => t.github.toLowerCase() === r.github!.toLowerCase())?.defaultBranch ?? r.branch;
-        try {
-          results.push({ ...(await syncRepo(await d.hub.get(h.id), r.name, { branch, onUnpublished: body.onUnpublished })), ok: true });
-        } catch (e) {
-          const x = e as Error & { reason?: string };
-          results.push({ name: r.name, branch, ok: false, error: x.message, reason: x.reason });
+      const results = await syncEvery(h, body);
+      res.status(results.every((x) => x.ok) ? 200 : 409).json({ results });
+    }),
+  );
+
+  /** Every GitHub repository of a session synced to its default branch (or the one named), each on its own; the container is up and no run is active. */
+  const syncEvery = async (h: SessionHandle, opts: { branches?: Record<string, string>; onUnpublished: UnpublishedChoice }) => {
+    await refreshPulls(h, true).catch(() => undefined);
+    const targets = d.getConfig().workTargets;
+    const results: ({ name: string; branch: string; ok: true; tip: { sha: string; subject: string; date: string }; mode: string; upToDate: boolean } | { name: string; branch: string; ok: false; error: string; reason?: string })[] = [];
+    for (const r of h.session.repos.filter((x) => x.github)) {
+      const branch = opts.branches?.[r.name] ?? targets.find((t) => t.github.toLowerCase() === r.github!.toLowerCase())?.defaultBranch ?? r.branch;
+      try {
+        results.push({ ...(await syncRepo(await d.hub.get(h.id), r.name, { branch, onUnpublished: opts.onUnpublished })), ok: true });
+      } catch (e) {
+        const x = e as Error & { reason?: string };
+        results.push({ name: r.name, branch, ok: false, error: x.message, reason: x.reason });
+      }
+    }
+    return results;
+  };
+
+  /**
+   * New work in the same box, in one step (src/sessions/new-work.ts): the
+   * repositories go to their latest default branch with the session's own
+   * commits and uncommitted files discarded, the board, the goal with its
+   * history, the inbox, the plan note, the Ask the box history and the
+   * artifacts are cleared (a copy stays under history/), and the goal and
+   * board you give become the session's. The container, its installs, the
+   * environment notes, the settings and the run history stay.
+   *
+   * Order matters: the paste is checked first and the sync runs before
+   * anything is cleared, so a paste that does not parse or a repository
+   * GitHub cannot serve leaves the session exactly as it was. With
+   * `stopRun` an active run is stopped first; without it, an active run
+   * refuses. With `start`, the lead starts on the new work.
+   */
+  api.post(
+    "/sessions/:id/new-work",
+    wrap(async (req, res) => {
+      const body = z
+        .object({
+          goal: z.string().max(20_000).default(""),
+          board: z.string().max(2_000_000).default(""),
+          stopRun: z.boolean().default(false),
+          start: z.boolean().default(false),
+          /** The goal template for the new work: a name, null for none; left out, the session keeps the one it has. */
+          template: templateNameSchema.nullable().optional(),
+        })
+        .parse(req.body ?? {});
+      const id = param(req, "id");
+      const h = await d.hub.get(id);
+      if (!isInitialized(h.session)) {
+        res.status(409).json({ error: "The session is not initialized: there is no box to keep. Edit the plan instead." });
+        return;
+      }
+      if (body.template && !(await getTemplate(body.template))) {
+        res.status(400).json({ error: `No template named "${body.template}"` });
+        return;
+      }
+      let pasted: ReturnType<typeof parseBoardPaste> | undefined;
+      try {
+        pasted = body.board.trim() ? parseBoardPaste(body.board) : undefined;
+        if (pasted) validateRepos(importBoard(emptyBoard(), pasted, { by: "user", defaultState: "ready", mode: "add" }).board.tickets, h.session.repos.map((r) => r.name));
+      } catch (e) {
+        res.status(400).json({ error: pasteError(e) });
+        return;
+      }
+      if (d.runs.status(id)) {
+        if (!body.stopRun) {
+          res.status(409).json({ error: "Pause or stop the run first" });
+          return;
+        }
+        if (!(await d.runs.stopAndWait(id))) {
+          res.status(409).json({ error: "The run did not stop in time; nothing was cleared. Try again." });
+          return;
         }
       }
-      res.status(results.every((x) => x.ok) ? 200 : 409).json({ results });
+      let synced: Awaited<ReturnType<typeof syncEvery>> = [];
+      if (h.session.repos.some((r) => r.github)) {
+        try {
+          await ensureSessionSandbox(d.runConfig, h.session, path.join(h.paths.dir, "sandbox.env"), false);
+          synced = await syncEvery(h, { onUnpublished: "discard" });
+        } catch (e) {
+          res.status(502).json({ error: `Could not sync the repositories; nothing was cleared. ${(e as Error).message}` });
+          return;
+        }
+        const failed = synced.filter((x) => !x.ok);
+        if (failed.length) {
+          res.status(409).json({ error: `Could not sync ${failed.map((x) => x.name).join(", ")}; nothing was cleared. ${failed.map((x) => (x.ok ? "" : x.error)).join("; ")}`, synced });
+          return;
+        }
+      }
+      const at = now();
+      const history = await archiveCleared(h.paths, h.snapshot(), at);
+      const goal = body.goal.trim() || pasted?.goal?.trim() || "";
+      const result = await h.mutate((docs) => {
+        const cleared = clearSession(docs, at);
+        const imported = pasted ? importBoard(cleared.next.board, pasted, { by: "user", defaultState: "ready", mode: "add" }) : undefined;
+        const { goalTemplate: kept, ...bare } = goal ? { ...cleared.next.session, goal, goalSince: at } : cleared.next.session;
+        const template = body.template === undefined ? kept : (body.template ?? undefined);
+        const session: Session = template ? { ...bare, goalTemplate: template } : bare;
+        const board: Board = { ...(imported?.board ?? cleared.next.board), goal };
+        return { next: { session, board, inbox: cleared.next.inbox }, result: { summary: cleared.summary, created: imported?.created ?? [] } };
+      });
+      const planNote = await clearPlanNote(h.paths);
+      let run: Run | undefined;
+      let startError: string | undefined;
+      if (body.start && (goal || result.created.length)) {
+        try {
+          run = (await d.runs.start(id, {})).run;
+        } catch (e) {
+          startError = (e as Error).message;
+        }
+      }
+      res.json({ ok: true, ...result, goal: Boolean(goal), planNote, synced, history: path.relative(h.paths.dir, history), run, startError });
     }),
   );
 
@@ -1575,12 +1783,12 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
         refused.push((e as Error).message);
       }
     }
-    if (refused.length) throw new Error(`The base branch moved on GitHub, and syncing first would lose work: ${refused.join("; ")}. Resolve it in the Work panel (Publish PR, or Sync with rebase or discard), then start again.${done.length ? ` Synced: ${done.join(", ")}.` : ""}`);
+    if (refused.length) throw new Error(`The base branch moved on GitHub, and syncing first would lose work: ${refused.join("; ")}. Resolve it in the Repositories strip (Publish PR, or Sync with rebase or discard), then start again.${done.length ? ` Synced: ${done.join(", ")}.` : ""}`);
     return done;
   };
 
   /**
-   * What state each repository is in, for the Work panel and the header:
+   * What state each repository is in, for the Repositories strip and the header:
    * the clone's commits since its base, uncommitted files, and how far
    * GitHub's branch moved past the base. The clone is read inside the
    * container when it runs (or with ?start=1, which brings it up); when it
@@ -1831,18 +2039,69 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
     }),
   );
 
+  /**
+   * A pasted board onto this session's board. "add" (the default) makes
+   * every pasted ticket a new one, renumbering the paste when its ids are
+   * taken; "merge" updates the tickets whose ids match (src/board/board.ts,
+   * importBoard). With setGoal, a goal in the paste becomes the session's.
+   * dryRun changes nothing and answers what would happen, or why it cannot.
+   */
   api.post(
     "/sessions/:id/board/import",
     wrap(async (req, res) => {
-      const { text, state } = z.object({ text: z.string().min(1).max(2_000_000), state: z.enum(["backlog", "ready"]).default("ready") }).parse(req.body);
-      const h = await d.hub.get(param(req, "id"));
-      const parsed = parseBoardPaste(text);
-      const result = await h.mutate((docs) => {
-        const r = importBoard(docs.board, parsed, { by: "user", defaultState: state });
+      const { text, state, mode, setGoal, dryRun } = z
+        .object({
+          text: z.string().min(1).max(2_000_000),
+          state: z.enum(["backlog", "ready"]).default("ready"),
+          mode: z.enum(["add", "merge"]).default("add"),
+          setGoal: z.boolean().default(false),
+          dryRun: z.boolean().default(false),
+        })
+        .parse(req.body);
+      const id = param(req, "id");
+      const h = await d.hub.get(id);
+      const plan = (docs: { board: Board; session: Session }) => {
+        const parsed = parseBoardPaste(text);
+        const r = importBoard(docs.board, parsed, { by: "user", defaultState: state, mode });
         validateRepos(r.board.tickets, docs.session.repos.map((x) => x.name), { ignoreDone: true });
-        return { next: { board: r.board }, result: { created: r.created, updated: r.updated, skipped: r.skipped } };
+        const goal = parsed.goal?.trim() || undefined;
+        const session = setGoal && goal ? reviseGoal(docs.session, goal, now()) : docs.session;
+        // The board's own goal field follows the session's; a paste alone never changes it.
+        const board: Board = { ...r.board, goal: setGoal && goal ? goal : docs.board.goal };
+        const brief = (tid: string) => {
+          const t = getTicket(board, tid);
+          return { id: t.id, title: t.title, state: t.state, deps: t.deps };
+        };
+        return {
+          board,
+          session,
+          result: {
+            mode,
+            created: r.created,
+            updated: r.updated,
+            skipped: r.skipped,
+            renumbered: r.renumbered,
+            matching: r.matching,
+            goal,
+            goalChanged: session !== docs.session,
+            tickets: { created: r.created.map(brief), updated: r.updated.map(brief) },
+          },
+        };
+      };
+      if (dryRun) {
+        try {
+          res.json({ ok: true, ...plan({ board: h.board, session: h.session }).result });
+        } catch (e) {
+          res.json({ ok: false, error: pasteError(e) });
+        }
+        return;
+      }
+      const result = await h.mutate((docs) => {
+        const p = plan(docs);
+        return { next: p.session === docs.session ? { board: p.board } : { board: p.board, session: p.session }, result: p.result };
       });
-      res.json(result);
+      const told = result.goalChanged ? await tellGoalRevised(id, h.session.goal) : undefined;
+      res.json({ ok: true, ...result, told });
     }),
   );
 
@@ -2123,6 +2382,23 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
         return { next: { inbox, board, session }, result: next };
       });
       res.json({ ok: true, request: result });
+    }),
+  );
+
+  /**
+   * Clear inbox: every message and idea so far, and every decided request,
+   * leaves the page. Nothing is deleted (see inboxCleared); open requests
+   * stay, since they wait for you.
+   */
+  api.post(
+    "/sessions/:id/inbox/clear",
+    wrap(async (req, res) => {
+      const h = await d.hub.get(param(req, "id"));
+      const cleared = await h.mutate((docs) => {
+        const inbox: Inbox = { ...docs.inbox, clearedAt: now() };
+        return { next: { inbox }, result: inboxCleared(inbox).count - inboxCleared(docs.inbox).count };
+      });
+      res.json({ ok: true, cleared });
     }),
   );
 

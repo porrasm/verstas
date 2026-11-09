@@ -273,7 +273,7 @@ test("older session files migrate: from before initialization they count as init
   expect(isInitialized(old)).toBe(true);
   expect(old.initializedAt).toBe("2026-10-03T10:00:00Z");
   for (const k of ["mode", "requirements", "setupMode", "readiness", "planning", "preflight"]) expect(k in old).toBe(false);
-  expect(old.caps).toEqual({ reviewer: true, leadMinutes: 90, progressMinutes: 30 });
+  expect(old.caps).toEqual({ reviewer: true, leadMinutes: 90, progressMinutes: 0 });
   expect(old.environmentFrom).toEqual({ session: "a-b-c", at: "x" });
   // A session written by this version says so itself.
   expect(sessionSchema.parse(migrateSession({ ...base, initializedAt: null })).initializedAt).toBeNull();

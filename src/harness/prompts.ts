@@ -32,6 +32,9 @@ ${session.repos.map((r) => `  - \`/workspace/${r.name}\` (from \`${r.branch}\`)`
   "board"), with \`request\`, \`message\`, \`idea\`, \`artifact\`, \`budget\`,
   \`handoff\` and \`done\`. The plain HTTP API behind them is ${agentApi} with
   your run token in \`VERSTAS_RUN_TOKEN\`.
+- The user follows the work on the board: which tickets exist, their
+  states and their notes are the progress report. \`message\` is for what
+  the board cannot say.
 - Network: only these hosts, over HTTPS, through the proxy already set in
   \`HTTPS_PROXY\`: ${session.allowlist.join(", ") || "(none)"}. Anything else
   is refused with 403. \`request\` kind \`pack\` asks for a whole toolchain's
@@ -143,10 +146,18 @@ const recentReports = (board: Board, n = 5): string => {
 };
 
 /** What the reviewer is told about the change beyond the diff: why it reviews, how plan and change differ. */
+/** The goal template a session uses, as read from the library for this life or review. */
+export type WorkingMode = { name: string; text: string };
+
+/** How to work, in the user's words: the session's goal template, right after the goal. */
+const modeBlock = (m: WorkingMode | undefined): string => (m ? `\n## How to work (the user's template "${m.name}")\n${m.text.trim()}\n` : "");
+
 export type ReviewContext = {
   why: string;
   /** "planned api; touched api, docs" when they differ. */
   planned?: string;
+  /** The session's goal template: what the user asked of the work, which the lead was given too. */
+  mode?: WorkingMode;
 };
 
 const DIFF_BUDGET = 60_000;
@@ -179,7 +190,7 @@ export const reviewerPrompt = (ticket: Ticket, changes: readonly RepoChange[], c
 ## The lead's report
 ${ticket.report ?? "(no report was filed; the change and the commits speak for it)"}
 
-${ctx.why ? `Why this change is reviewed: ${ctx.why}.\n` : ""}${ctx.planned ? `The ticket's expected repositories and the change differ (${ctx.planned}). The list was a guess; judge whether the change covers the ticket.\n` : ""}
+${ctx.mode ? `## Working mode the user set for this session (template "${ctx.mode.name}")\nThe lead worked under this text. Judge the change by the ticket and its criteria, with the standard this sets.\n${ctx.mode.text.trim()}\n\n` : ""}${ctx.why ? `Why this change is reviewed: ${ctx.why}.\n` : ""}${ctx.planned ? `The ticket's expected repositories and the change differ (${ctx.planned}). The list was a guess; judge whether the change covers the ticket.\n` : ""}
 ## Changes, per repository
 ${sections.join("\n\n") || "(none: no files changed. That is fine when the ticket's deliverable is a report, an investigation or a note; judge the report against the acceptance criteria.)"}
 
@@ -244,6 +255,8 @@ export type LeadPromptOptions = {
   history?: readonly { repo: string; log: string }[];
   /** Outcomes of requests the user decided, newest last. */
   answers?: readonly string[];
+  /** The session's goal template, read now. */
+  mode?: WorkingMode;
 };
 
 const historyLines = (history: readonly { repo: string; log: string }[] | undefined): string =>
@@ -277,7 +290,7 @@ const stateNoteBlock = (opts: LeadPromptOptions): string =>
 /** A fresh lead: the goal, the board, what is in progress, the memory it inherits, and what changed since that memory was written. */
 export const leadPrompt = (board: Board, opts: LeadPromptOptions): string => `# The session
 Lead life ${opts.round} of this run.
-${opts.goal ? `\n## Goal\n${opts.goal.trim()}\n` : "\n(No goal is written: the board is the work.)\n"}
+${opts.goal ? `\n## Goal\n${opts.goal.trim()}\n` : "\n(No goal is written: the board is the work.)\n"}${modeBlock(opts.mode)}
 ${goalChangeNote(opts.goalChange)}${opts.metBefore ? `## A lead said this goal was met (${opts.metBefore.at.slice(0, 16)}) and the user started the run again without changing it\nThat means not yet. Its assessment:\n${opts.metBefore.note.trim().slice(0, 3000)}\n\n` : ""}${stateNoteBlock(opts)}${opts.lastWords ? `## The previous lead was stopped at a cap before it updated the note\nIts last words:\n${opts.lastWords.trim().slice(0, 3000)}\n\n` : ""}${holdsNote(opts.holds)}
 ## Board
 ${boardLines(board)}
@@ -290,9 +303,21 @@ ${historyLines(opts.history)}
 ${opts.answers?.length ? `\n## Requests the user decided (newest last)\n${opts.answers.map((a) => `- ${a}`).join("\n")}\n` : ""}`;
 
 /** The lead continuing its own conversation: the life number, what the last life left in git, the board as it stands, and the goal only when it changed. */
-export const leadContinuePrompt = (board: Board, opts: { round: number; committed: readonly string[]; holds?: readonly Ticket[]; goal?: string; goalChangedAt?: string; answers?: readonly string[] }): string => `# Continue
+export const leadContinuePrompt = (
+  board: Board,
+  opts: {
+    round: number;
+    committed: readonly string[];
+    holds?: readonly Ticket[];
+    goal?: string;
+    goalChangedAt?: string;
+    answers?: readonly string[];
+    /** Only when the template changed since the last life: the new one, or null when the session now has none. */
+    mode?: WorkingMode | null;
+  },
+): string => `# Continue
 You are continuing in the same conversation; this is lead life ${opts.round} of this run. The harness committed what your last life left in ${opts.committed.length ? opts.committed.join(", ") : "no repository (nothing had changed)"}.
-${opts.goal ? `\n## The goal was revised at ${(opts.goalChangedAt ?? "").slice(0, 16)}\nIt now reads:\n${opts.goal.trim()}\n` : ""}${opts.answers?.length ? `\n## The user decided your requests\n${opts.answers.map((a) => `- ${a}`).join("\n")}\n` : ""}
+${opts.goal ? `\n## The goal was revised at ${(opts.goalChangedAt ?? "").slice(0, 16)}\nIt now reads:\n${opts.goal.trim()}\n` : ""}${opts.mode ? `\n## The user changed how to work (template "${opts.mode.name}")\nIt now reads:\n${opts.mode.text.trim()}\n` : opts.mode === null ? "\n## The user removed the template that said how to work\nIts text no longer applies.\n" : ""}${opts.answers?.length ? `\n## The user decided your requests\n${opts.answers.map((a) => `- ${a}`).join("\n")}\n` : ""}
 ## Board
 ${boardLines(board)}
 ${opts.holds?.length ? `\nIn progress: ${opts.holds.map((t) => `${t.id} (${t.state})`).join(", ")}.\n` : ""}`;

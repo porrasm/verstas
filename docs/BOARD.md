@@ -163,5 +163,22 @@ Emit events to an injected sink.
 ## Export
 
 Export returns the full `board.json`, states, notes, reports, diff stats,
-timing and cost included. Re-importing an export merges by id, so a plan
-edited outside and pasted back does not duplicate cards.
+timing and cost included.
+
+## Importing onto a board that has tickets
+
+Import tickets on the session page adds: every pasted ticket becomes a new
+one, and the board's own tickets are never rewritten. A paste whose ids are
+free keeps them. When one is taken (the usual case: the next piece of work
+is numbered `T-1…` again), the whole paste is renumbered after the board's
+last ticket, in paste order, and dependencies inside the paste follow; a
+dependency on an id the paste does not carry names a ticket already on the
+board. The card shows the result before anything is saved.
+
+When the paste names ids the board has, the card also offers "Update the
+tickets with the same id": the merge that fits a board exported from this
+session and revised outside, so cards are not duplicated. It changes a
+ticket's state only while the ticket is in backlog or ready.
+
+A goal in the paste is left alone unless you tick "Also replace the goal".
+

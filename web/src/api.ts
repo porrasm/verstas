@@ -72,8 +72,20 @@ export type RequestAction = { id: string; detail: ActionDetail; state: "open" | 
 export type AgentRequest = { id: string; ticketId?: string; summary: string; actions: RequestAction[]; halt?: { reason: string; severity: string }; state: "open" | "resolved"; answer?: string; createdAt: string; decidedAt?: string };
 export type Inbox = {
   requests: AgentRequest[];
-  messages: { id: string; ticketId?: string; text: string; createdAt: string; read: boolean }[];
+  messages: { id: string; ticketId?: string; text: string; createdAt: string; read: boolean; /** The lead's answer to a progress check. */ progress?: boolean }[];
   ideas: { id: string; ticketId?: string; title: string; pitch: string; createdAt: string; promotedTo?: string }[];
+  /** When the inbox was last cleared: what was settled by then is hidden, not deleted. */
+  clearedAt?: string;
+};
+
+/** What Clear inbox hides (the server's inboxCleared): items settled at or before `clearedAt`; an open request never. */
+export const inboxCleared = (inbox: Inbox): { messages: Set<string>; ideas: Set<string>; requests: Set<string>; count: number } => {
+  const at = inbox.clearedAt;
+  const before = (t: string | undefined) => Boolean(at && t && t <= at);
+  const messages = new Set(inbox.messages.filter((m) => before(m.createdAt)).map((m) => m.id));
+  const ideas = new Set(inbox.ideas.filter((i) => before(i.createdAt)).map((i) => i.id));
+  const requests = new Set(inbox.requests.filter((r) => r.state !== "open" && before(r.decidedAt ?? r.createdAt)).map((r) => r.id));
+  return { messages, ideas, requests, count: messages.size + ideas.size + requests.size };
 };
 export type Session = {
   id: string;
@@ -86,6 +98,8 @@ export type Session = {
   goalMet?: { at: string; runId: number; note: string };
   /** Earlier goals, oldest first. */
   goals?: GoalRecord[];
+  /** The goal template picked for this session, by name; its text lives in the library (Settings). */
+  goalTemplate?: string;
   createdAt: string;
   /** When the environment came to exist; null while the session is a plan. */
   initializedAt: string | null;
@@ -337,7 +351,7 @@ export type CommitLine = { sha: string; date: string; subject: string };
 /** A file the agent in a terminal published (src/sessions/artifacts.ts); text and image have a preview. */
 export type Artifact = { id: string; name: string; bytes: number; kind: "text" | "image" | "file"; mime: string; runId: number; publishedAt: string };
 
-export type PullRecord = { round: number; number: number; url: string; remoteBranch: string; headSha: string; base: string; title: string; state: "open" | "merged" | "closed"; publishedAt: string; checkedAt?: string };
+export type PullRecord = { round: number; number: number; url: string; remoteBranch: string; headSha: string; base: string; title: string; state: "open" | "merged" | "closed"; publishedAt: string; checkedAt?: string; /** Set by New work: it belongs to earlier work, and the next publish opens a new one. */ detached?: boolean };
 /** What Publish would do for a repository. */
 export type PublishPreview = {
   ahead: number | null;
@@ -378,3 +392,6 @@ export const repoChange = (r: RepoState): { text: string; changed: boolean } => 
   if (b.dirty > 0) parts.push(`${b.dirty} uncommitted`);
   return parts.length ? { text: parts.join(", "), changed: true } : { text: "no changes", changed: false };
 };
+
+/** A goal template from the library, with the sessions that use it. */
+export type GoalTemplate = { name: string; text: string; updatedAt?: string; usedBy: { id: string; name: string; running: boolean }[] };

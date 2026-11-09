@@ -92,7 +92,7 @@ directory a container ever sees.
   skipped and listed in the session log.
 - **Nothing else is copied.** No dotfiles from your home, no SSH agent, no
   npm or pip credentials.
-- **Reclone** (the session page's Work panel) replaces one clone with a
+- **Reclone** (the Repositories strip at the top of the session page) replaces one clone with a
   fresh clone from the mirror, fetched first, made the same way and
   swapped in once it exists. The old clone is deleted as files; host git
   never reads its `.git` (Boundary 5). The container is stopped first and

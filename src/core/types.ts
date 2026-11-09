@@ -193,8 +193,10 @@ export type Board = z.infer<typeof boardSchema>;
  * What a paste or an agent may import: a subset of a ticket with loose
  * requirements. Ids are optional: an empty, missing or foreign id (one that
  * is not `T-n`, say a generator's `J-1`) gets the next free id on import, so
- * a board made outside Verstas can be pasted into an existing session; only
- * a `T-n` id that the board already has updates that ticket. The only
+ * a board made outside Verstas can be pasted into an existing session. A
+ * `T-n` id that the board already has updates that ticket in a merge, and
+ * is renumbered with the rest of the paste when the import adds
+ * (src/board/board.ts, importBoard). The only
  * states accepted are backlog and ready, since the others describe a run in
  * flight. Fields from before (`size`, `pinned`, `agent`) are accepted and
  * dropped, so an old board pastes clean.
@@ -331,6 +333,8 @@ export const messageSchema = z.object({
   text: z.string().min(1).max(10_000),
   createdAt: z.string(),
   read: z.boolean().default(false),
+  /** The lead's answer to a progress check (`caps.progressMinutes`): the page shows only the latest of these. */
+  progress: z.boolean().optional(),
 });
 export type AgentMessage = z.infer<typeof messageSchema>;
 
@@ -349,8 +353,25 @@ export const inboxSchema = z.object({
   requests: z.array(requestSchema).default([]),
   messages: z.array(messageSchema).default([]),
   ideas: z.array(ideaSchema).default([]),
+  /** When you last cleared the inbox: what was settled by then is hidden, not deleted (see inboxCleared). */
+  clearedAt: z.string().optional(),
 });
 export type Inbox = z.infer<typeof inboxSchema>;
+
+/**
+ * What Clear inbox hides: messages and ideas posted, and requests decided,
+ * at or before `clearedAt`. An open request is never cleared, since it
+ * waits for you. Nothing leaves inbox.json: the agents' record of what was
+ * asked and answered stays whole, and the page can show it again.
+ */
+export const inboxCleared = (inbox: Inbox): { messages: Set<string>; ideas: Set<string>; requests: Set<string>; count: number } => {
+  const at = inbox.clearedAt;
+  const before = (t: string | undefined) => Boolean(at && t && t <= at);
+  const messages = new Set(inbox.messages.filter((m) => before(m.createdAt)).map((m) => m.id));
+  const ideas = new Set(inbox.ideas.filter((i) => before(i.createdAt)).map((i) => i.id));
+  const requests = new Set(inbox.requests.filter((r) => r.state !== "open" && before(r.decidedAt ?? r.createdAt)).map((r) => r.id));
+  return { messages, ideas, requests, count: messages.size + ideas.size + requests.size };
+};
 
 // --- Sessions and runs -----------------------------------------------------
 
@@ -373,6 +394,12 @@ export const pullRecordSchema = z.object({
   publishedAt: z.string(),
   /** When the state was last read from GitHub. */
   checkedAt: z.string().optional(),
+  /**
+   * Set by New work: the pull request belongs to work the session no
+   * longer holds. It stays open on GitHub, and the next publish opens a new
+   * one in a new round instead of updating it.
+   */
+  detached: z.boolean().optional(),
 });
 export type PullRecord = z.infer<typeof pullRecordSchema>;
 
@@ -433,9 +460,10 @@ export const capsSchema = z.object({
   /**
    * Every this many minutes of a run, the running lead is asked for a short
    * progress update, which it posts as a `message` to the inbox (Claude
-   * Code only; the others cannot be reached mid-run). 0 turns the check off.
+   * Code only; the others cannot be reached mid-run). 0, the default, turns
+   * the check off: the board is the progress report.
    */
-  progressMinutes: z.number().int().min(0).max(1440).default(30),
+  progressMinutes: z.number().int().min(0).max(1440).default(0),
 });
 export type Caps = z.infer<typeof capsSchema>;
 
@@ -560,6 +588,13 @@ export const sessionSchema = z.object({
   goalMet: goalMetSchema.optional(),
   /** Earlier goals of this session, oldest first: the project log a session keeps across goals. */
   goals: z.array(goalRecordSchema).default([]),
+  /**
+   * The goal template picked for this session, by name
+   * (src/templates/library.ts): how to work, beside the goal's what. The
+   * text is read from the library at every lead life and review, so the
+   * session follows edits; a name with no template behind it is ignored.
+   */
+  goalTemplate: z.string().max(64).optional(),
   createdAt: z.string(),
   /** When the environment came to exist (see `isInitialized`); null while the session is a plan. */
   initializedAt: z.string().nullable().default(null),

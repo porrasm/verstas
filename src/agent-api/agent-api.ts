@@ -57,6 +57,8 @@ export type AgentRunHooks = {
   baseline?(sessionId: string): Promise<Record<string, string>>;
   /** What the judge would see if the change were submitted now: touched repositories and the review level. */
   previewJudging?(sessionId: string, ticketId?: string): Promise<unknown>;
+  /** True once after the run asked the lead for a progress update: the lead's next message is that update. */
+  progressAnswer?(sessionId: string): boolean;
   /** An agent published a file from the box for the user (src/sessions/artifacts.ts). */
   publishArtifact?(run: RunToken, boxPath: string, name?: string): Promise<Artifact>;
 };
@@ -168,7 +170,8 @@ export const createAgentApi = (hub: SessionHub, tokens: RunTokens, hooks?: Agent
       const h = await hub.get(req.run.sessionId);
       const state = typeof req.query.state === "string" ? req.query.state : undefined;
       const tickets = h.board.tickets.filter((t) => !state || t.state === state).map(summary);
-      res.json({ goal: h.board.goal, currentTicket: req.run.currentTicket, tickets });
+      // The session's goal, which you edit; the board file's own goal field is from the day the session was made.
+      res.json({ goal: h.session.goal, currentTicket: req.run.currentTicket, tickets });
     }),
   );
 
@@ -399,8 +402,9 @@ export const createAgentApi = (hub: SessionHub, tokens: RunTokens, hooks?: Agent
     wrap(async (req, res) => {
       const { text } = z.object({ text: z.string().min(1).max(10_000) }).parse(req.body);
       const h = await hub.get(req.run.sessionId);
+      const progress = req.run.role === "lead" && hooks?.progressAnswer?.(req.run.sessionId) ? true : undefined;
       const id = await h.mutate((d) => {
-        const m = messageSchema.parse({ id: nextId("M", d.inbox.messages), ticketId: req.run.currentTicket, text, createdAt: now(), read: false });
+        const m = messageSchema.parse({ id: nextId("M", d.inbox.messages), ticketId: req.run.currentTicket, text, createdAt: now(), read: false, progress });
         return { next: { inbox: { ...d.inbox, messages: [...d.inbox.messages, m] } }, result: m.id };
       });
       res.status(201).json({ ok: true, id });

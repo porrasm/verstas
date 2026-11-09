@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   api,
+  inboxCleared,
   repoChange,
   repoOrigin,
   type ReposState,
@@ -44,6 +45,10 @@ import {
 } from "../api";
 import { AgentOptionsButton, useDrivers } from "./AgentOptions";
 import { AgentTerminal, ArtifactPills } from "./Terminal";
+import { ImportCard } from "./session/ImportCard";
+import { publishAllSummary, publishRowText, usePublishAll } from "./session/publishAll";
+import { NewWorkDialog } from "./session/NewWorkDialog";
+import { TemplateSelect, useGoalTemplates } from "./GoalTemplates";
 
 const COLUMNS: { key: string; title: string; states: string[] }[] = [
   { key: "backlog", title: "Backlog", states: ["backlog"] },
@@ -130,7 +135,8 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
   const [pickedRun, setPickedRun] = useState<number | null>(null);
   const [err, setErr] = useState("");
   const [notice, setNotice] = useState("");
-  const [importText, setImportText] = useState<string | null>(null);
+  const [importOpen, setImportOpen] = useState(false);
+  const [newWork, setNewWork] = useState(false);
   const [exportInfo, setExportInfo] = useState<string[] | null>(null);
   const [newTicket, setNewTicket] = useState(false);
   const [busy, setBusy] = useState("");
@@ -245,13 +251,6 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
       const mb = (r.bytes / 1_048_576).toFixed(1);
       setNotice(`Exported ${id}.ver (${mb} MB). Import it on the other machine from the Sessions page; Initialize there rebuilds the environment.${r.skipped.length ? ` Left out: ${r.skipped.join("; ")}.` : ""}`);
     });
-  const doImport = () =>
-    tryAct("importing", async () => {
-      const r = await api<{ created: string[]; updated: string[]; skipped: { title: string; reason: string }[] }>("POST", `${base}/board/import`, { text: importText, state: "ready" });
-      setImportText(null);
-      const parts = [`Imported ${r.created.length} new`, r.updated.length ? `updated ${r.updated.length}` : ""].filter(Boolean).join(", ");
-      setNotice(r.skipped.length ? `${parts}. Skipped: ${r.skipped.map((s) => `${s.title} (${s.reason})`).join("; ")}` : `${parts}.`);
-    });
   const decide = (rid: string, body: { answer?: string; actions?: { id: string; decision: "approve" | "decline"; note?: string }[]; declineAll?: boolean }) => tryAct("deciding", () => api("POST", `${base}/requests/${rid}`, body));
   const openTicket = (tid: string | null) => {
     location.hash = tid ? `#/s/${encodeURIComponent(id)}/t/${encodeURIComponent(tid)}` : `#/s/${encodeURIComponent(id)}`;
@@ -315,7 +314,7 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
     openTicket,
     tryAct,
     refreshRun,
-    onImport: () => setImportText(""),
+    onImport: () => setImportOpen(true),
     onNewTicket: () => setNewTicket(true),
     onExport: doExport,
     onInit: init,
@@ -344,10 +343,11 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
             )}
             {active && !terminalActive && <button onClick={() => runAction("pause")} disabled={Boolean(busy)} title="The lead is told to reach a sensible point, update its note and stop; what it leaves is committed">Pause</button>}
             {active && !terminalActive && <button className="warn" onClick={() => runAction("stop")} disabled={Boolean(busy)} title="Stop the lead now; its tickets go back to ready with the work kept">Stop now</button>}
+            {initialized && !terminalActive && <button onClick={() => setNewWork(true)} disabled={Boolean(busy)} title="Start over in the same box: the repositories go to their latest branch, the board, goal, inbox and plan note are cleared, and you give the next goal and board. The dialog lists what is lost before anything happens.">New work…</button>}
             {initialized && <button onClick={() => setNewTicket(true)} disabled={Boolean(busy)} title="Write a ticket by hand">New ticket</button>}
             <MoreMenu
               items={[
-                { label: "Import board…", onClick: () => setImportText("") },
+                { label: "Import tickets…", onClick: () => setImportOpen(true) },
                 { label: "Export board (JSON)", href: `/api${base}/board/export` },
                 ...(board.tickets.length > 0 ? [{ label: active ? "Clear board (stop the run first)" : "Clear board…", onClick: clearBoard, disabled: active }] : []),
                 { label: active ? "Export session (stop the run first)" : "Export session (.ver)…", onClick: doArchive, disabled: active },
@@ -412,12 +412,36 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
         </section>
       )}
 
-      {importText !== null && (
-        <section className="card stack tight">
-          <div className="row"><h3>Import board</h3><span className="muted small">JSON or markdown, see docs/BOARD.md. New tickets start as ready; known ids are updated.</span><button className="quiet sm end" onClick={() => setImportText(null)}>Cancel</button></div>
-          <textarea id="import" className="mono" value={importText} onChange={(e) => setImportText(e.target.value)} style={{ minHeight: 200 }} placeholder={'{ "tickets": [ { "title": "…", "spec": "…", "acceptance": ["…"] } ] }'} />
-          <div className="row"><button className="pri end" onClick={doImport} disabled={!importText.trim() || Boolean(busy)}>Import</button></div>
-        </section>
+      {newWork && (
+        <NewWorkDialog
+          session={session}
+          board={board}
+          inbox={inbox}
+          base={base}
+          active={active}
+          repoState={repoState}
+          onClose={() => setNewWork(false)}
+          onDone={async (text) => {
+            setNewWork(false);
+            setNotice(text);
+            await refreshRun();
+            await repoState.refresh();
+          }}
+        />
+      )}
+
+      {importOpen && (
+        <ImportCard
+          base={base}
+          tickets={board.tickets.length}
+          currentGoal={session.goal}
+          busy={Boolean(busy)}
+          onCancel={() => setImportOpen(false)}
+          onDone={(text) => {
+            setImportOpen(false);
+            setNotice(text);
+          }}
+        />
       )}
 
       {!active && (counts.backlog ?? 0) > 0 && (
@@ -572,24 +596,27 @@ const WorkerMessageBox = ({ base }: { base: string }) => {
 };
 
 /**
- * The box exists: the board and the live log in front, the inbox and the
- * work beside them. The environment and the settings fold away; they
- * still apply to the next worker.
+ * The box exists: the repositories and their pull requests on top, then the
+ * board and the live log with the inbox beside them. The goal, the
+ * environment and the settings fold away; they still apply to the next
+ * worker.
  */
 const RunBody = (p: BodyProps) => {
   const { session, board, inbox, base, active, run, counts } = p;
   const env = useEnvironment(session, base, active, p.refreshRun);
   const { onRetry, onApprove } = useBoardActions(p);
   return (
+    <>
+    <RepoStrip session={session} base={base} active={active} done={counts.done ?? 0} repoState={p.repoState} onExport={p.onExport} onDone={async () => { await p.refreshRun(); await p.repoState.refresh(); }} />
     <div className="sess-body">
       <div className="main">
-        <GoalPanel session={session} base={base} active={active} run={run} onDone={p.refreshRun} />
+        <GoalPanel session={session} base={base} active={active} run={run} onDone={p.refreshRun} fold />
         {board.tickets.length === 0 ? (
           <div className="card empty-state">
             <h3>No tickets</h3>
             <p>The lead works toward the goal above and may write tickets of its own. Paste a board, write tickets by hand, or plan them with the agent terminal.</p>
             <div className="row">
-              <button onClick={p.onImport}>Import board…</button>
+              <button onClick={p.onImport}>Import tickets…</button>
               <button onClick={p.onNewTicket} disabled={Boolean(p.busy)}>New ticket</button>
             </div>
           </div>
@@ -599,13 +626,13 @@ const RunBody = (p: BodyProps) => {
         <SessionLog {...p} />
       </div>
       <aside className="side">
-        <InboxPanel inbox={inbox} onRead={(mid) => void p.tryAct("read", () => api("POST", `${base}/messages/${mid}/read`))} onPromote={(iid) => void p.tryAct("promote", () => api("POST", `${base}/ideas/${iid}/promote`))} onOpenTicket={p.openTicket} />
-        <WorkPanel session={session} base={base} active={active} done={counts.done ?? 0} repoState={p.repoState} onExport={p.onExport} onDone={async () => { await p.refreshRun(); await p.repoState.refresh(); }} />
+        <InboxPanel inbox={inbox} onClear={() => void p.tryAct("clearing the inbox", () => api("POST", `${base}/inbox/clear`))} onRead={(mid) => void p.tryAct("read", () => api("POST", `${base}/messages/${mid}/read`))} onPromote={(iid) => void p.tryAct("promote", () => api("POST", `${base}/ideas/${iid}/promote`))} onOpenTicket={p.openTicket} />
         <PromptBox session={session} base={base} active={active} onDone={p.refreshRun} />
         <EnvironmentPanel env={env} />
         <SessionSettings session={session} onSave={p.saveSettings} />
       </aside>
     </div>
+    </>
   );
 };
 
@@ -1000,7 +1027,7 @@ const PublishDialog = ({ repo, base, onClose, onDone }: { repo: RepoSpec; base: 
   );
 };
 
-/** One repository in the Work panel: where its base is, what the clone added, whether GitHub moved on. */
+/** One repository's details in the strip: where its base is, what the clone added, whether GitHub moved on. */
 const RepoStatus = ({ r, live }: { r: RepoState; live: boolean }) => {
   const [open, setOpen] = useState(false);
   const ch = repoChange(r);
@@ -1045,91 +1072,123 @@ const RepoStatus = ({ r, live }: { r: RepoState; live: boolean }) => {
   );
 };
 
-const WorkPanel = ({ session, base, active, done, repoState, onExport, onDone }: { session: Session; base: string; active: boolean; done: number; repoState: RepoStateHandle; onExport: () => void; onDone: () => Promise<void> }) => {
+/** In a few words: where a repository's base stands against GitHub; undefined when there is nothing to say. */
+const remoteNote = (r: RepoState): { text: string; tone: "warn" | "err" } | undefined => {
+  if (!r.github) return undefined;
+  if (r.remoteError) return { text: r.remoteError, tone: "err" };
+  const tip = r.remote?.tip;
+  if (!tip) return r.remote ? { text: `GitHub has no branch ${r.branch}`, tone: "warn" } : undefined;
+  const base = r.box?.base?.sha ?? r.baseCommit;
+  if (!base || tip.sha === base) return undefined;
+  return { text: `${r.branch} moved on${r.remote?.behind ? ` by ${r.remote.behind}` : ""}`, tone: "warn" };
+};
+
+/**
+ * The repositories of a session, one line each, right under the header:
+ * what the clone holds, the pull request, and the button that publishes
+ * it. Publishing is what you come here for after a run, so it does not sit
+ * below the inbox. The rest (sync, reclone, the commit log) is one click
+ * away on the line.
+ */
+const RepoStrip = ({ session, base, active, done, repoState, onExport, onDone }: { session: Session; base: string; active: boolean; done: number; repoState: RepoStateHandle; onExport: () => void; onDone: () => Promise<void> }) => {
   const [restoring, setRestoring] = useState<RepoSpec | null>(null);
   const [publishing, setPublishing] = useState<RepoSpec | null>(null);
   const [syncing, setSyncing] = useState<RepoSpec | null>(null);
   const [nextRound, setNextRound] = useState(false);
+  const [open, setOpen] = useState<string | null>(null);
   const [note, setNote] = useState("");
+  const all = usePublishAll(base, onDone);
   if (!session.repos.length || !isInitialized(session)) return null;
+  const state = repoState.state;
+  const stopFirst = "Pause or stop the run first";
+  const onGithub = session.repos.filter((r) => r.github);
+  // Known to have nothing to push: every clone was read and none is ahead of its base.
+  const nothingToPublish = onGithub.every((r) => state?.repos.find((x) => x.name === r.name)?.box?.ahead === 0);
+  const finish = (close: () => void) => async (text: string) => {
+    close();
+    setNote(text);
+    await onDone();
+  };
   return (
-    <section className="card stack" style={{ gap: 8 }}>
-      <div className="row" style={{ justifyContent: "space-between" }}>
-        <h3>Work</h3>
-        <span className="row" style={{ gap: 8 }}>
-          <span className="muted small">{done} ticket{done === 1 ? "" : "s"} committed</span>
-          {session.repos.some((r) => r.github) && <button className="sm" onClick={() => setNextRound(true)} disabled={active} title={active ? "Pause or stop the run first" : "After merging on GitHub: sync every repository to its latest branch, then plan"}>Next round…</button>}
+    <section className="card repo-strip">
+      <div className="row">
+        <h3>Repositories</h3>
+        <span className="muted small">{done} ticket{done === 1 ? "" : "s"} done{state && !state.live ? " · the container is stopped; this is the last reading" : ""}</span>
+        {repoState.error && <span className="err small">{repoState.error}</span>}
+        <span className="row end" style={{ gap: 6 }}>
+          <button className="quiet sm" onClick={() => void repoState.refresh(!state?.live)} disabled={repoState.loading || (active && !state?.live)} title={state?.live ? "Read the clones and GitHub again" : "Start the container and read the clones now"}>{repoState.loading ? "Reading…" : state?.live ? "Refresh" : "Read now"}</button>
+          {onGithub.length > 0 && (
+            <button className="sm pri" onClick={() => void all.run()} disabled={active || all.working || nothingToPublish} title={active ? stopFirst : nothingToPublish ? "No repository has commits since its base" : "One click: a draft pull request for every repository with commits, and the new commits to every open pull request. Asks only when build or CI files changed."}>
+              {all.working ? "Publishing…" : "Publish all as drafts"}
+            </button>
+          )}
+          {onGithub.length > 0 && <button className="sm" onClick={() => setNextRound(true)} disabled={active} title={active ? stopFirst : "After merging on GitHub: sync every repository to its latest branch, then plan"}>Next round…</button>}
+          <MoreMenu label="⋯" className="quiet sm" items={[{ label: "Export bundles…", onClick: onExport, disabled: active }]} />
         </span>
       </div>
-      {session.repos.map((r) => {
-        const st = repoState.state?.repos.find((x) => x.name === r.name);
-        return (
-          <div className="stack" key={r.name} style={{ gap: 4, paddingTop: 6, borderTop: "1px solid var(--line, rgba(127,127,127,.2))" }}>
-            <div className="row" style={{ justifyContent: "space-between" }}>
-              <span><strong>{r.name}</strong> {r.github ? <a className="muted small mono" href={`https://github.com/${r.github}`} target="_blank" rel="noreferrer">{r.github}</a> : <span className="muted small mono" title={r.sourcePath}>{repoOrigin(r)}</span>}</span>
-              <span className="row" style={{ gap: 6 }}>
-                {r.github && (() => {
-                  const open = st?.prs.at(-1)?.state === "open" ? st.prs.at(-1) : undefined;
-                  const nothing = st?.box?.ahead === 0;
-                  return (
-                    <button className="sm pri" onClick={() => setPublishing(r)} disabled={active || nothing} title={active ? "Pause or stop the run first" : nothing ? "No commits since the base: nothing to publish" : open ? `Push the new commits to ${open.remoteBranch}` : `Push the commits to a verstas/ branch and open a draft pull request into ${r.branch}`}>
-                      {open ? `Update PR #${open.number}` : "Publish PR"}
+      <div className="repo-rows">
+        {session.repos.map((r) => {
+          const st = state?.repos.find((x) => x.name === r.name);
+          const ch = st ? repoChange(st) : { text: "not read yet", changed: false };
+          const pr = st?.prs.at(-1);
+          const openPr = pr?.state === "open" && !pr.detached ? pr : undefined;
+          const nothing = st?.box?.ahead === 0;
+          const remote = st ? remoteNote(st) : undefined;
+          const shown = open === r.name;
+          const published = all.result?.rows.find((x) => x.repo === r.name);
+          const outcome = published ? publishRowText(published) : undefined;
+          return (
+            <div className="strip-row" key={r.name}>
+              <div className="line">
+                <button className="quiet sm disclose" aria-expanded={shown} onClick={() => setOpen(shown ? null : r.name)} title={shown ? "Hide the details" : "Base, GitHub and the commits of this session"}>{shown ? "▾" : "▸"}</button>
+                <span className="name"><strong>{r.name}</strong> {r.github ? <a className="muted small mono" href={`https://github.com/${r.github}`} target="_blank" rel="noreferrer">{r.github}</a> : <span className="muted small mono" title={r.sourcePath}>{repoOrigin(r)}</span>}</span>
+                {outcome ? (
+                  <span className={`what small ${outcome.tone}`} title={outcome.text}>{outcome.text}</span>
+                ) : (
+                  <span className="what small" title={remote?.text}>
+                    <span className={ch.changed ? "" : "muted"}>{ch.changed ? <b>{ch.text}</b> : ch.text}</span>
+                    {remote && <span className={remote.tone}> · {remote.text}</span>}
+                  </span>
+                )}
+                <span className="pr small">
+                  {pr ? (
+                    <>
+                      <a href={pr.url} target="_blank" rel="noreferrer" title={pr.detached ? `${pr.title} (earlier work: the next publish opens a new pull request)` : pr.title}>PR #{pr.number}</a>{" "}
+                      <span className={pr.state === "merged" ? "ok" : pr.state === "closed" || pr.detached ? "muted" : ""}>{pr.detached && pr.state === "open" ? "open, earlier work" : pr.state}</span>
+                    </>
+                  ) : r.github ? <span className="muted">no PR</span> : null}
+                </span>
+                <span className="row acts" style={{ gap: 6 }}>
+                  {r.github && (
+                    <button className="sm pri" onClick={() => setPublishing(r)} disabled={active || nothing} title={active ? stopFirst : nothing ? "No commits since the base: nothing to publish" : openPr ? `Push the new commits to ${openPr.remoteBranch}` : `Push the commits to a verstas/ branch and open a draft pull request into ${r.branch}`}>
+                      {openPr ? `Update PR #${openPr.number}` : "Publish PR"}
                     </button>
-                  );
-                })()}
-                {r.github && <button className="sm" onClick={() => setSyncing(r)} disabled={active} title={active ? "Pause or stop the run first" : `Bring the latest ${r.branch} from GitHub into the clone`}>Sync…</button>}
-                {r.github && <button className="quiet sm" onClick={() => setRestoring(r)} disabled={active} title={active ? "Pause or stop the run first" : `Replace the clone with a fresh clone of ${r.github} from GitHub`}>Reclone…</button>}
-              </span>
+                  )}
+                  {r.github && (
+                    <MoreMenu
+                      label="⋯"
+                      className="quiet sm"
+                      items={[
+                        { label: `Sync with ${r.branch}…`, onClick: () => setSyncing(r), disabled: active },
+                        { label: "Reclone from GitHub…", onClick: () => setRestoring(r), disabled: active },
+                      ]}
+                    />
+                  )}
+                </span>
+              </div>
+              {shown && st && <div className="detail"><RepoStatus r={st} live={Boolean(state?.live)} /></div>}
             </div>
-            {st && <RepoStatus r={st} live={Boolean(repoState.state?.live)} />}
-          </div>
-        );
-      })}
-      <div className="row small">
-        {repoState.state && !repoState.state.live && <span className="muted">The container is stopped; this is the last reading.</span>}
-        <button className="quiet sm" onClick={() => void repoState.refresh(!repoState.state?.live)} disabled={repoState.loading || (active && !repoState.state?.live)} title={repoState.state?.live ? "Read the clones and GitHub again" : "Start the container and read the clones now"}>{repoState.loading ? "Reading…" : repoState.state?.live ? "Refresh" : "Read now"}</button>
-        {repoState.error && <span className="err">{repoState.error}</span>}
+          );
+        })}
       </div>
-      <div className="row"><button className="quiet sm" onClick={onExport} disabled={active}>Export bundles…</button></div>
       {note && <div className="banner ok small"><span>{note}</span><button className="quiet sm end" onClick={() => setNote("")}>Dismiss</button></div>}
-      {syncing && (
-        <SyncDialog
-          repo={syncing}
-          st={repoState.state?.repos.find((x) => x.name === syncing.name)}
-          base={base}
-          onClose={() => setSyncing(null)}
-          onDone={async (text) => {
-            setSyncing(null);
-            setNote(text);
-            await onDone();
-          }}
-        />
-      )}
-      {nextRound && <NextRoundDialog session={session} state={repoState.state} base={base} onClose={() => setNextRound(false)} onDone={onDone} />}
-      {publishing && (
-        <PublishDialog
-          repo={publishing}
-          base={base}
-          onClose={() => setPublishing(null)}
-          onDone={async (text) => {
-            setPublishing(null);
-            setNote(text);
-            await onDone();
-          }}
-        />
-      )}
-      {restoring && (
-        <RestoreRepo
-          repo={restoring}
-          base={base}
-          onClose={() => setRestoring(null)}
-          onDone={async (text) => {
-            setRestoring(null);
-            setNote(text);
-            await onDone();
-          }}
-        />
-      )}
+      {all.result && <div className={`banner small ${all.result.rows.some((x) => x.outcome === "failed") ? "warn" : "ok"}`}><span>{publishAllSummary(all.result)} Each line says what happened to its repository.</span><button className="quiet sm end" onClick={all.dismiss}>Dismiss</button></div>}
+      {all.error && <div className="banner warn small"><span>{all.error}</span><button className="quiet sm end" onClick={all.dismiss}>Dismiss</button></div>}
+      {all.dialog}
+      {syncing && <SyncDialog repo={syncing} st={state?.repos.find((x) => x.name === syncing.name)} base={base} onClose={() => setSyncing(null)} onDone={finish(() => setSyncing(null))} />}
+      {nextRound && <NextRoundDialog session={session} state={state} base={base} onClose={() => setNextRound(false)} onDone={onDone} />}
+      {publishing && <PublishDialog repo={publishing} base={base} onClose={() => setPublishing(null)} onDone={finish(() => setPublishing(null))} />}
+      {restoring && <RestoreRepo repo={restoring} base={base} onClose={() => setRestoring(null)} onDone={finish(() => setRestoring(null))} />}
     </section>
   );
 };
@@ -1655,7 +1714,8 @@ const InitProgress = ({ session }: { session: Session }) => {
  * told), the lead's claim that it is met, its plan and progress note, and
  * the earlier goals this session worked.
  */
-const GoalPanel = ({ session, base, active, run, onDone }: { session: Session; base: string; active: boolean; run?: Run; onDone: () => Promise<void> }) => {
+const GoalPanel = ({ session, base, active, run, onDone, fold = false }: { session: Session; base: string; active: boolean; run?: Run; onDone: () => Promise<void>; /** On the run view a written goal shows as three lines until you open it. */ fold?: boolean }) => {
+  const [expanded, setExpanded] = useState(false);
   const [text, setText] = useState(session.goal);
   const [dirty, setDirty] = useState(false);
   const [msg, setMsg] = useState("");
@@ -1669,13 +1729,15 @@ const GoalPanel = ({ session, base, active, run, onDone }: { session: Session; b
   const rounds = run?.rounds ?? 0;
   useEffect(() => {
     api<{ text: string; updatedAt: string | null }>("GET", `${base}/state-note`).then(setNote).catch(() => setNote(null));
-  }, [base, rounds, active]);
+    // The goal's date is among the reasons to read again: New work empties the note and resets the goal.
+  }, [base, rounds, active, session.goalSince]);
   const save = async () => {
     setBusy(true);
     setMsg("");
     try {
       const r = await api<{ changed: boolean; told?: string }>("PUT", `${base}/goal`, { goal: text });
       setDirty(false);
+      setExpanded(false);
       setMsg(!r.changed ? "Unchanged." : r.told ? `Saved and sent to the running ${r.told}; the next round reads it too.` : active ? "Saved; the next round reads it (the running worker could not take a message)." : "Saved; the next run reads it.");
       await onDone();
     } catch (e) {
@@ -1687,9 +1749,56 @@ const GoalPanel = ({ session, base, active, run, onDone }: { session: Session; b
   const goals = session.goals ?? [];
   const since = session.goalSince ?? session.createdAt;
   const written = Boolean(session.goal.trim());
+  const { templates } = useGoalTemplates();
+  const template = session.goalTemplate ?? null;
+  const templateGone = Boolean(template && templates && !templates.some((t) => t.name === template));
+  const pickTemplate = async (name: string | null) => {
+    setMsg("");
+    try {
+      const r = await api<{ running: boolean }>("PUT", `${base}/goal-template`, { template: name });
+      setMsg(name ? `Template "${name}" set; ${r.running ? "the next lead life reads it." : "the next run reads it."}` : "No template; the goal stands alone.");
+      await onDone();
+    } catch (e) {
+      setMsg((e as Error).message);
+    }
+  };
+  const templateRow = (
+    <div className="row small template-pick">
+      <label htmlFor="goal-template" className="muted" style={{ margin: 0 }}>How to work</label>
+      <TemplateSelect id="goal-template" value={template} templates={templates} onChange={(n) => void pickTemplate(n)} />
+      {templateGone ? <span className="err">This template was deleted; the lead works without it.</span> : <span className="muted">{template ? "The lead reads this template after the goal, the reviewer as the standard." : <>Templates are written in <a href="#/settings">Settings</a>.</>}</span>}
+    </div>
+  );
+  const mark = session.goalMet ? "met, says the lead" : written ? (active ? "working" : "set") : "none";
+  const tone: Tone = session.goalMet ? "good" : written ? (active ? "sig" : "info") : "quiet";
+  const planNote = (
+    <div className="small">
+      <span className={`dot ${note?.text ? "good" : ""}`} /> <strong>Plan and progress note</strong>{" "}
+      <span className="muted">{note?.text ? `notes/state.md · ${note.updatedAt ? fmtAgo(note.updatedAt, now) : ""}` : "none yet; the lead writes notes/state.md as it works"}</span>{" "}
+      {note?.text && <button className="quiet sm" onClick={() => setShowNote(!showNote)}>{showNote ? "hide" : "view"}</button>}
+      {showNote && note?.text && <pre className="mono" style={{ whiteSpace: "pre-wrap", maxHeight: 420, overflow: "auto", marginTop: 6 }}>{note.text}</pre>}
+    </div>
+  );
+  if (fold && written && !dirty && !expanded) {
+    return (
+      <section className="card stack" style={{ gap: 8 }}>
+        <SheetHead title="Goal" mark={mark} tone={tone}>
+          <span className="muted small">set {fmtAgo(since, now)}{goals.length ? ` · ${goals.length} earlier` : ""}</span>
+          <button className="sm" onClick={() => setExpanded(true)}>Edit</button>
+        </SheetHead>
+        <div className="goal-fold" onClick={() => setExpanded(true)} title="Open the goal">{session.goal.trim()}</div>
+        {session.goalMet && <div className="small"><span className="ok">The lead says it is met</span> <span className="muted">{fmtAgo(session.goalMet.at, now)}: {session.goalMet.note.split("\n")[0]!.slice(0, 200)}</span></div>}
+        {template && <div className="small"><span className="muted">How to work:</span> <span className={templateGone ? "err" : ""}>{template}{templateGone ? " (deleted; the lead works without it)" : ""}</span></div>}
+        {msg && <div className="muted small">{msg}</div>}
+        {planNote}
+      </section>
+    );
+  }
   return (
     <section className="card stack" style={{ gap: 10 }}>
-      <SheetHead title="Goal" mark={session.goalMet ? "met, says the lead" : written ? (active ? "working" : "set") : "none"} tone={session.goalMet ? "good" : written ? (active ? "sig" : "info") : "quiet"} />
+      <SheetHead title="Goal" mark={mark} tone={tone}>
+        {fold && written && !dirty && <button className="quiet sm" onClick={() => setExpanded(false)}>Fold</button>}
+      </SheetHead>
       <p className="lead" style={{ margin: 0 }}>
         Optional. One lead works toward this text and the board's tickets, keeps its plan in <span className="mono">notes/state.md</span>, and Verstas commits whatever it leaves when a lead life ends. Edit the goal at any time: a running lead is told, and the next life reads the new text. Start again after a met goal to say "not yet". Without a goal, the board is the work.
       </p>
@@ -1726,12 +1835,8 @@ const GoalPanel = ({ session, base, active, run, onDone }: { session: Session; b
         )}
         <span className="muted small">{msg || (written ? `set ${fmtAgo(since, now)}${goals.length ? ` · ${goals.length} earlier goal${goals.length === 1 ? "" : "s"}` : ""}` : "No goal: the lead works the board's tickets.")}</span>
       </div>
-      <div className="small">
-        <span className={`dot ${note?.text ? "good" : ""}`} /> <strong>Plan and progress note</strong>{" "}
-        <span className="muted">{note?.text ? `notes/state.md · ${note.updatedAt ? fmtAgo(note.updatedAt, now) : ""}` : "none yet; the lead writes notes/state.md as it works"}</span>{" "}
-        {note?.text && <button className="quiet sm" onClick={() => setShowNote(!showNote)}>{showNote ? "hide" : "view"}</button>}
-        {showNote && note?.text && <pre className="mono" style={{ whiteSpace: "pre-wrap", maxHeight: 420, overflow: "auto", marginTop: 6 }}>{note.text}</pre>}
-      </div>
+      {templateRow}
+      {planNote}
       {goals.length > 0 && (
         <details>
           <summary className="muted small">Earlier goals ({goals.length})</summary>
@@ -1907,7 +2012,7 @@ const ProgressStrip = ({ counts, total }: { counts: Record<string, number>; tota
   </div>
 );
 
-const MoreMenu = ({ items, label = "More ▾" }: { items: { label: string; onClick?: () => void; href?: string; disabled?: boolean }[]; label?: string }) => {
+const MoreMenu = ({ items, label = "More ▾", className }: { items: { label: string; onClick?: () => void; href?: string; disabled?: boolean }[]; label?: string; className?: string }) => {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -1925,7 +2030,7 @@ const MoreMenu = ({ items, label = "More ▾" }: { items: { label: string; onCli
   }, [open]);
   return (
     <div className="menu" ref={ref}>
-      <button onClick={() => setOpen(!open)} aria-haspopup="menu" aria-expanded={open}>{label}</button>
+      <button className={className} onClick={() => setOpen(!open)} aria-haspopup="menu" aria-expanded={open} aria-label={label === "⋯" ? "More actions" : undefined}>{label}</button>
       {open && (
         <div className="items" role="menu">
           {items.map((it) =>
@@ -2375,30 +2480,57 @@ const EventText = ({ e }: { e: VEvent }) => {
 
 // --- inbox -----------------------------------------------------------------
 
-const InboxPanel = ({ inbox, onRead, onPromote, onOpenTicket }: { inbox: Inbox; onRead: (mid: string) => void; onPromote: (iid: string) => void; onOpenTicket: (tid: string) => void }) => {
-  const unread = inbox.messages.filter((m) => !m.read);
-  const ideas = inbox.ideas.filter((i) => !i.promotedTo);
-  const decided = inbox.requests.filter((r) => r.state !== "open").sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-  const total = unread.length + ideas.length;
+/**
+ * Messages and ideas from the agents, and the requests you decided. Clear
+ * takes everything settled so far off the page in one step; nothing is
+ * deleted, and "Show cleared" brings it back into view. Of the lead's
+ * progress updates only the latest shows: each one replaces the one before.
+ * The list scrolls inside the card, so the panels below keep their place.
+ */
+const InboxPanel = ({ inbox, onRead, onPromote, onClear, onOpenTicket }: { inbox: Inbox; onRead: (mid: string) => void; onPromote: (iid: string) => void; onClear: () => void; onOpenTicket: (tid: string) => void }) => {
+  const [showCleared, setShowCleared] = useState(false);
+  const cleared = inboxCleared(inbox);
+  const shown = <T extends { id: string }>(items: T[], gone: Set<string>) => items.filter((x) => showCleared || !gone.has(x.id));
+  const open = shown(inbox.messages, cleared.messages).filter((m) => showCleared || !m.read);
+  const lastProgress = [...open].reverse().find((m) => m.progress && !cleared.messages.has(m.id))?.id;
+  const earlier = open.filter((m) => m.progress && !cleared.messages.has(m.id) && m.id !== lastProgress);
+  const messages = showCleared ? open : open.filter((m) => !earlier.includes(m));
+  const ideas = shown(inbox.ideas, cleared.ideas).filter((i) => showCleared || !i.promotedTo);
+  const decided = shown(inbox.requests.filter((r) => r.state !== "open"), cleared.requests).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  // The count is what waits for you: unread and uncleared, a run of progress updates counted once.
+  const total = inbox.messages.filter((m) => !m.read && !cleared.messages.has(m.id) && !earlier.includes(m)).length + inbox.ideas.filter((i) => !i.promotedTo && !cleared.ideas.has(i.id)).length;
+  const clearable = total + earlier.length + inbox.requests.filter((r) => r.state !== "open" && !cleared.requests.has(r.id)).length;
+  const link = (tid: string) => <a href="#" className="mono" onClick={(e) => { e.preventDefault(); onOpenTicket(tid); }}>{tid}</a>;
   return (
     <section className="card">
-      <h3>Inbox{total ? ` · ${total}` : ""}</h3>
-      {total === 0 && <p className="lead" style={{ marginBottom: 0 }}>No messages or ideas from the workers.</p>}
-      {unread.map((m) => (
-        <div className="req" key={m.id}>
-          <div className="head"><span className="pill info">message</span>{m.ticketId && <a href="#" className="mono" onClick={(e) => { e.preventDefault(); onOpenTicket(m.ticketId!); }}>{m.ticketId}</a>}<span title={fmtDateTime(m.createdAt)}>{fmtAgo(m.createdAt)}</span></div>
-          <div className="wrap" style={{ fontSize: 13 }}>{m.text}</div>
-          <div><button className="sm" onClick={() => onRead(m.id)}>Mark read</button></div>
-        </div>
-      ))}
-      {ideas.map((i) => (
-        <div className="req" key={i.id}>
-          <div className="head"><span className="pill acc">idea</span>{i.ticketId && <span>from <a href="#" className="mono" onClick={(e) => { e.preventDefault(); onOpenTicket(i.ticketId!); }}>{i.ticketId}</a></span>}</div>
-          <strong className="wrap" style={{ fontSize: 13 }}>{i.title}</strong>
-          <div className="wrap muted" style={{ fontSize: 12.5 }}>{i.pitch}</div>
-          <div><button className="sm" onClick={() => onPromote(i.id)}>Turn into a ticket</button></div>
-        </div>
-      ))}
+      <div className="row">
+        <h3>Inbox{total ? ` · ${total}` : ""}</h3>
+        {clearable > 0 && <button className="quiet sm end" title="Take every message, idea and decided request off this page. Nothing is deleted; open requests stay." onClick={onClear}>Clear</button>}
+      </div>
+      {messages.length + ideas.length === 0 && <p className="lead" style={{ marginBottom: 0 }}>No messages or ideas from the agents.</p>}
+      <div className="inbox-list">
+        {messages.map((m) => {
+          const gone = cleared.messages.has(m.id) || m.read;
+          return (
+            <div className={`req ${gone ? "cleared" : ""}`} key={m.id}>
+              <div className="head"><span className="pill info">{m.progress ? "progress" : "message"}</span>{m.ticketId && link(m.ticketId)}<span title={fmtDateTime(m.createdAt)}>{fmtAgo(m.createdAt)}</span>{m.id === lastProgress && earlier.length > 0 && <span className="faint">replaces {earlier.length} earlier</span>}</div>
+              <div className="wrap" style={{ fontSize: 13 }}>{m.text}</div>
+              {!gone && <div><button className="sm" onClick={() => onRead(m.id)}>Mark read</button></div>}
+            </div>
+          );
+        })}
+        {ideas.map((i) => {
+          const gone = cleared.ideas.has(i.id) || Boolean(i.promotedTo);
+          return (
+            <div className={`req ${gone ? "cleared" : ""}`} key={i.id}>
+              <div className="head"><span className="pill acc">idea</span>{i.ticketId && <span>from {link(i.ticketId)}</span>}{i.promotedTo && <span>now {link(i.promotedTo)}</span>}</div>
+              <strong className="wrap" style={{ fontSize: 13 }}>{i.title}</strong>
+              <div className="wrap muted" style={{ fontSize: 12.5 }}>{i.pitch}</div>
+              {!i.promotedTo && <div><button className="sm" onClick={() => onPromote(i.id)}>Turn into a ticket</button></div>}
+            </div>
+          );
+        })}
+      </div>
       {decided.length > 0 && (
         <details style={{ marginTop: 8 }}>
           <summary className="muted small">{decided.length} decided request{decided.length === 1 ? "" : "s"}</summary>
@@ -2407,13 +2539,18 @@ const InboxPanel = ({ inbox, onRead, onPromote, onOpenTicket }: { inbox: Inbox; 
               <div key={r.id}>
                 <span className={`pill ${r.actions.some((a) => a.state === "approved") ? "good" : "quiet"}`}>{r.actions.length ? `${r.actions.filter((a) => a.state === "approved").length}/${r.actions.length} approved` : r.halt ? "halt" : "answered"}</span>
                 <span>{[...new Set(r.actions.map((a) => a.detail.kind.replace("_", " ")))].join(", ") || (r.halt ? "halt" : "question")}</span>
-                {r.ticketId && <a href="#" className="mono" onClick={(e) => { e.preventDefault(); onOpenTicket(r.ticketId!); }}>{r.ticketId}</a>}
+                {r.ticketId && link(r.ticketId)}
                 <span className="faint" title={fmtDateTime(r.createdAt)}>{fmtAgo(r.createdAt)}</span>
                 <span className="wrap" style={{ flexBasis: "100%", color: "var(--text-2)" }}>{requestSummary(r)}{r.answer ? <span className="faint"> · {r.answer.split("\n")[0]}</span> : null}</span>
               </div>
             ))}
           </div>
         </details>
+      )}
+      {(cleared.count > 0 || showCleared) && (
+        <div style={{ marginTop: 8 }}>
+          <button className="linkish small" onClick={() => setShowCleared(!showCleared)}>{showCleared ? "Hide cleared and read" : `Show cleared (${cleared.count})`}</button>
+        </div>
       )}
     </section>
   );
@@ -2428,7 +2565,7 @@ type SettingsPatch = { allowlist?: string[]; packs?: string[]; caps?: Partial<Om
 const CAP_HELP: Record<string, string> = {
   leadMinutes: "Optional: wall-clock life of one lead; then a fresh one takes over from notes/state.md. Empty: no cap",
   leadTurns: "Optional: model turns per lead life; then a fresh one takes over. Empty: no cap",
-  progressMinutes: "Every this many minutes the lead posts a short progress update to the inbox (Claude Code only; 0: never)",
+  progressMinutes: "Every this many minutes the lead posts a short progress update to the inbox; only the latest shows (Claude Code only). 0, the default: never, the board is the progress report",
 };
 
 /**
@@ -2443,7 +2580,7 @@ const SessionSettings = ({ session, onSave, part = "all" }: { session: Session; 
     reviewer: session.caps.reviewer,
     leadMinutes: session.caps.leadMinutes ? String(session.caps.leadMinutes) : "",
     leadTurns: session.caps.leadTurns ? String(session.caps.leadTurns) : "",
-    progressMinutes: String(session.caps.progressMinutes ?? 30),
+    progressMinutes: String(session.caps.progressMinutes ?? 0),
     memory: session.limits.memory,
     cpus: String(session.limits.cpus),
   });

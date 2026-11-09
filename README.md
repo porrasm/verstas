@@ -131,12 +131,24 @@ Then, in the web app:
    told to reach a sensible point, update its note and stop), when a
    request about the goal waits on you and no ticket can go on, or when two
    lives in a row change nothing. A request on a ticket parks that ticket only;
-   the lead carries on with the rest. Every `progressMinutes` of a run
-   (default 30, 0 for none) a running Claude Code lead is asked for a short
-   progress update and posts it to the inbox. Edit the goal at any time:
+   the lead carries on with the rest. The board is the progress report: the
+   lead is told you follow the work there. With `progressMinutes` set (the
+   default is 0, off) a running Claude Code lead is also asked for a short
+   update that often; the inbox shows only the latest. Clear on the inbox
+   takes every message, idea and decided request off the page; nothing is
+   deleted, and open requests stay. Edit the goal at any time:
    the next life reads it, a running lead is told in its conversation, and
    the goal it replaces goes to the session's goal history with how it
    ended. Starting again after a met goal means "not yet".
+   **Goal templates** say how to work, once, for every session: write
+   them in Settings ("research first, no time limit, then plan, then
+   implement"; "a prototype: rough code and known bugs are fine") and pick
+   one beside the goal or in the New work dialog. The lead reads the
+   template after the goal at every life, and the reviewer reads it as
+   the standard the work was done under. A session stores the template's
+   name, so an edit in Settings reaches the sessions that use it at their
+   next lead life; the editor names those sessions first. They are files
+   under `~/.verstas/templates/`, one `<name>.md` each.
    **What Verstas tells the lead**: facts, not a procedure. `VERSTAS.md`
    in the box says where it is, what the tools do, how to reach you, how
    commits and the review work, and its caps; the system prompt names its
@@ -150,12 +162,29 @@ Then, in the web app:
    changes whichever it needs. The harness runs no checks of its own: the
    reviewer runs each changed repository's check and reads the change
    (`docs/BOARD.md`, Judging).
-9. **Publish PR** when you want the work: the session page's Work panel
-   shows per repository which got commits, its base and whether GitHub
-   moved on. Publish PR pushes the commits since the base to
-   `verstas/<session>-<round>` on GitHub and opens a draft pull request
-   into the base branch (Update PR while it is open). Review, tweak and
-   merge on GitHub.
+9. **Publish** when you want the work: the Repositories strip at the top
+   of the session page shows per repository which got commits, its pull
+   request and whether GitHub moved on. **Publish all as drafts** does
+   every repository in one click: the commits since the base go to
+   `verstas/<session>-<round>` on GitHub with a draft pull request into
+   the base branch, and an open pull request gets the new commits. It asks
+   once, and only when the changes touch build or CI files; a repository
+   with nothing new is left out with the reason, and one that fails does
+   not stop the others. Publish PR on a line does one repository with a
+   title and description you edit. Review, tweak and merge on GitHub.
+   **New work…** in the header starts over in the same box, in one step:
+   every repository goes to its latest default branch with the session's
+   own commits and uncommitted files discarded, and the board, the goal
+   with its history, the inbox, the lead's plan note, the Ask the box
+   history and the artifacts are cleared, so nothing of the earlier work
+   is in front of the next lead. The dialog lists what is lost per
+   repository before anything happens (with Publish all as drafts beside
+   it), takes the next goal and board, both optional, and can start the
+   run; with neither it is a clear. The container and what is installed
+   in it, the environment notes, the settings and the run history stay,
+   and a copy of what was cleared goes to `history/` in the session
+   folder. An open pull request stays on GitHub; the next publish opens a
+   new one.
    **Next round** goes the other way once you merged: every repository's
    clone moves to the latest default branch (or one you pick) without a
    new clone, and you see each new tip. **Sync** does

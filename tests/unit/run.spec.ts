@@ -135,6 +135,8 @@ const harness = async (
     progressMinuteMs?: number;
     secrets?: string[];
     snapshots?: string[];
+    /** The goal template library: the text by name, or null. */
+    template?: (name: string) => Promise<string | null>;
   } = {},
 ) => {
   const tokens = new RunTokens();
@@ -142,6 +144,8 @@ const harness = async (
   const jobs: Job[] = [];
   /** The prompts of every job but the reviewer, in order. */
   const prompts: string[] = [];
+  /** The reviewer's prompts, in order. */
+  const reviewPrompts: string[] = [];
   /** What the harness sent the live worker (messages from the user, the pause nudge, progress checks). */
   const sent: string[] = [];
   const seen: { role: string; token: string; info: unknown }[] = [];
@@ -153,6 +157,7 @@ const harness = async (
       seen.push({ role: job.role, token: o!.runToken!, info: tokens.lookup(o!.runToken!) });
       o?.attach?.({ driver: job.driver ?? "claude", send: (t) => (sent.push(t), true) });
       const base = { kind: "worker_done" as const, t: now(), ticket: job.ticket, role: job.role, ok: true, stopReason: "success", rateLimited: false, costUsd: 0.1, turns: 3, seconds: 1, text: "", stderr: "" };
+      if (job.role === "reviewer") reviewPrompts.push(await fs.readFile(onHost(s, job.promptFile), "utf8").catch(() => ""));
       if (job.role === "reviewer") return opts.reviewerRateLimited ? { ...base, ok: false, rateLimited: true, stopReason: "error" } : { ...base, text: opts.verdict?.(job.ticket) ?? "VERDICT: ok" };
       prompts.push(await fs.readFile(onHost(s, job.promptFile), "utf8"));
       const api: Api = async (method, p, body) => {
@@ -173,6 +178,7 @@ const harness = async (
     rateLimitSleepMs: 20,
     handoffGraceMs: 50,
     progressMinuteMs: opts.progressMinuteMs,
+    template: opts.template ?? (async () => null),
     healSandbox: opts.heal ? () => opts.heal!(mgr) : undefined,
     secrets: opts.secrets ? async () => opts.secrets! : undefined,
     snapshotSandbox: opts.snapshots
@@ -184,7 +190,7 @@ const harness = async (
   });
   const server = createAgentApi(s.hub, tokens, mgr).listen(0, "127.0.0.1");
   port = await new Promise<number>((r) => server.on("listening", () => r((server.address() as net.AddressInfo).port)));
-  return { mgr, tokens, jobs, prompts, shell, sent, seen, close: () => server.close() };
+  return { mgr, tokens, jobs, prompts, reviewPrompts, shell, sent, seen, close: () => server.close() };
 };
 
 /** What board_move does: move, and for a move to review wait for the verdict. */
@@ -822,6 +828,8 @@ test("every progressMinutes the running lead is asked for a progress update, whi
     expect(r.sent[0]).toContain("`message`");
     const h = await s.hub.get(s.id);
     expect(h.inbox.messages.map((m) => m.text)).toEqual(["Well under way. The CLI parses its arguments and greets; the name flag is next."]);
+    // The first message after a check is its answer: the inbox marks it, so the page shows only the latest update.
+    expect(h.inbox.messages[0]!.progress).toBe(true);
     const ev = await events(s);
     expect(ev.filter((e) => e.kind === "status" && e.text.startsWith("progress check: the lead was asked")).length).toBe(r.sent.length);
   } finally {
@@ -1136,6 +1144,67 @@ test("VERSTAS.md and the workspace pointer files are written for every run; noth
     expect(r.prompts[0]).not.toContain("Project brief");
     expect(await fs.readFile(path.join(s.paths.workspace, "CLAUDE.md"), "utf8")).toContain("/workspace/VERSTAS.md");
     expect(await fs.readFile(path.join(s.paths.workspace, "AGENTS.md"), "utf8")).toContain("/workspace/VERSTAS.md");
+  } finally {
+    r.close();
+    await fs.rm(s.root, { recursive: true, force: true });
+  }
+});
+
+// --- Goal templates -------------------------------------------------------------
+
+test("the session's goal template reaches the lead after the goal and the reviewer; a continuing lead hears a change, and a missing template is worked without", async () => {
+  const s = await makeSession({ goal: "Greet by name", tickets: [{ id: "T-1", title: "Greeting", state: "ready", repo: "app" }] });
+  await (await s.hub.get(s.id)).mutate((d) => ({ next: { session: { ...d.session, goalTemplate: "Research" } } }));
+  const library: Record<string, string | null> = { Research: "Be thorough. Research first, then plan, then implement." };
+  const r = await harness(
+    s,
+    async (api, _job, n) => {
+      if (n === 1) {
+        expect(await finishTicket(api, "T-1")).toMatchObject({ state: "done" });
+        // You edit the template in Settings while the lead works.
+        library.Research = "Be thorough, and write the plan down before any code.";
+        await fs.writeFile(path.join(s.paths.notes, "state.md"), "# Plan\n- greeting (done)\n");
+        return { text: "T-1 is done." };
+      }
+      if (n === 2) {
+        // Then the template is deleted.
+        library.Research = null;
+        await fs.writeFile(path.join(s.paths.notes, "state.md"), "# Plan\n- greeting (done)\n- checked\n");
+        return { text: "Checked." };
+      }
+      expect((await api("POST", "/done", { note: "Greets." })).status).toBe(200);
+      return { text: "Goal met." };
+    },
+    { template: async (name) => library[name] ?? null },
+  );
+  try {
+    expect((await (await r.mgr.start(s.id)).done).state).toBe("finished");
+    // A fresh lead: the template right after the goal, under its name.
+    expect(r.prompts[0]).toContain('## Goal\nGreet by name\n\n## How to work (the user\'s template "Research")\nBe thorough. Research first, then plan, then implement.');
+    // The reviewer reads it too, as the standard the lead worked under.
+    expect(r.reviewPrompts[0]).toContain('## Working mode the user set for this session (template "Research")');
+    expect(r.reviewPrompts[0]).toContain("Research first, then plan, then implement.");
+    // The continuing lead is told the new text, once.
+    expect(r.prompts[1]).toContain("# Continue");
+    expect(r.prompts[1]).toContain('## The user changed how to work (template "Research")\nIt now reads:\nBe thorough, and write the plan down before any code.');
+    // Deleted: the lead is told it no longer applies, and the log says the run goes on without it.
+    expect(r.prompts[2]).toContain("## The user removed the template that said how to work");
+    expect((await events(s)).some((e) => e.kind === "status" && e.text.includes('the goal template "Research" no longer exists'))).toBe(true);
+  } finally {
+    r.close();
+    await fs.rm(s.root, { recursive: true, force: true });
+  }
+});
+
+test("a session without a goal template says nothing about one", async () => {
+  const s = await makeSession({ goal: "Greet", tickets: [] });
+  const r = await harness(s, async (api) => {
+    expect((await api("POST", "/done", { note: "Done." })).status).toBe(200);
+    return { text: "Goal met." };
+  });
+  try {
+    await (await r.mgr.start(s.id)).done;
+    expect(r.prompts[0]).not.toContain("How to work");
   } finally {
     r.close();
     await fs.rm(s.root, { recursive: true, force: true });

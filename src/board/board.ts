@@ -259,20 +259,61 @@ export type ImportResult = {
   created: string[];
   updated: string[];
   skipped: { title: string; reason: string }[];
+  /** In "add" mode: pasted ids that were taken on the board, and the id each ticket got. */
+  renumbered: { from: string; to: string }[];
+  /** Pasted ids that name a ticket already on the board: what "merge" would update. */
+  matching: string[];
 };
 
 /**
- * Merges an import into a board. A ticket with a known id updates the
- * editable fields (not the state unless the current one is backlog or
- * ready); a ticket without an id, or with an unknown one, is appended with
- * a fresh id. Deps are validated at the end against the whole result.
+ * Every pasted ticket as a new one, each with its id settled. Ids are kept
+ * when none of them is taken on the board (or twice in the paste); when one
+ * is, the whole paste is renumbered after the board's last ticket, in paste
+ * order, so the new work reads as one run of ids. A dependency on an id in
+ * the paste follows the ticket to its new id; any other dependency names a
+ * ticket already on the board. A ticket without a T-n id gets the next free
+ * one, past every id the paste keeps.
+ */
+const asAdditions = (board: Board, incoming: readonly TicketImport[]): { tickets: TicketImport[]; renumbered: ImportResult["renumbered"] } => {
+  const taken = new Set(board.tickets.map((t) => t.id));
+  const ids = incoming.map((t) => t.id?.trim() || undefined);
+  const real = ids.filter((id): id is string => Boolean(id && TICKET_ID_PATTERN.test(id)));
+  const clash = real.some((id) => taken.has(id)) || new Set(real).size !== real.length;
+  const map = new Map<string, string>();
+  const assigned: string[] = clash ? [] : [...real];
+  const fresh = ids.map((id) => {
+    const own = id && TICKET_ID_PATTERN.test(id) ? id : undefined;
+    if (own && !clash) return own;
+    const to = nextTicketId(board, assigned);
+    assigned.push(to);
+    if (own && !map.has(own)) map.set(own, to);
+    return to;
+  });
+  return {
+    tickets: incoming.map((t, i) => ({ ...t, id: fresh[i], deps: t.deps?.map((d) => map.get(d) ?? d) })),
+    renumbered: [...map].map(([from, to]) => ({ from, to })),
+  };
+};
+
+/**
+ * Brings an import onto a board, in one of two ways.
  *
- * `by` records who imported in the notes.
+ * "merge" (the default): a ticket with a known id updates the editable
+ * fields (not the state unless the current one is backlog or ready); a
+ * ticket without an id, or with an unknown one, is appended with a fresh
+ * id. Re-importing an export this way revises the plan in place.
+ *
+ * "add": every ticket is new, whatever its id says (see asAdditions). This
+ * is what pasting the next piece of work onto a used board needs: a paste
+ * numbered T-1… must not rewrite the board's own T-1….
+ *
+ * Deps are validated at the end against the whole result. `by` records who
+ * imported in the notes.
  */
 export const importBoard = (
   board: Board,
   input: unknown,
-  opts: { by: "user" | "agent"; role?: AgentRole; defaultState?: "backlog" | "ready" } = { by: "user" },
+  opts: { by: "user" | "agent"; role?: AgentRole; defaultState?: "backlog" | "ready"; mode?: "merge" | "add" } = { by: "user" },
 ): ImportResult => {
   const parsed: BoardImport = boardImportSchema.parse(input);
   const at = now();
@@ -281,8 +322,11 @@ export const importBoard = (
   const updated: string[] = [];
   const skipped: ImportResult["skipped"] = [];
   const assigned: string[] = [];
+  const onBoard = new Set(board.tickets.map((t) => t.id));
+  const matching = [...new Set(parsed.tickets.map((t) => t.id?.trim() ?? "").filter((id) => onBoard.has(id)))];
+  const additions = opts.mode === "add" ? asAdditions(board, parsed.tickets) : { tickets: parsed.tickets, renumbered: [] };
 
-  for (const inc of parsed.tickets) {
+  for (const inc of additions.tickets) {
     const kind = inc.kind ?? "feature";
     // An empty or foreign id (a generator's "J-1") is no id: the ticket is appended with the next free T-n.
     const incId = inc.id?.trim() || undefined;
@@ -337,7 +381,7 @@ export const importBoard = (
 
   validateDeps(tickets);
   const next: Board = { ...board, verstas: BOARD_FORMAT_VERSION, goal: parsed.goal ?? board.goal, tickets };
-  return { board: next, created, updated, skipped };
+  return { board: next, created, updated, skipped, renumbered: additions.renumbered, matching };
 };
 
 export const emptyBoard = (goal = ""): Board => ({ verstas: BOARD_FORMAT_VERSION, goal, tickets: [] });
