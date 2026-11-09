@@ -44,6 +44,7 @@ import { loadRepoStateCache, readBoxRepoState, saveRepoStateCache, type BoxRepoS
 import { bundleForPublish, changedPaths, defaultPullText, flaggedPaths, publishAll, publishTarget, remoteBranchFor } from "../sessions/publish.js";
 import { syncCheck, syncInBox, type UnpublishedChoice } from "../sessions/sync.js";
 import { artifactFile, clearArtifacts, deleteArtifact, loadArtifacts } from "../sessions/artifacts.js";
+import { archiveCleared, clearPlanNote, clearSession } from "../sessions/new-work.js";
 import { importArchive, readArchive, writeArchive } from "../sessions/archive.js";
 import type { SessionHandle } from "../sessions/hub.js";
 import { copyHomeVolume, copyIntoSandbox, copySnapshot, listSandboxes, replacementOf, removeSandbox, sandboxStatus, stopAllSandboxes, stopSandbox, type SandboxConfig } from "../sandbox/lifecycle.js";
@@ -1576,19 +1577,114 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
       const body = z.object({ branches: z.record(z.string(), z.string().min(1).max(200)).default({}), onUnpublished: z.enum(["refuse", "rebase", "discard"]).default("refuse") }).parse(req.body ?? {});
       const h = await d.hub.get(param(req, "id"));
       if (!(await readyForSync(res, h))) return;
-      await refreshPulls(h, true).catch(() => undefined);
-      const targets = d.getConfig().workTargets;
-      const results = [];
-      for (const r of h.session.repos.filter((x) => x.github)) {
-        const branch = body.branches[r.name] ?? targets.find((t) => t.github.toLowerCase() === r.github!.toLowerCase())?.defaultBranch ?? r.branch;
-        try {
-          results.push({ ...(await syncRepo(await d.hub.get(h.id), r.name, { branch, onUnpublished: body.onUnpublished })), ok: true });
-        } catch (e) {
-          const x = e as Error & { reason?: string };
-          results.push({ name: r.name, branch, ok: false, error: x.message, reason: x.reason });
+      const results = await syncEvery(h, body);
+      res.status(results.every((x) => x.ok) ? 200 : 409).json({ results });
+    }),
+  );
+
+  /** Every GitHub repository of a session synced to its default branch (or the one named), each on its own; the container is up and no run is active. */
+  const syncEvery = async (h: SessionHandle, opts: { branches?: Record<string, string>; onUnpublished: UnpublishedChoice }) => {
+    await refreshPulls(h, true).catch(() => undefined);
+    const targets = d.getConfig().workTargets;
+    const results: ({ name: string; branch: string; ok: true; tip: { sha: string; subject: string; date: string }; mode: string; upToDate: boolean } | { name: string; branch: string; ok: false; error: string; reason?: string })[] = [];
+    for (const r of h.session.repos.filter((x) => x.github)) {
+      const branch = opts.branches?.[r.name] ?? targets.find((t) => t.github.toLowerCase() === r.github!.toLowerCase())?.defaultBranch ?? r.branch;
+      try {
+        results.push({ ...(await syncRepo(await d.hub.get(h.id), r.name, { branch, onUnpublished: opts.onUnpublished })), ok: true });
+      } catch (e) {
+        const x = e as Error & { reason?: string };
+        results.push({ name: r.name, branch, ok: false, error: x.message, reason: x.reason });
+      }
+    }
+    return results;
+  };
+
+  /**
+   * New work in the same box, in one step (src/sessions/new-work.ts): the
+   * repositories go to their latest default branch with the session's own
+   * commits and uncommitted files discarded, the board, the goal with its
+   * history, the inbox, the plan note, the Ask the box history and the
+   * artifacts are cleared (a copy stays under history/), and the goal and
+   * board you give become the session's. The container, its installs, the
+   * environment notes, the settings and the run history stay.
+   *
+   * Order matters: the paste is checked first and the sync runs before
+   * anything is cleared, so a paste that does not parse or a repository
+   * GitHub cannot serve leaves the session exactly as it was. With
+   * `stopRun` an active run is stopped first; without it, an active run
+   * refuses. With `start`, the lead starts on the new work.
+   */
+  api.post(
+    "/sessions/:id/new-work",
+    wrap(async (req, res) => {
+      const body = z
+        .object({
+          goal: z.string().max(20_000).default(""),
+          board: z.string().max(2_000_000).default(""),
+          stopRun: z.boolean().default(false),
+          start: z.boolean().default(false),
+        })
+        .parse(req.body ?? {});
+      const id = param(req, "id");
+      const h = await d.hub.get(id);
+      if (!isInitialized(h.session)) {
+        res.status(409).json({ error: "The session is not initialized: there is no box to keep. Edit the plan instead." });
+        return;
+      }
+      let pasted: ReturnType<typeof parseBoardPaste> | undefined;
+      try {
+        pasted = body.board.trim() ? parseBoardPaste(body.board) : undefined;
+        if (pasted) validateRepos(importBoard(emptyBoard(), pasted, { by: "user", defaultState: "ready", mode: "add" }).board.tickets, h.session.repos.map((r) => r.name));
+      } catch (e) {
+        res.status(400).json({ error: pasteError(e) });
+        return;
+      }
+      if (d.runs.status(id)) {
+        if (!body.stopRun) {
+          res.status(409).json({ error: "Pause or stop the run first" });
+          return;
+        }
+        if (!(await d.runs.stopAndWait(id))) {
+          res.status(409).json({ error: "The run did not stop in time; nothing was cleared. Try again." });
+          return;
         }
       }
-      res.status(results.every((x) => x.ok) ? 200 : 409).json({ results });
+      let synced: Awaited<ReturnType<typeof syncEvery>> = [];
+      if (h.session.repos.some((r) => r.github)) {
+        try {
+          await ensureSessionSandbox(d.runConfig, h.session, path.join(h.paths.dir, "sandbox.env"), false);
+          synced = await syncEvery(h, { onUnpublished: "discard" });
+        } catch (e) {
+          res.status(502).json({ error: `Could not sync the repositories; nothing was cleared. ${(e as Error).message}` });
+          return;
+        }
+        const failed = synced.filter((x) => !x.ok);
+        if (failed.length) {
+          res.status(409).json({ error: `Could not sync ${failed.map((x) => x.name).join(", ")}; nothing was cleared. ${failed.map((x) => (x.ok ? "" : x.error)).join("; ")}`, synced });
+          return;
+        }
+      }
+      const at = now();
+      const history = await archiveCleared(h.paths, h.snapshot(), at);
+      const goal = body.goal.trim() || pasted?.goal?.trim() || "";
+      const result = await h.mutate((docs) => {
+        const cleared = clearSession(docs, at);
+        const imported = pasted ? importBoard(cleared.next.board, pasted, { by: "user", defaultState: "ready", mode: "add" }) : undefined;
+        const session: Session = goal ? { ...cleared.next.session, goal, goalSince: at } : cleared.next.session;
+        const board: Board = { ...(imported?.board ?? cleared.next.board), goal };
+        return { next: { session, board, inbox: cleared.next.inbox }, result: { summary: cleared.summary, created: imported?.created ?? [] } };
+      });
+      const planNote = await clearPlanNote(h.paths);
+      let run: Run | undefined;
+      let startError: string | undefined;
+      if (body.start && (goal || result.created.length)) {
+        try {
+          run = (await d.runs.start(id, {})).run;
+        } catch (e) {
+          startError = (e as Error).message;
+        }
+      }
+      res.json({ ok: true, ...result, goal: Boolean(goal), planNote, synced, history: path.relative(h.paths.dir, history), run, startError });
     }),
   );
 

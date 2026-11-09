@@ -47,6 +47,7 @@ import { AgentOptionsButton, useDrivers } from "./AgentOptions";
 import { AgentTerminal, ArtifactPills } from "./Terminal";
 import { ImportCard } from "./session/ImportCard";
 import { publishAllSummary, publishRowText, usePublishAll } from "./session/publishAll";
+import { NewWorkDialog } from "./session/NewWorkDialog";
 
 const COLUMNS: { key: string; title: string; states: string[] }[] = [
   { key: "backlog", title: "Backlog", states: ["backlog"] },
@@ -134,6 +135,7 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
   const [err, setErr] = useState("");
   const [notice, setNotice] = useState("");
   const [importOpen, setImportOpen] = useState(false);
+  const [newWork, setNewWork] = useState(false);
   const [exportInfo, setExportInfo] = useState<string[] | null>(null);
   const [newTicket, setNewTicket] = useState(false);
   const [busy, setBusy] = useState("");
@@ -340,6 +342,7 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
             )}
             {active && !terminalActive && <button onClick={() => runAction("pause")} disabled={Boolean(busy)} title="The lead is told to reach a sensible point, update its note and stop; what it leaves is committed">Pause</button>}
             {active && !terminalActive && <button className="warn" onClick={() => runAction("stop")} disabled={Boolean(busy)} title="Stop the lead now; its tickets go back to ready with the work kept">Stop now</button>}
+            {initialized && !terminalActive && <button onClick={() => setNewWork(true)} disabled={Boolean(busy)} title="Start over in the same box: the repositories go to their latest branch, the board, goal, inbox and plan note are cleared, and you give the next goal and board. The dialog lists what is lost before anything happens.">New work…</button>}
             {initialized && <button onClick={() => setNewTicket(true)} disabled={Boolean(busy)} title="Write a ticket by hand">New ticket</button>}
             <MoreMenu
               items={[
@@ -406,6 +409,24 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
           <p className="muted small">Bundles are pure data; fetching from them runs nothing from the repository. One command per repository:</p>
           {exportInfo.map((l) => <CopyLine key={l} text={l} />)}
         </section>
+      )}
+
+      {newWork && (
+        <NewWorkDialog
+          session={session}
+          board={board}
+          inbox={inbox}
+          base={base}
+          active={active}
+          repoState={repoState}
+          onClose={() => setNewWork(false)}
+          onDone={async (text) => {
+            setNewWork(false);
+            setNotice(text);
+            await refreshRun();
+            await repoState.refresh();
+          }}
+        />
       )}
 
       {importOpen && (
@@ -1109,7 +1130,7 @@ const RepoStrip = ({ session, base, active, done, repoState, onExport, onDone }:
           const st = state?.repos.find((x) => x.name === r.name);
           const ch = st ? repoChange(st) : { text: "not read yet", changed: false };
           const pr = st?.prs.at(-1);
-          const openPr = pr?.state === "open" ? pr : undefined;
+          const openPr = pr?.state === "open" && !pr.detached ? pr : undefined;
           const nothing = st?.box?.ahead === 0;
           const remote = st ? remoteNote(st) : undefined;
           const shown = open === r.name;
@@ -1131,8 +1152,8 @@ const RepoStrip = ({ session, base, active, done, repoState, onExport, onDone }:
                 <span className="pr small">
                   {pr ? (
                     <>
-                      <a href={pr.url} target="_blank" rel="noreferrer" title={pr.title}>PR #{pr.number}</a>{" "}
-                      <span className={pr.state === "merged" ? "ok" : pr.state === "closed" ? "muted" : ""}>{pr.state}</span>
+                      <a href={pr.url} target="_blank" rel="noreferrer" title={pr.detached ? `${pr.title} (earlier work: the next publish opens a new pull request)` : pr.title}>PR #{pr.number}</a>{" "}
+                      <span className={pr.state === "merged" ? "ok" : pr.state === "closed" || pr.detached ? "muted" : ""}>{pr.detached && pr.state === "open" ? "open, earlier work" : pr.state}</span>
                     </>
                   ) : r.github ? <span className="muted">no PR</span> : null}
                 </span>
@@ -1707,7 +1728,8 @@ const GoalPanel = ({ session, base, active, run, onDone, fold = false }: { sessi
   const rounds = run?.rounds ?? 0;
   useEffect(() => {
     api<{ text: string; updatedAt: string | null }>("GET", `${base}/state-note`).then(setNote).catch(() => setNote(null));
-  }, [base, rounds, active]);
+    // The goal's date is among the reasons to read again: New work empties the note and resets the goal.
+  }, [base, rounds, active, session.goalSince]);
   const save = async () => {
     setBusy(true);
     setMsg("");

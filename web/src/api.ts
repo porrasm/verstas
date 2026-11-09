@@ -349,7 +349,7 @@ export type CommitLine = { sha: string; date: string; subject: string };
 /** A file the agent in a terminal published (src/sessions/artifacts.ts); text and image have a preview. */
 export type Artifact = { id: string; name: string; bytes: number; kind: "text" | "image" | "file"; mime: string; runId: number; publishedAt: string };
 
-export type PullRecord = { round: number; number: number; url: string; remoteBranch: string; headSha: string; base: string; title: string; state: "open" | "merged" | "closed"; publishedAt: string; checkedAt?: string };
+export type PullRecord = { round: number; number: number; url: string; remoteBranch: string; headSha: string; base: string; title: string; state: "open" | "merged" | "closed"; publishedAt: string; checkedAt?: string; /** Set by New work: it belongs to earlier work, and the next publish opens a new one. */ detached?: boolean };
 /** What Publish would do for a repository. */
 export type PublishPreview = {
   ahead: number | null;

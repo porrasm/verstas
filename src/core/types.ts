@@ -394,6 +394,12 @@ export const pullRecordSchema = z.object({
   publishedAt: z.string(),
   /** When the state was last read from GitHub. */
   checkedAt: z.string().optional(),
+  /**
+   * Set by New work: the pull request belongs to work the session no
+   * longer holds. It stays open on GitHub, and the next publish opens a new
+   * one in a new round instead of updating it.
+   */
+  detached: z.boolean().optional(),
 });
 export type PullRecord = z.infer<typeof pullRecordSchema>;
 

@@ -15,10 +15,14 @@ import type { BoxRepoState, CommitLine } from "./repo-state.js";
 /** The branch on GitHub for a round: verstas/<session>-<round>. */
 export const remoteBranchFor = (sessionId: string, round: number): string => `verstas/${sessionId}-${round}`;
 
-/** The pull request a publish updates (the last one, while it is open), or the round a new one starts. */
+/**
+ * The pull request a publish updates (the last one, while it is open), or
+ * the round a new one starts. A pull request detached by New work is never
+ * updated: the commits now on the branch are other work.
+ */
 export const publishTarget = (prs: readonly PullRecord[] | undefined): { round: number; update: PullRecord | null } => {
   const last = prs?.at(-1);
-  if (last?.state === "open") return { round: last.round, update: last };
+  if (last?.state === "open" && !last.detached) return { round: last.round, update: last };
   return { round: (last?.round ?? 0) + 1, update: null };
 };
 
@@ -56,7 +60,7 @@ export const publishSkip = (repo: Repo, st: BoxRepoState | null): string | undef
   if (!st) return "its clone could not be read";
   if (st.ahead === 0) return "no commits since the base";
   const last = repo.prs?.at(-1);
-  if (last?.state === "open" && last.headSha === st.head) return `pull request #${last.number} already has every commit`;
+  if (last?.state === "open" && !last.detached && last.headSha === st.head) return `pull request #${last.number} already has every commit`;
   if (last && last.state !== "open" && last.headSha && st.commits.some((c) => c.sha === last.headSha)) return `pull request #${last.number} was ${last.state} and the branch still holds its commits; sync to ${repo.branch} first`;
   return undefined;
 };

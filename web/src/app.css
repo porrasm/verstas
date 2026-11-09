@@ -521,6 +521,8 @@ textarea.invalid { border-color: var(--warn); }
   .strip-row .line { grid-template-columns: auto minmax(0, 1fr) auto; }
   .strip-row .what, .strip-row .pr { grid-column: 2 / -1; }
 }
+.dialog.new-work { width: min(720px, 100%); }
+ul.plain { margin: 0; padding-left: 18px; display: grid; gap: 3px; }
 /* A written goal folded to three lines on the run view. */
 .goal-fold { white-space: pre-wrap; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; cursor: pointer; color: var(--text-2); font-size: 13.5px; }
 /* The inbox scrolls inside its card, so what sits below it keeps its place. */

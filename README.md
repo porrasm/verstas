@@ -163,6 +163,19 @@ Then, in the web app:
    with nothing new is left out with the reason, and one that fails does
    not stop the others. Publish PR on a line does one repository with a
    title and description you edit. Review, tweak and merge on GitHub.
+   **New work…** in the header starts over in the same box, in one step:
+   every repository goes to its latest default branch with the session's
+   own commits and uncommitted files discarded, and the board, the goal
+   with its history, the inbox, the lead's plan note, the Ask the box
+   history and the artifacts are cleared, so nothing of the earlier work
+   is in front of the next lead. The dialog lists what is lost per
+   repository before anything happens (with Publish all as drafts beside
+   it), takes the next goal and board, both optional, and can start the
+   run; with neither it is a clear. The container and what is installed
+   in it, the environment notes, the settings and the run history stay,
+   and a copy of what was cleared goes to `history/` in the session
+   folder. An open pull request stays on GitHub; the next publish opens a
+   new one.
    **Next round** goes the other way once you merged: every repository's
    clone moves to the latest default branch (or one you pick) without a
    new clone, and you see each new tip. **Sync** does

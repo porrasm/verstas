@@ -170,7 +170,8 @@ export const createAgentApi = (hub: SessionHub, tokens: RunTokens, hooks?: Agent
       const h = await hub.get(req.run.sessionId);
       const state = typeof req.query.state === "string" ? req.query.state : undefined;
       const tickets = h.board.tickets.filter((t) => !state || t.state === state).map(summary);
-      res.json({ goal: h.board.goal, currentTicket: req.run.currentTicket, tickets });
+      // The session's goal, which you edit; the board file's own goal field is from the day the session was made.
+      res.json({ goal: h.session.goal, currentTicket: req.run.currentTicket, tickets });
     }),
   );
 

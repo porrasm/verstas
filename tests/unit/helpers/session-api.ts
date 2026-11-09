@@ -23,9 +23,18 @@ export const sessionApi = async (opts: { id?: string; session?: Record<string, u
   await saveBoard(paths.dir, opts.board ?? emptyBoard());
   await writeJsonAtomic(paths.inbox, inboxSchema.parse(opts.inbox ?? {}));
   const hub = new SessionHub(root);
-  const state = { running: false, messages: [] as string[] };
+  const state = { running: false, messages: [] as string[], started: 0 };
   const runs = {
     status: () => (state.running ? { id: "r1" } : undefined),
+    stopAndWait: async () => {
+      state.running = false;
+      return true;
+    },
+    start: async () => {
+      state.started++;
+      state.running = true;
+      return { run: { id: 7, sessionId: id, state: "running" } };
+    },
     message: async (_id: string, text: string) => {
       state.messages.push(text);
       return { ok: true, to: "lead" };

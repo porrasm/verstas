@@ -174,6 +174,14 @@ export class RunManager implements AgentRunHooks {
     return this.terminals.get(sessionId);
   }
 
+  /** Stops the active run, whatever it is, and waits until it has ended and its changes are committed. True when nothing is active afterwards. */
+  async stopAndWait(sessionId: string, timeoutMs = 60_000): Promise<boolean> {
+    const c = this.active.get(sessionId);
+    if (!c) return true;
+    c.stopNow();
+    return Promise.race([c.done.then(() => true, () => true), new Promise<boolean>((r) => setTimeout(() => r(false), timeoutMs).unref())]);
+  }
+
   /**
    * Starting anything else ends an agent terminal: stop its run and wait
    * until its changes are committed. A no-op when the active run is not a
