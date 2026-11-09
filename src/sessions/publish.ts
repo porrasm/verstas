@@ -2,7 +2,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import type { Shell } from "../harness/run.js";
 import type { PullRecord, Session } from "../core/types.js";
-import type { CommitLine } from "./repo-state.js";
+import type { BoxRepoState, CommitLine } from "./repo-state.js";
 
 /**
  * Publish PR: a session repository's commits go to GitHub as a `verstas/`
@@ -39,6 +39,104 @@ export const defaultPullText = (session: Pick<Session, "name" | "goal">, commits
     ...(more > 0 ? [`- … and ${more} more`] : []),
   ];
   return { title: title.slice(0, 250), body: lines.join("\n") };
+};
+
+// --- Publish all -------------------------------------------------------------
+
+type Repo = Session["repos"][number];
+
+/**
+ * Why Publish all leaves a repository out, or undefined when it goes. A
+ * repository whose last pull request was merged or closed while the branch
+ * still holds that request's commits is left out: a new pull request would
+ * carry the old work again. Publish PR on its line still does it, after
+ * showing the warning.
+ */
+export const publishSkip = (repo: Repo, st: BoxRepoState | null): string | undefined => {
+  if (!st) return "its clone could not be read";
+  if (st.ahead === 0) return "no commits since the base";
+  const last = repo.prs?.at(-1);
+  if (last?.state === "open" && last.headSha === st.head) return `pull request #${last.number} already has every commit`;
+  if (last && last.state !== "open" && last.headSha && st.commits.some((c) => c.sha === last.headSha)) return `pull request #${last.number} was ${last.state} and the branch still holds its commits; sync to ${repo.branch} first`;
+  return undefined;
+};
+
+export type PublishAllRow = {
+  repo: string;
+  /** "ready": it would be published (an answer that asks for a confirm first). */
+  outcome: "opened" | "updated" | "skipped" | "failed" | "ready";
+  /** Why it was skipped or how it failed. */
+  reason?: string;
+  pr?: PullRecord;
+  commits?: number | null;
+  /** Uncommitted files, which are not published. */
+  dirty?: number;
+};
+export type PublishAllResult = {
+  /** False when nothing was pushed because files below wait for your confirm. */
+  published: boolean;
+  /** Build and CI files among the changes, per repository: pushing them runs agent-written code in CI. */
+  flagged: { repo: string; paths: string[] }[];
+  rows: PublishAllRow[];
+};
+
+/**
+ * Publish all: every repository with commits gets a draft pull request,
+ * and every open pull request gets the new commits, with default titles
+ * and bodies. Nothing asks, except once: when the changes touch build or
+ * CI files, the answer lists them and publishes nothing until the call
+ * comes again with `acknowledgeFlagged`. One repository failing does not
+ * stop the others; every row says what happened.
+ *
+ * The reading and the publishing are passed in, so this is the whole
+ * decision and has no git or network of its own.
+ */
+export const publishAll = async (
+  repos: readonly Repo[],
+  io: {
+    read(repo: Repo): Promise<{ st: BoxRepoState | null; paths: string[] }>;
+    publish(repo: Repo, st: BoxRepoState): Promise<{ pr: PullRecord; updated: boolean }>;
+  },
+  opts: { acknowledgeFlagged: boolean },
+): Promise<PublishAllResult> => {
+  const rows: PublishAllRow[] = [];
+  const going: { repo: Repo; st: BoxRepoState; row: PublishAllRow }[] = [];
+  const flagged: PublishAllResult["flagged"] = [];
+  for (const repo of repos) {
+    if (!repo.github) {
+      rows.push({ repo: repo.name, outcome: "skipped", reason: "not a GitHub repository" });
+      continue;
+    }
+    let read: { st: BoxRepoState | null; paths: string[] };
+    try {
+      read = await io.read(repo);
+    } catch (e) {
+      rows.push({ repo: repo.name, outcome: "failed", reason: (e as Error).message });
+      continue;
+    }
+    const skip = publishSkip(repo, read.st);
+    if (skip || !read.st) {
+      rows.push({ repo: repo.name, outcome: "skipped", reason: skip, commits: read.st?.ahead, dirty: read.st?.dirty || undefined });
+      continue;
+    }
+    const row: PublishAllRow = { repo: repo.name, outcome: "ready", commits: read.st.ahead, dirty: read.st.dirty || undefined };
+    rows.push(row);
+    going.push({ repo, st: read.st, row });
+    const f = flaggedPaths(read.paths);
+    if (f.length) flagged.push({ repo: repo.name, paths: f });
+  }
+  if (flagged.length && !opts.acknowledgeFlagged) return { published: false, flagged, rows };
+  for (const g of going) {
+    try {
+      const r = await io.publish(g.repo, g.st);
+      g.row.outcome = r.updated ? "updated" : "opened";
+      g.row.pr = r.pr;
+    } catch (e) {
+      g.row.outcome = "failed";
+      g.row.reason = (e as Error).message;
+    }
+  }
+  return { published: true, flagged, rows };
 };
 
 const SHA = /^[0-9a-f]{40}$/;

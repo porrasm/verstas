@@ -46,6 +46,7 @@ import {
 import { AgentOptionsButton, useDrivers } from "./AgentOptions";
 import { AgentTerminal, ArtifactPills } from "./Terminal";
 import { ImportCard } from "./session/ImportCard";
+import { publishAllSummary, publishRowText, usePublishAll } from "./session/publishAll";
 
 const COLUMNS: { key: string; title: string; states: string[] }[] = [
   { key: "backlog", title: "Backlog", states: ["backlog"] },
@@ -1074,9 +1075,13 @@ const RepoStrip = ({ session, base, active, done, repoState, onExport, onDone }:
   const [nextRound, setNextRound] = useState(false);
   const [open, setOpen] = useState<string | null>(null);
   const [note, setNote] = useState("");
+  const all = usePublishAll(base, onDone);
   if (!session.repos.length || !isInitialized(session)) return null;
   const state = repoState.state;
   const stopFirst = "Pause or stop the run first";
+  const onGithub = session.repos.filter((r) => r.github);
+  // Known to have nothing to push: every clone was read and none is ahead of its base.
+  const nothingToPublish = onGithub.every((r) => state?.repos.find((x) => x.name === r.name)?.box?.ahead === 0);
   const finish = (close: () => void) => async (text: string) => {
     close();
     setNote(text);
@@ -1090,7 +1095,12 @@ const RepoStrip = ({ session, base, active, done, repoState, onExport, onDone }:
         {repoState.error && <span className="err small">{repoState.error}</span>}
         <span className="row end" style={{ gap: 6 }}>
           <button className="quiet sm" onClick={() => void repoState.refresh(!state?.live)} disabled={repoState.loading || (active && !state?.live)} title={state?.live ? "Read the clones and GitHub again" : "Start the container and read the clones now"}>{repoState.loading ? "Reading…" : state?.live ? "Refresh" : "Read now"}</button>
-          {session.repos.some((r) => r.github) && <button className="sm" onClick={() => setNextRound(true)} disabled={active} title={active ? stopFirst : "After merging on GitHub: sync every repository to its latest branch, then plan"}>Next round…</button>}
+          {onGithub.length > 0 && (
+            <button className="sm pri" onClick={() => void all.run()} disabled={active || all.working || nothingToPublish} title={active ? stopFirst : nothingToPublish ? "No repository has commits since its base" : "One click: a draft pull request for every repository with commits, and the new commits to every open pull request. Asks only when build or CI files changed."}>
+              {all.working ? "Publishing…" : "Publish all as drafts"}
+            </button>
+          )}
+          {onGithub.length > 0 && <button className="sm" onClick={() => setNextRound(true)} disabled={active} title={active ? stopFirst : "After merging on GitHub: sync every repository to its latest branch, then plan"}>Next round…</button>}
           <MoreMenu label="⋯" className="quiet sm" items={[{ label: "Export bundles…", onClick: onExport, disabled: active }]} />
         </span>
       </div>
@@ -1103,15 +1113,21 @@ const RepoStrip = ({ session, base, active, done, repoState, onExport, onDone }:
           const nothing = st?.box?.ahead === 0;
           const remote = st ? remoteNote(st) : undefined;
           const shown = open === r.name;
+          const published = all.result?.rows.find((x) => x.repo === r.name);
+          const outcome = published ? publishRowText(published) : undefined;
           return (
             <div className="strip-row" key={r.name}>
               <div className="line">
                 <button className="quiet sm disclose" aria-expanded={shown} onClick={() => setOpen(shown ? null : r.name)} title={shown ? "Hide the details" : "Base, GitHub and the commits of this session"}>{shown ? "▾" : "▸"}</button>
                 <span className="name"><strong>{r.name}</strong> {r.github ? <a className="muted small mono" href={`https://github.com/${r.github}`} target="_blank" rel="noreferrer">{r.github}</a> : <span className="muted small mono" title={r.sourcePath}>{repoOrigin(r)}</span>}</span>
-                <span className="what small" title={remote?.text}>
-                  <span className={ch.changed ? "" : "muted"}>{ch.changed ? <b>{ch.text}</b> : ch.text}</span>
-                  {remote && <span className={remote.tone}> · {remote.text}</span>}
-                </span>
+                {outcome ? (
+                  <span className={`what small ${outcome.tone}`} title={outcome.text}>{outcome.text}</span>
+                ) : (
+                  <span className="what small" title={remote?.text}>
+                    <span className={ch.changed ? "" : "muted"}>{ch.changed ? <b>{ch.text}</b> : ch.text}</span>
+                    {remote && <span className={remote.tone}> · {remote.text}</span>}
+                  </span>
+                )}
                 <span className="pr small">
                   {pr ? (
                     <>
@@ -1144,6 +1160,9 @@ const RepoStrip = ({ session, base, active, done, repoState, onExport, onDone }:
         })}
       </div>
       {note && <div className="banner ok small"><span>{note}</span><button className="quiet sm end" onClick={() => setNote("")}>Dismiss</button></div>}
+      {all.result && <div className={`banner small ${all.result.rows.some((x) => x.outcome === "failed") ? "warn" : "ok"}`}><span>{publishAllSummary(all.result)} Each line says what happened to its repository.</span><button className="quiet sm end" onClick={all.dismiss}>Dismiss</button></div>}
+      {all.error && <div className="banner warn small"><span>{all.error}</span><button className="quiet sm end" onClick={all.dismiss}>Dismiss</button></div>}
+      {all.dialog}
       {syncing && <SyncDialog repo={syncing} st={state?.repos.find((x) => x.name === syncing.name)} base={base} onClose={() => setSyncing(null)} onDone={finish(() => setSyncing(null))} />}
       {nextRound && <NextRoundDialog session={session} state={state} base={base} onClose={() => setNextRound(false)} onDone={onDone} />}
       {publishing && <PublishDialog repo={publishing} base={base} onClose={() => setPublishing(null)} onDone={finish(() => setPublishing(null))} />}

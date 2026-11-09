@@ -153,12 +153,16 @@ Then, in the web app:
    changes whichever it needs. The harness runs no checks of its own: the
    reviewer runs each changed repository's check and reads the change
    (`docs/BOARD.md`, Judging).
-9. **Publish PR** when you want the work: the Repositories strip at the top of the session page
-   shows per repository which got commits, its base and whether GitHub
-   moved on. Publish PR pushes the commits since the base to
-   `verstas/<session>-<round>` on GitHub and opens a draft pull request
-   into the base branch (Update PR while it is open). Review, tweak and
-   merge on GitHub.
+9. **Publish** when you want the work: the Repositories strip at the top
+   of the session page shows per repository which got commits, its pull
+   request and whether GitHub moved on. **Publish all as drafts** does
+   every repository in one click: the commits since the base go to
+   `verstas/<session>-<round>` on GitHub with a draft pull request into
+   the base branch, and an open pull request gets the new commits. It asks
+   once, and only when the changes touch build or CI files; a repository
+   with nothing new is left out with the reason, and one that fails does
+   not stop the others. Publish PR on a line does one repository with a
+   title and description you edit. Review, tweak and merge on GitHub.
    **Next round** goes the other way once you merged: every repository's
    clone moves to the latest default branch (or one you pick) without a
    new clone, and you see each new tip. **Sync** does

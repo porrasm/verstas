@@ -40,8 +40,8 @@ import { createSession, deleteSessionDir, listSessions, makeSessionId, provision
 import { GithubError, githubApi, parseGithubRepo } from "../github/api.js";
 import type { Mirrors } from "../github/mirror.js";
 import { copyEnvironmentFiles, environmentSettings } from "../sessions/from-environment.js";
-import { loadRepoStateCache, readBoxRepoState, saveRepoStateCache } from "../sessions/repo-state.js";
-import { bundleForPublish, changedPaths, defaultPullText, flaggedPaths, publishTarget, remoteBranchFor } from "../sessions/publish.js";
+import { loadRepoStateCache, readBoxRepoState, saveRepoStateCache, type BoxRepoState } from "../sessions/repo-state.js";
+import { bundleForPublish, changedPaths, defaultPullText, flaggedPaths, publishAll, publishTarget, remoteBranchFor } from "../sessions/publish.js";
 import { syncCheck, syncInBox, type UnpublishedChoice } from "../sessions/sync.js";
 import { artifactFile, clearArtifacts, deleteArtifact, loadArtifacts } from "../sessions/artifacts.js";
 import { importArchive, readArchive, writeArchive } from "../sessions/archive.js";
@@ -1379,11 +1379,58 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
   );
 
   /**
-   * Publish: the run branch's commits since the base go to GitHub as
-   * verstas/<session>-<round> and a draft pull request into the base branch,
-   * or update the open one. Only on your click; the token is used here, on
-   * the host, and the push can name only a verstas/ branch.
+   * One repository's commits to GitHub: the bundle leaves the container,
+   * goes into the mirror, is pushed to verstas/<session>-<round>, and a
+   * draft pull request into the base branch is opened, or the open one
+   * updated. The caller has read the clone (`st`), refreshed the pull
+   * request states and made sure no run is active. The token is used here,
+   * on the host, and the push can name only a verstas/ branch.
    */
+  const publishRepo = async (h: SessionHandle, repo: Session["repos"][number] & { github: string }, st: BoxRepoState, text: { title: string; body: string; draft: boolean }) => {
+    const client = await gh();
+    const sh = dockerShell(d.sandbox, h.id);
+    const target = publishTarget(repo.prs);
+    const bundle = await bundleForPublish(sh, repo, h.paths.workspace, h.paths.exportDir);
+    const ref = `refs/verstas/${h.id}/${repo.name}`;
+    let sha: string;
+    try {
+      sha = await d.mirrors.importBundle(repo.github, bundle, repo.runBranch, ref);
+    } finally {
+      await fs.rm(bundle, { force: true });
+    }
+    const remoteBranch = target.update?.remoteBranch ?? remoteBranchFor(h.id, target.round);
+    // The branch is Verstas's own; one left by a publish that failed after its push is taken over at the sha GitHub has.
+    try {
+      const expect = target.update ? target.update.headSha : await d.mirrors.remoteSha(repo.github, remoteBranch);
+      await d.mirrors.push(repo.github, ref, remoteBranch, expect);
+    } catch (e) {
+      throw Object.assign(new Error((e as Error).message), { status: 502 });
+    }
+    let pull;
+    try {
+      if (target.update) pull = await client.updatePull(repo.github, target.update.number, { title: text.title, ...(text.body.trim() ? { body: text.body } : {}) });
+      else pull = (await client.findPull(repo.github, remoteBranch).then((p) => (p?.state === "open" ? p : null))) ?? (await client.createPull(repo.github, { head: remoteBranch, base: repo.branch, title: text.title, body: text.body, draft: text.draft }));
+    } catch (e) {
+      throw Object.assign(new Error(`Pushed ${remoteBranch}, but the pull request failed: ${(e as Error).message}`), { status: 502 });
+    }
+    const at = now();
+    const record = { round: target.round, number: pull.number, url: pull.url, remoteBranch, headSha: sha, base: pull.base, title: pull.title, state: pull.state, publishedAt: at, checkedAt: at };
+    await h.mutate((docs) => ({
+      next: {
+        session: {
+          ...docs.session,
+          repos: docs.session.repos.map((r) => {
+            if (r.name !== repo.name) return r;
+            const prs = r.prs ?? [];
+            return { ...r, prs: prs.at(-1)?.number === record.number ? [...prs.slice(0, -1), record] : [...prs, record] };
+          }),
+        },
+      },
+    }));
+    return { pr: record, updated: Boolean(target.update), commits: st.ahead };
+  };
+
+  /** Publish PR for one repository, with the title and body from the dialog. Only on your click. */
   api.post(
     "/sessions/:id/repos/:name/publish",
     wrap(async (req, res) => {
@@ -1392,55 +1439,48 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
       if (notWhileRunning(res, h.id)) return;
       const spec = githubRepoOf(h, String(param(req, "name")));
       if (!(await loadSecrets()).githubToken) throw Object.assign(new Error("Save a GitHub token in Settings first: pushing needs one"), { status: 400 });
-      const client = await gh();
       await refreshPulls(h, true).catch(() => undefined);
-      const fresh = (await d.hub.get(h.id)).session.repos.find((r) => r.name === spec.name)!;
-      const target = publishTarget(fresh.prs);
-
+      const fresh = (await d.hub.get(h.id)).session.repos.find((r) => r.name === spec.name)! as typeof spec;
       await ensureSessionSandbox(d.runConfig, h.session, path.join(h.paths.dir, "sandbox.env"), false);
-      const sh = dockerShell(d.sandbox, h.id);
-      const st = await readBoxRepoState(sh, fresh);
+      const st = await readBoxRepoState(dockerShell(d.sandbox, h.id), fresh);
       if (!st) throw Object.assign(new Error(`Could not read ${spec.name}'s clone in the container`), { status: 500 });
       if (st.ahead === 0) throw Object.assign(new Error(`${spec.name} has no commits since ${fresh.branch} @ ${fresh.baseCommit?.slice(0, 7)}: nothing to publish`), { status: 409 });
+      res.json(await publishRepo(h, fresh, st, body));
+    }),
+  );
 
-      const bundle = await bundleForPublish(sh, fresh, h.paths.workspace, h.paths.exportDir);
-      const ref = `refs/verstas/${h.id}/${spec.name}`;
-      let sha: string;
-      try {
-        sha = await d.mirrors.importBundle(spec.github, bundle, fresh.runBranch, ref);
-      } finally {
-        await fs.rm(bundle, { force: true });
-      }
-      const remoteBranch = target.update?.remoteBranch ?? remoteBranchFor(h.id, target.round);
-      // The branch is Verstas's own; one left by a publish that failed after its push is taken over at the sha GitHub has.
-      try {
-        const expect = target.update ? target.update.headSha : await d.mirrors.remoteSha(spec.github, remoteBranch);
-        await d.mirrors.push(spec.github, ref, remoteBranch, expect);
-      } catch (e) {
-        throw Object.assign(new Error((e as Error).message), { status: 502 });
-      }
-      let pull;
-      try {
-        if (target.update) pull = await client.updatePull(spec.github, target.update.number, { title: body.title, ...(body.body.trim() ? { body: body.body } : {}) });
-        else pull = (await client.findPull(spec.github, remoteBranch).then((p) => (p?.state === "open" ? p : null))) ?? (await client.createPull(spec.github, { head: remoteBranch, base: fresh.branch, title: body.title, body: body.body, draft: body.draft }));
-      } catch (e) {
-        throw Object.assign(new Error(`Pushed ${remoteBranch}, but the pull request failed: ${(e as Error).message}`), { status: 502 });
-      }
-      const at = now();
-      const record = { round: target.round, number: pull.number, url: pull.url, remoteBranch, headSha: sha, base: pull.base, title: pull.title, state: pull.state, publishedAt: at, checkedAt: at };
-      await h.mutate((docs) => ({
-        next: {
-          session: {
-            ...docs.session,
-            repos: docs.session.repos.map((r) => {
-              if (r.name !== spec.name) return r;
-              const prs = r.prs ?? [];
-              return { ...r, prs: prs.at(-1)?.number === record.number ? [...prs.slice(0, -1), record] : [...prs, record] };
-            }),
+  /**
+   * Publish all, in one click: a draft pull request for every repository
+   * with commits and an update for every open one, with default titles and
+   * bodies (src/sessions/publish.ts, publishAll). The pull request states
+   * are refreshed and the container is brought up once for all of them.
+   * When the changes touch build or CI files, nothing is pushed and the
+   * answer lists them; the same call with `acknowledgeFlagged` publishes.
+   */
+  api.post(
+    "/sessions/:id/publish-all",
+    wrap(async (req, res) => {
+      const { acknowledgeFlagged } = z.object({ acknowledgeFlagged: z.boolean().default(false) }).parse(req.body ?? {});
+      const h = await d.hub.get(param(req, "id"));
+      if (notWhileRunning(res, h.id)) return;
+      if (!isInitialized(h.session)) throw Object.assign(new Error("The session is not initialized: nothing to publish"), { status: 409 });
+      if (!(await loadSecrets()).githubToken) throw Object.assign(new Error("Save a GitHub token in Settings first: pushing needs one"), { status: 400 });
+      await refreshPulls(h, true).catch(() => undefined);
+      await ensureSessionSandbox(d.runConfig, h.session, path.join(h.paths.dir, "sandbox.env"), false);
+      const sh = dockerShell(d.sandbox, h.id);
+      const result = await publishAll(
+        (await d.hub.get(h.id)).session.repos,
+        {
+          read: async (repo) => ({ st: await readBoxRepoState(sh, repo), paths: await changedPaths(sh, repo) }),
+          publish: (repo, st) => {
+            const target = publishTarget(repo.prs);
+            const text = target.update ? { title: target.update.title || h.session.name, body: "" } : defaultPullText(h.session, st.commits, Math.max(0, (st.ahead ?? 0) - st.commits.length));
+            return publishRepo(h, repo as typeof repo & { github: string }, st, { ...text, draft: true });
           },
         },
-      }));
-      res.json({ pr: record, updated: Boolean(target.update), commits: st.ahead });
+        { acknowledgeFlagged },
+      );
+      res.json(result);
     }),
   );
 
