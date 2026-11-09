@@ -140,6 +140,15 @@ Then, in the web app:
    the next life reads it, a running lead is told in its conversation, and
    the goal it replaces goes to the session's goal history with how it
    ended. Starting again after a met goal means "not yet".
+   **Goal templates** say how to work, once, for every session: write
+   them in Settings ("research first, no time limit, then plan, then
+   implement"; "a prototype: rough code and known bugs are fine") and pick
+   one beside the goal or in the New work dialog. The lead reads the
+   template after the goal at every life, and the reviewer reads it as
+   the standard the work was done under. A session stores the template's
+   name, so an edit in Settings reaches the sessions that use it at their
+   next lead life; the editor names those sessions first. They are files
+   under `~/.verstas/templates/`, one `<name>.md` each.
    **What Verstas tells the lead**: facts, not a procedure. `VERSTAS.md`
    in the box says where it is, what the tools do, how to reach you, how
    commits and the review work, and its caps; the system prompt names its

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, type Board, type Inbox, type RepoState, type ReposState, type Session } from "../../api";
 import { publishAllSummary, usePublishAll } from "./publishAll";
+import { lastTemplatePick, rememberTemplatePick, TemplateSelect, useGoalTemplates } from "../GoalTemplates";
 
 type RepoHandle = { state: ReposState | null; loading: boolean; error: string; refresh: (start?: boolean) => Promise<void> };
 type Preview = { ok: boolean; error?: string; goal?: string; tickets?: { id: string; title: string }[] };
@@ -46,6 +47,12 @@ export function NewWorkDialog({ session, board, inbox, base, active, repoState, 
   const [working, setWorking] = useState<"" | "start" | "clear">("");
   const [err, setErr] = useState("");
   const all = usePublishAll(base, () => repoState.refresh());
+  const { templates } = useGoalTemplates();
+  // The template starts at the one you picked for the last new work, else the session's own.
+  const [template, setTemplate] = useState<string | null>(() => lastTemplatePick() ?? session.goalTemplate ?? null);
+  useEffect(() => {
+    if (templates && template && !templates.some((t) => t.name === template)) setTemplate(null);
+  }, [templates, template]);
 
   useEffect(() => {
     const key = (e: KeyboardEvent) => e.key === "Escape" && !working && onClose();
@@ -98,7 +105,8 @@ export function NewWorkDialog({ session, board, inbox, base, active, repoState, 
     setWorking(start ? "start" : "clear");
     setErr("");
     try {
-      const r = await api<Answer>("POST", `${base}/new-work`, { goal, board: paste, stopRun: active, start });
+      const r = await api<Answer>("POST", `${base}/new-work`, { goal, board: paste, stopRun: active, start, template });
+      rememberTemplatePick(template);
       const what = [r.goal ? "the goal is set" : "", r.created.length ? `${count(r.created.length, "ticket")} on the board` : ""].filter(Boolean).join(" and ");
       const started = r.run ? " The run started." : r.startError ? ` The run did not start: ${r.startError}` : "";
       const prs = r.summary.detached.length ? ` ${r.summary.detached.map((d) => `#${d.number}`).join(", ")} stay${r.summary.detached.length === 1 ? "s" : ""} open on GitHub; the next publish opens new pull requests.` : "";
@@ -163,6 +171,10 @@ export function NewWorkDialog({ session, board, inbox, base, active, repoState, 
             placeholder="Leave empty to work the board alone"
             autoFocus
           />
+        </label>
+        <label>
+          How to work <span className="help">Optional. A goal template from Settings: the lead reads it after the goal, the reviewer as the standard</span>
+          <TemplateSelect value={template} templates={templates} onChange={setTemplate} disabled={Boolean(working)} />
         </label>
         <label>
           Board <span className="help">Optional. JSON or markdown, as for Import tickets; a goal in it fills the field above</span>

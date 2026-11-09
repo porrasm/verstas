@@ -98,6 +98,8 @@ export type Session = {
   goalMet?: { at: string; runId: number; note: string };
   /** Earlier goals, oldest first. */
   goals?: GoalRecord[];
+  /** The goal template picked for this session, by name; its text lives in the library (Settings). */
+  goalTemplate?: string;
   createdAt: string;
   /** When the environment came to exist; null while the session is a plan. */
   initializedAt: string | null;
@@ -390,3 +392,6 @@ export const repoChange = (r: RepoState): { text: string; changed: boolean } => 
   if (b.dirty > 0) parts.push(`${b.dirty} uncommitted`);
   return parts.length ? { text: parts.join(", "), changed: true } : { text: "no changes", changed: false };
 };
+
+/** A goal template from the library, with the sessions that use it. */
+export type GoalTemplate = { name: string; text: string; updatedAt?: string; usedBy: { id: string; name: string; running: boolean }[] };

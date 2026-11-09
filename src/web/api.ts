@@ -45,6 +45,7 @@ import { bundleForPublish, changedPaths, defaultPullText, flaggedPaths, publishA
 import { syncCheck, syncInBox, type UnpublishedChoice } from "../sessions/sync.js";
 import { artifactFile, clearArtifacts, deleteArtifact, loadArtifacts } from "../sessions/artifacts.js";
 import { archiveCleared, clearPlanNote, clearSession } from "../sessions/new-work.js";
+import { deleteTemplate, getTemplate, listTemplates, saveTemplate, templateNameSchema } from "../templates/library.js";
 import { importArchive, readArchive, writeArchive } from "../sessions/archive.js";
 import type { SessionHandle } from "../sessions/hub.js";
 import { copyHomeVolume, copyIntoSandbox, copySnapshot, listSandboxes, replacementOf, removeSandbox, sandboxStatus, stopAllSandboxes, stopSandbox, type SandboxConfig } from "../sandbox/lifecycle.js";
@@ -492,6 +493,61 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
     wrap(async (req, res) => {
       await deleteScript(param(req, "name"));
       res.json({ ok: true });
+    }),
+  );
+
+  // --- goal templates (src/templates/library.ts) -------------------------------
+
+  /** Sessions that use a template, by template name; a running one is marked, since its next lead life reads an edit. */
+  const templateUse = async (): Promise<Map<string, { id: string; name: string; running: boolean }[]>> => {
+    const use = new Map<string, { id: string; name: string; running: boolean }[]>();
+    for (const s of await listSessions(d.getConfig().sessionsRoot).catch(() => [])) {
+      if (!s.goalTemplate) continue;
+      use.set(s.goalTemplate, [...(use.get(s.goalTemplate) ?? []), { id: s.id, name: s.name, running: Boolean(d.runs.status(s.id)) }]);
+    }
+    return use;
+  };
+
+  /** Every template with its text and the sessions that use it. */
+  api.get(
+    "/templates",
+    wrap(async (_req, res) => {
+      const use = await templateUse();
+      res.json((await listTemplates()).map((t) => ({ ...t, usedBy: use.get(t.name) ?? [] })));
+    }),
+  );
+
+  /** Create or replace a template. Sessions that use it read the new text at their next lead life and review. */
+  api.put(
+    "/templates/:name",
+    wrap(async (req, res) => {
+      const { text } = z.object({ text: z.string().max(20_000) }).parse(req.body ?? {});
+      res.json(await saveTemplate({ name: param(req, "name"), text }));
+    }),
+  );
+
+  /** Delete a template. Sessions that named it keep the name and work without it until you pick another. */
+  api.delete(
+    "/templates/:name",
+    wrap(async (req, res) => {
+      await deleteTemplate(templateNameSchema.parse(param(req, "name")));
+      res.json({ ok: true });
+    }),
+  );
+
+  /** Pick this session's goal template by name, or null for none. The next lead life and review read it. */
+  api.put(
+    "/sessions/:id/goal-template",
+    wrap(async (req, res) => {
+      const { template } = z.object({ template: templateNameSchema.nullable() }).parse(req.body ?? {});
+      if (template && !(await getTemplate(template))) throw Object.assign(new Error(`No template named "${template}"`), { status: 404 });
+      const h = await d.hub.get(param(req, "id"));
+      await h.mutate((docs) => {
+        if ((docs.session.goalTemplate ?? null) === template) return {};
+        const { goalTemplate: _t, ...rest } = docs.session;
+        return { next: { session: template ? { ...rest, goalTemplate: template } : rest } };
+      });
+      res.json({ ok: true, template, running: Boolean(d.runs.status(h.id)) });
     }),
   );
 
@@ -1623,12 +1679,18 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
           board: z.string().max(2_000_000).default(""),
           stopRun: z.boolean().default(false),
           start: z.boolean().default(false),
+          /** The goal template for the new work: a name, null for none; left out, the session keeps the one it has. */
+          template: templateNameSchema.nullable().optional(),
         })
         .parse(req.body ?? {});
       const id = param(req, "id");
       const h = await d.hub.get(id);
       if (!isInitialized(h.session)) {
         res.status(409).json({ error: "The session is not initialized: there is no box to keep. Edit the plan instead." });
+        return;
+      }
+      if (body.template && !(await getTemplate(body.template))) {
+        res.status(400).json({ error: `No template named "${body.template}"` });
         return;
       }
       let pasted: ReturnType<typeof parseBoardPaste> | undefined;
@@ -1670,7 +1732,9 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
       const result = await h.mutate((docs) => {
         const cleared = clearSession(docs, at);
         const imported = pasted ? importBoard(cleared.next.board, pasted, { by: "user", defaultState: "ready", mode: "add" }) : undefined;
-        const session: Session = goal ? { ...cleared.next.session, goal, goalSince: at } : cleared.next.session;
+        const { goalTemplate: kept, ...bare } = goal ? { ...cleared.next.session, goal, goalSince: at } : cleared.next.session;
+        const template = body.template === undefined ? kept : (body.template ?? undefined);
+        const session: Session = template ? { ...bare, goalTemplate: template } : bare;
         const board: Board = { ...(imported?.board ?? cleared.next.board), goal };
         return { next: { session, board, inbox: cleared.next.inbox }, result: { summary: cleared.summary, created: imported?.created ?? [] } };
       });

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, fmtAgo, type Config, type RemoteSettings, type Status, type WorkTargetView } from "../api";
+import { GoalTemplates } from "./GoalTemplates";
 
 /**
  * Remote dashboard: a base URL and a token you created there. Only sessions
@@ -402,6 +403,8 @@ export const SettingsPage = ({ status: _status }: { status: Status | null }) => 
       )}
 
       <Credentials ok={ok} fail={fail} />
+
+      <GoalTemplates ok={ok} fail={fail} />
 
       <RemoteDashboard />
 

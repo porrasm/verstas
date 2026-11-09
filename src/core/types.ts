@@ -588,6 +588,13 @@ export const sessionSchema = z.object({
   goalMet: goalMetSchema.optional(),
   /** Earlier goals of this session, oldest first: the project log a session keeps across goals. */
   goals: z.array(goalRecordSchema).default([]),
+  /**
+   * The goal template picked for this session, by name
+   * (src/templates/library.ts): how to work, beside the goal's what. The
+   * text is read from the library at every lead life and review, so the
+   * session follows edits; a name with no template behind it is ignored.
+   */
+  goalTemplate: z.string().max(64).optional(),
   createdAt: z.string(),
   /** When the environment came to exist (see `isInitialized`); null while the session is a plan. */
   initializedAt: z.string().nullable().default(null),

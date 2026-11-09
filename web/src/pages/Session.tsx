@@ -48,6 +48,7 @@ import { AgentTerminal, ArtifactPills } from "./Terminal";
 import { ImportCard } from "./session/ImportCard";
 import { publishAllSummary, publishRowText, usePublishAll } from "./session/publishAll";
 import { NewWorkDialog } from "./session/NewWorkDialog";
+import { TemplateSelect, useGoalTemplates } from "./GoalTemplates";
 
 const COLUMNS: { key: string; title: string; states: string[] }[] = [
   { key: "backlog", title: "Backlog", states: ["backlog"] },
@@ -1748,6 +1749,26 @@ const GoalPanel = ({ session, base, active, run, onDone, fold = false }: { sessi
   const goals = session.goals ?? [];
   const since = session.goalSince ?? session.createdAt;
   const written = Boolean(session.goal.trim());
+  const { templates } = useGoalTemplates();
+  const template = session.goalTemplate ?? null;
+  const templateGone = Boolean(template && templates && !templates.some((t) => t.name === template));
+  const pickTemplate = async (name: string | null) => {
+    setMsg("");
+    try {
+      const r = await api<{ running: boolean }>("PUT", `${base}/goal-template`, { template: name });
+      setMsg(name ? `Template "${name}" set; ${r.running ? "the next lead life reads it." : "the next run reads it."}` : "No template; the goal stands alone.");
+      await onDone();
+    } catch (e) {
+      setMsg((e as Error).message);
+    }
+  };
+  const templateRow = (
+    <div className="row small template-pick">
+      <label htmlFor="goal-template" className="muted" style={{ margin: 0 }}>How to work</label>
+      <TemplateSelect id="goal-template" value={template} templates={templates} onChange={(n) => void pickTemplate(n)} />
+      {templateGone ? <span className="err">This template was deleted; the lead works without it.</span> : <span className="muted">{template ? "The lead reads this template after the goal, the reviewer as the standard." : <>Templates are written in <a href="#/settings">Settings</a>.</>}</span>}
+    </div>
+  );
   const mark = session.goalMet ? "met, says the lead" : written ? (active ? "working" : "set") : "none";
   const tone: Tone = session.goalMet ? "good" : written ? (active ? "sig" : "info") : "quiet";
   const planNote = (
@@ -1767,6 +1788,7 @@ const GoalPanel = ({ session, base, active, run, onDone, fold = false }: { sessi
         </SheetHead>
         <div className="goal-fold" onClick={() => setExpanded(true)} title="Open the goal">{session.goal.trim()}</div>
         {session.goalMet && <div className="small"><span className="ok">The lead says it is met</span> <span className="muted">{fmtAgo(session.goalMet.at, now)}: {session.goalMet.note.split("\n")[0]!.slice(0, 200)}</span></div>}
+        {template && <div className="small"><span className="muted">How to work:</span> <span className={templateGone ? "err" : ""}>{template}{templateGone ? " (deleted; the lead works without it)" : ""}</span></div>}
         {msg && <div className="muted small">{msg}</div>}
         {planNote}
       </section>
@@ -1813,6 +1835,7 @@ const GoalPanel = ({ session, base, active, run, onDone, fold = false }: { sessi
         )}
         <span className="muted small">{msg || (written ? `set ${fmtAgo(since, now)}${goals.length ? ` · ${goals.length} earlier goal${goals.length === 1 ? "" : "s"}` : ""}` : "No goal: the lead works the board's tickets.")}</span>
       </div>
+      {templateRow}
       {planNote}
       {goals.length > 0 && (
         <details>

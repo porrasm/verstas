@@ -40,7 +40,8 @@ export const sessionApi = async (opts: { id?: string; session?: Record<string, u
       return { ok: true, to: "lead" };
     },
   };
-  const server = createUiApi({ hub, runs, ...opts.deps } as unknown as UiApiDeps).listen(0, "127.0.0.1");
+  const getConfig = () => ({ sessionsRoot: root, workTargets: [] });
+  const server = createUiApi({ hub, runs, getConfig, ...opts.deps } as unknown as UiApiDeps).listen(0, "127.0.0.1");
   const port = await new Promise<number>((r) => server.on("listening", () => r((server.address() as net.AddressInfo).port)));
   const call = async <T = any>(method: string, route: string, body?: unknown): Promise<{ status: number; body: T }> => {
     const r = await fetch(`http://127.0.0.1:${port}/api/sessions/${id}${route}`, {
