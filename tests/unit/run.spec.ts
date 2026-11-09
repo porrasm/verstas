@@ -822,6 +822,8 @@ test("every progressMinutes the running lead is asked for a progress update, whi
     expect(r.sent[0]).toContain("`message`");
     const h = await s.hub.get(s.id);
     expect(h.inbox.messages.map((m) => m.text)).toEqual(["Well under way. The CLI parses its arguments and greets; the name flag is next."]);
+    // The first message after a check is its answer: the inbox marks it, so the page shows only the latest update.
+    expect(h.inbox.messages[0]!.progress).toBe(true);
     const ev = await events(s);
     expect(ev.filter((e) => e.kind === "status" && e.text.startsWith("progress check: the lead was asked")).length).toBe(r.sent.length);
   } finally {

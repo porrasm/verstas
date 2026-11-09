@@ -13,6 +13,7 @@ import {
   DEFAULT_ALLOWLIST,
   DRIVER_NAMES,
   driverNameSchema,
+  inboxCleared,
   isInitialized,
   limitsSchema,
   sessionAgentsSchema,
@@ -606,7 +607,7 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
       counts,
       run,
       openRequests: h.inbox.requests.filter((r) => r.state === "open").length,
-      ideas: h.inbox.ideas.filter((i) => !i.promotedTo).length,
+      ideas: h.inbox.ideas.filter((i) => !i.promotedTo && !inboxCleared(h.inbox).ideas.has(i.id)).length,
       totals: runTotals(live ? [...runs.filter((r) => r.id !== live.id), live] : runs, h.session.createdAt),
     };
   };
@@ -2181,6 +2182,23 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
         return { next: { inbox, board, session }, result: next };
       });
       res.json({ ok: true, request: result });
+    }),
+  );
+
+  /**
+   * Clear inbox: every message and idea so far, and every decided request,
+   * leaves the page. Nothing is deleted (see inboxCleared); open requests
+   * stay, since they wait for you.
+   */
+  api.post(
+    "/sessions/:id/inbox/clear",
+    wrap(async (req, res) => {
+      const h = await d.hub.get(param(req, "id"));
+      const cleared = await h.mutate((docs) => {
+        const inbox: Inbox = { ...docs.inbox, clearedAt: now() };
+        return { next: { inbox }, result: inboxCleared(inbox).count - inboxCleared(docs.inbox).count };
+      });
+      res.json({ ok: true, cleared });
     }),
   );
 

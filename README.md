@@ -131,9 +131,12 @@ Then, in the web app:
    told to reach a sensible point, update its note and stop), when a
    request about the goal waits on you and no ticket can go on, or when two
    lives in a row change nothing. A request on a ticket parks that ticket only;
-   the lead carries on with the rest. Every `progressMinutes` of a run
-   (default 30, 0 for none) a running Claude Code lead is asked for a short
-   progress update and posts it to the inbox. Edit the goal at any time:
+   the lead carries on with the rest. The board is the progress report: the
+   lead is told you follow the work there. With `progressMinutes` set (the
+   default is 0, off) a running Claude Code lead is also asked for a short
+   update that often; the inbox shows only the latest. Clear on the inbox
+   takes every message, idea and decided request off the page; nothing is
+   deleted, and open requests stay. Edit the goal at any time:
    the next life reads it, a running lead is told in its conversation, and
    the goal it replaces goes to the session's goal history with how it
    ended. Starting again after a met goal means "not yet".

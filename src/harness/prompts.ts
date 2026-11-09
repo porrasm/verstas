@@ -32,6 +32,9 @@ ${session.repos.map((r) => `  - \`/workspace/${r.name}\` (from \`${r.branch}\`)`
   "board"), with \`request\`, \`message\`, \`idea\`, \`artifact\`, \`budget\`,
   \`handoff\` and \`done\`. The plain HTTP API behind them is ${agentApi} with
   your run token in \`VERSTAS_RUN_TOKEN\`.
+- The user follows the work on the board: which tickets exist, their
+  states and their notes are the progress report. \`message\` is for what
+  the board cannot say.
 - Network: only these hosts, over HTTPS, through the proxy already set in
   \`HTTPS_PROXY\`: ${session.allowlist.join(", ") || "(none)"}. Anything else
   is refused with 403. \`request\` kind \`pack\` asks for a whole toolchain's

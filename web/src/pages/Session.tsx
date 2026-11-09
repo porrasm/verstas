@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   api,
+  inboxCleared,
   repoChange,
   repoOrigin,
   type ReposState,
@@ -599,7 +600,7 @@ const RunBody = (p: BodyProps) => {
         <SessionLog {...p} />
       </div>
       <aside className="side">
-        <InboxPanel inbox={inbox} onRead={(mid) => void p.tryAct("read", () => api("POST", `${base}/messages/${mid}/read`))} onPromote={(iid) => void p.tryAct("promote", () => api("POST", `${base}/ideas/${iid}/promote`))} onOpenTicket={p.openTicket} />
+        <InboxPanel inbox={inbox} onClear={() => void p.tryAct("clearing the inbox", () => api("POST", `${base}/inbox/clear`))} onRead={(mid) => void p.tryAct("read", () => api("POST", `${base}/messages/${mid}/read`))} onPromote={(iid) => void p.tryAct("promote", () => api("POST", `${base}/ideas/${iid}/promote`))} onOpenTicket={p.openTicket} />
         <WorkPanel session={session} base={base} active={active} done={counts.done ?? 0} repoState={p.repoState} onExport={p.onExport} onDone={async () => { await p.refreshRun(); await p.repoState.refresh(); }} />
         <PromptBox session={session} base={base} active={active} onDone={p.refreshRun} />
         <EnvironmentPanel env={env} />
@@ -2375,30 +2376,57 @@ const EventText = ({ e }: { e: VEvent }) => {
 
 // --- inbox -----------------------------------------------------------------
 
-const InboxPanel = ({ inbox, onRead, onPromote, onOpenTicket }: { inbox: Inbox; onRead: (mid: string) => void; onPromote: (iid: string) => void; onOpenTicket: (tid: string) => void }) => {
-  const unread = inbox.messages.filter((m) => !m.read);
-  const ideas = inbox.ideas.filter((i) => !i.promotedTo);
-  const decided = inbox.requests.filter((r) => r.state !== "open").sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-  const total = unread.length + ideas.length;
+/**
+ * Messages and ideas from the agents, and the requests you decided. Clear
+ * takes everything settled so far off the page in one step; nothing is
+ * deleted, and "Show cleared" brings it back into view. Of the lead's
+ * progress updates only the latest shows: each one replaces the one before.
+ * The list scrolls inside the card, so the panels below keep their place.
+ */
+const InboxPanel = ({ inbox, onRead, onPromote, onClear, onOpenTicket }: { inbox: Inbox; onRead: (mid: string) => void; onPromote: (iid: string) => void; onClear: () => void; onOpenTicket: (tid: string) => void }) => {
+  const [showCleared, setShowCleared] = useState(false);
+  const cleared = inboxCleared(inbox);
+  const shown = <T extends { id: string }>(items: T[], gone: Set<string>) => items.filter((x) => showCleared || !gone.has(x.id));
+  const open = shown(inbox.messages, cleared.messages).filter((m) => showCleared || !m.read);
+  const lastProgress = [...open].reverse().find((m) => m.progress && !cleared.messages.has(m.id))?.id;
+  const earlier = open.filter((m) => m.progress && !cleared.messages.has(m.id) && m.id !== lastProgress);
+  const messages = showCleared ? open : open.filter((m) => !earlier.includes(m));
+  const ideas = shown(inbox.ideas, cleared.ideas).filter((i) => showCleared || !i.promotedTo);
+  const decided = shown(inbox.requests.filter((r) => r.state !== "open"), cleared.requests).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  const live = (showCleared ? { m: inbox.messages.filter((m) => !m.read && !cleared.messages.has(m.id)), i: inbox.ideas.filter((i) => !i.promotedTo && !cleared.ideas.has(i.id)) } : { m: open, i: ideas });
+  const total = live.m.length + live.i.length;
+  const clearable = total + inbox.requests.filter((r) => r.state !== "open" && !cleared.requests.has(r.id)).length;
+  const link = (tid: string) => <a href="#" className="mono" onClick={(e) => { e.preventDefault(); onOpenTicket(tid); }}>{tid}</a>;
   return (
     <section className="card">
-      <h3>Inbox{total ? ` · ${total}` : ""}</h3>
-      {total === 0 && <p className="lead" style={{ marginBottom: 0 }}>No messages or ideas from the workers.</p>}
-      {unread.map((m) => (
-        <div className="req" key={m.id}>
-          <div className="head"><span className="pill info">message</span>{m.ticketId && <a href="#" className="mono" onClick={(e) => { e.preventDefault(); onOpenTicket(m.ticketId!); }}>{m.ticketId}</a>}<span title={fmtDateTime(m.createdAt)}>{fmtAgo(m.createdAt)}</span></div>
-          <div className="wrap" style={{ fontSize: 13 }}>{m.text}</div>
-          <div><button className="sm" onClick={() => onRead(m.id)}>Mark read</button></div>
-        </div>
-      ))}
-      {ideas.map((i) => (
-        <div className="req" key={i.id}>
-          <div className="head"><span className="pill acc">idea</span>{i.ticketId && <span>from <a href="#" className="mono" onClick={(e) => { e.preventDefault(); onOpenTicket(i.ticketId!); }}>{i.ticketId}</a></span>}</div>
-          <strong className="wrap" style={{ fontSize: 13 }}>{i.title}</strong>
-          <div className="wrap muted" style={{ fontSize: 12.5 }}>{i.pitch}</div>
-          <div><button className="sm" onClick={() => onPromote(i.id)}>Turn into a ticket</button></div>
-        </div>
-      ))}
+      <div className="row">
+        <h3>Inbox{total ? ` · ${total}` : ""}</h3>
+        {clearable > 0 && <button className="quiet sm end" title="Take every message, idea and decided request off this page. Nothing is deleted; open requests stay." onClick={onClear}>Clear</button>}
+      </div>
+      {messages.length + ideas.length === 0 && <p className="lead" style={{ marginBottom: 0 }}>No messages or ideas from the agents.</p>}
+      <div className="inbox-list">
+        {messages.map((m) => {
+          const gone = cleared.messages.has(m.id) || m.read;
+          return (
+            <div className={`req ${gone ? "cleared" : ""}`} key={m.id}>
+              <div className="head"><span className="pill info">{m.progress ? "progress" : "message"}</span>{m.ticketId && link(m.ticketId)}<span title={fmtDateTime(m.createdAt)}>{fmtAgo(m.createdAt)}</span>{m.id === lastProgress && earlier.length > 0 && <span className="faint">replaces {earlier.length} earlier</span>}</div>
+              <div className="wrap" style={{ fontSize: 13 }}>{m.text}</div>
+              {!gone && <div><button className="sm" onClick={() => onRead(m.id)}>Mark read</button></div>}
+            </div>
+          );
+        })}
+        {ideas.map((i) => {
+          const gone = cleared.ideas.has(i.id) || Boolean(i.promotedTo);
+          return (
+            <div className={`req ${gone ? "cleared" : ""}`} key={i.id}>
+              <div className="head"><span className="pill acc">idea</span>{i.ticketId && <span>from {link(i.ticketId)}</span>}{i.promotedTo && <span>now {link(i.promotedTo)}</span>}</div>
+              <strong className="wrap" style={{ fontSize: 13 }}>{i.title}</strong>
+              <div className="wrap muted" style={{ fontSize: 12.5 }}>{i.pitch}</div>
+              {!i.promotedTo && <div><button className="sm" onClick={() => onPromote(i.id)}>Turn into a ticket</button></div>}
+            </div>
+          );
+        })}
+      </div>
       {decided.length > 0 && (
         <details style={{ marginTop: 8 }}>
           <summary className="muted small">{decided.length} decided request{decided.length === 1 ? "" : "s"}</summary>
@@ -2407,13 +2435,18 @@ const InboxPanel = ({ inbox, onRead, onPromote, onOpenTicket }: { inbox: Inbox; 
               <div key={r.id}>
                 <span className={`pill ${r.actions.some((a) => a.state === "approved") ? "good" : "quiet"}`}>{r.actions.length ? `${r.actions.filter((a) => a.state === "approved").length}/${r.actions.length} approved` : r.halt ? "halt" : "answered"}</span>
                 <span>{[...new Set(r.actions.map((a) => a.detail.kind.replace("_", " ")))].join(", ") || (r.halt ? "halt" : "question")}</span>
-                {r.ticketId && <a href="#" className="mono" onClick={(e) => { e.preventDefault(); onOpenTicket(r.ticketId!); }}>{r.ticketId}</a>}
+                {r.ticketId && link(r.ticketId)}
                 <span className="faint" title={fmtDateTime(r.createdAt)}>{fmtAgo(r.createdAt)}</span>
                 <span className="wrap" style={{ flexBasis: "100%", color: "var(--text-2)" }}>{requestSummary(r)}{r.answer ? <span className="faint"> · {r.answer.split("\n")[0]}</span> : null}</span>
               </div>
             ))}
           </div>
         </details>
+      )}
+      {(cleared.count > 0 || showCleared) && (
+        <div style={{ marginTop: 8 }}>
+          <button className="linkish small" onClick={() => setShowCleared(!showCleared)}>{showCleared ? "Hide cleared and read" : `Show cleared (${cleared.count})`}</button>
+        </div>
       )}
     </section>
   );
@@ -2428,7 +2461,7 @@ type SettingsPatch = { allowlist?: string[]; packs?: string[]; caps?: Partial<Om
 const CAP_HELP: Record<string, string> = {
   leadMinutes: "Optional: wall-clock life of one lead; then a fresh one takes over from notes/state.md. Empty: no cap",
   leadTurns: "Optional: model turns per lead life; then a fresh one takes over. Empty: no cap",
-  progressMinutes: "Every this many minutes the lead posts a short progress update to the inbox (Claude Code only; 0: never)",
+  progressMinutes: "Every this many minutes the lead posts a short progress update to the inbox; only the latest shows (Claude Code only). 0, the default: never, the board is the progress report",
 };
 
 /**
@@ -2443,7 +2476,7 @@ const SessionSettings = ({ session, onSave, part = "all" }: { session: Session; 
     reviewer: session.caps.reviewer,
     leadMinutes: session.caps.leadMinutes ? String(session.caps.leadMinutes) : "",
     leadTurns: session.caps.leadTurns ? String(session.caps.leadTurns) : "",
-    progressMinutes: String(session.caps.progressMinutes ?? 30),
+    progressMinutes: String(session.caps.progressMinutes ?? 0),
     memory: session.limits.memory,
     cpus: String(session.limits.cpus),
   });

@@ -72,8 +72,20 @@ export type RequestAction = { id: string; detail: ActionDetail; state: "open" | 
 export type AgentRequest = { id: string; ticketId?: string; summary: string; actions: RequestAction[]; halt?: { reason: string; severity: string }; state: "open" | "resolved"; answer?: string; createdAt: string; decidedAt?: string };
 export type Inbox = {
   requests: AgentRequest[];
-  messages: { id: string; ticketId?: string; text: string; createdAt: string; read: boolean }[];
+  messages: { id: string; ticketId?: string; text: string; createdAt: string; read: boolean; /** The lead's answer to a progress check. */ progress?: boolean }[];
   ideas: { id: string; ticketId?: string; title: string; pitch: string; createdAt: string; promotedTo?: string }[];
+  /** When the inbox was last cleared: what was settled by then is hidden, not deleted. */
+  clearedAt?: string;
+};
+
+/** What Clear inbox hides (the server's inboxCleared): items settled at or before `clearedAt`; an open request never. */
+export const inboxCleared = (inbox: Inbox): { messages: Set<string>; ideas: Set<string>; requests: Set<string>; count: number } => {
+  const at = inbox.clearedAt;
+  const before = (t: string | undefined) => Boolean(at && t && t <= at);
+  const messages = new Set(inbox.messages.filter((m) => before(m.createdAt)).map((m) => m.id));
+  const ideas = new Set(inbox.ideas.filter((i) => before(i.createdAt)).map((i) => i.id));
+  const requests = new Set(inbox.requests.filter((r) => r.state !== "open" && before(r.decidedAt ?? r.createdAt)).map((r) => r.id));
+  return { messages, ideas, requests, count: messages.size + ideas.size + requests.size };
 };
 export type Session = {
   id: string;

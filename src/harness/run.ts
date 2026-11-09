@@ -336,6 +336,14 @@ export class RunManager implements AgentRunHooks {
     setTimeout(() => lead?.abort(), this.deps.handoffGraceMs ?? 120_000).unref();
   }
 
+  /** Sessions whose lead was asked for a progress update and has not posted it yet. */
+  private progressAsked = new Set<string>();
+
+  /** True once after a progress check: the message the lead posts next is its answer, and the inbox marks it so. */
+  progressAnswer(sessionId: string): boolean {
+    return this.progressAsked.delete(sessionId);
+  }
+
   /** Why the lead may not start another ticket now. */
   moveRefusal(r: RunToken): string | undefined {
     const c = this.leadFor(r);
@@ -722,6 +730,7 @@ export class RunManager implements AgentRunHooks {
       }
     } finally {
       clearInterval(progressTimer);
+      this.progressAsked.delete(h.id);
       await ctx.queue;
       this.leads.delete(h.id);
       // A pause, a halt or an idle lead can end the run while tickets are in
@@ -766,6 +775,7 @@ export class RunManager implements AgentRunHooks {
       const w = this.workers.get(h.id);
       if (!w || w.role !== "lead" || w.driver !== "claude") return;
       if (!w.send(PROGRESS_NUDGE, "verstas")) return;
+      this.progressAsked.add(h.id);
       due = Date.now() + interval;
       void log({ kind: "status", t: (this.deps.now ?? now)(), text: `progress check: the lead was asked for a short update (every ${minutes} min, to the inbox)` }).catch(() => undefined);
     };
