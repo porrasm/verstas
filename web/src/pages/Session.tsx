@@ -573,24 +573,27 @@ const WorkerMessageBox = ({ base }: { base: string }) => {
 };
 
 /**
- * The box exists: the board and the live log in front, the inbox and the
- * work beside them. The environment and the settings fold away; they
- * still apply to the next worker.
+ * The box exists: the repositories and their pull requests on top, then the
+ * board and the live log with the inbox beside them. The goal, the
+ * environment and the settings fold away; they still apply to the next
+ * worker.
  */
 const RunBody = (p: BodyProps) => {
   const { session, board, inbox, base, active, run, counts } = p;
   const env = useEnvironment(session, base, active, p.refreshRun);
   const { onRetry, onApprove } = useBoardActions(p);
   return (
+    <>
+    <RepoStrip session={session} base={base} active={active} done={counts.done ?? 0} repoState={p.repoState} onExport={p.onExport} onDone={async () => { await p.refreshRun(); await p.repoState.refresh(); }} />
     <div className="sess-body">
       <div className="main">
-        <GoalPanel session={session} base={base} active={active} run={run} onDone={p.refreshRun} />
+        <GoalPanel session={session} base={base} active={active} run={run} onDone={p.refreshRun} fold />
         {board.tickets.length === 0 ? (
           <div className="card empty-state">
             <h3>No tickets</h3>
             <p>The lead works toward the goal above and may write tickets of its own. Paste a board, write tickets by hand, or plan them with the agent terminal.</p>
             <div className="row">
-              <button onClick={p.onImport}>Import board…</button>
+              <button onClick={p.onImport}>Import tickets…</button>
               <button onClick={p.onNewTicket} disabled={Boolean(p.busy)}>New ticket</button>
             </div>
           </div>
@@ -601,12 +604,12 @@ const RunBody = (p: BodyProps) => {
       </div>
       <aside className="side">
         <InboxPanel inbox={inbox} onClear={() => void p.tryAct("clearing the inbox", () => api("POST", `${base}/inbox/clear`))} onRead={(mid) => void p.tryAct("read", () => api("POST", `${base}/messages/${mid}/read`))} onPromote={(iid) => void p.tryAct("promote", () => api("POST", `${base}/ideas/${iid}/promote`))} onOpenTicket={p.openTicket} />
-        <WorkPanel session={session} base={base} active={active} done={counts.done ?? 0} repoState={p.repoState} onExport={p.onExport} onDone={async () => { await p.refreshRun(); await p.repoState.refresh(); }} />
         <PromptBox session={session} base={base} active={active} onDone={p.refreshRun} />
         <EnvironmentPanel env={env} />
         <SessionSettings session={session} onSave={p.saveSettings} />
       </aside>
     </div>
+    </>
   );
 };
 
@@ -1001,7 +1004,7 @@ const PublishDialog = ({ repo, base, onClose, onDone }: { repo: RepoSpec; base: 
   );
 };
 
-/** One repository in the Work panel: where its base is, what the clone added, whether GitHub moved on. */
+/** One repository's details in the strip: where its base is, what the clone added, whether GitHub moved on. */
 const RepoStatus = ({ r, live }: { r: RepoState; live: boolean }) => {
   const [open, setOpen] = useState(false);
   const ch = repoChange(r);
@@ -1046,91 +1049,105 @@ const RepoStatus = ({ r, live }: { r: RepoState; live: boolean }) => {
   );
 };
 
-const WorkPanel = ({ session, base, active, done, repoState, onExport, onDone }: { session: Session; base: string; active: boolean; done: number; repoState: RepoStateHandle; onExport: () => void; onDone: () => Promise<void> }) => {
+/** In a few words: where a repository's base stands against GitHub; undefined when there is nothing to say. */
+const remoteNote = (r: RepoState): { text: string; tone: "warn" | "err" } | undefined => {
+  if (!r.github) return undefined;
+  if (r.remoteError) return { text: r.remoteError, tone: "err" };
+  const tip = r.remote?.tip;
+  if (!tip) return r.remote ? { text: `GitHub has no branch ${r.branch}`, tone: "warn" } : undefined;
+  const base = r.box?.base?.sha ?? r.baseCommit;
+  if (!base || tip.sha === base) return undefined;
+  return { text: `${r.branch} moved on${r.remote?.behind ? ` by ${r.remote.behind}` : ""}`, tone: "warn" };
+};
+
+/**
+ * The repositories of a session, one line each, right under the header:
+ * what the clone holds, the pull request, and the button that publishes
+ * it. Publishing is what you come here for after a run, so it does not sit
+ * below the inbox. The rest (sync, reclone, the commit log) is one click
+ * away on the line.
+ */
+const RepoStrip = ({ session, base, active, done, repoState, onExport, onDone }: { session: Session; base: string; active: boolean; done: number; repoState: RepoStateHandle; onExport: () => void; onDone: () => Promise<void> }) => {
   const [restoring, setRestoring] = useState<RepoSpec | null>(null);
   const [publishing, setPublishing] = useState<RepoSpec | null>(null);
   const [syncing, setSyncing] = useState<RepoSpec | null>(null);
   const [nextRound, setNextRound] = useState(false);
+  const [open, setOpen] = useState<string | null>(null);
   const [note, setNote] = useState("");
   if (!session.repos.length || !isInitialized(session)) return null;
+  const state = repoState.state;
+  const stopFirst = "Pause or stop the run first";
+  const finish = (close: () => void) => async (text: string) => {
+    close();
+    setNote(text);
+    await onDone();
+  };
   return (
-    <section className="card stack" style={{ gap: 8 }}>
-      <div className="row" style={{ justifyContent: "space-between" }}>
-        <h3>Work</h3>
-        <span className="row" style={{ gap: 8 }}>
-          <span className="muted small">{done} ticket{done === 1 ? "" : "s"} committed</span>
-          {session.repos.some((r) => r.github) && <button className="sm" onClick={() => setNextRound(true)} disabled={active} title={active ? "Pause or stop the run first" : "After merging on GitHub: sync every repository to its latest branch, then plan"}>Next round…</button>}
+    <section className="card repo-strip">
+      <div className="row">
+        <h3>Repositories</h3>
+        <span className="muted small">{done} ticket{done === 1 ? "" : "s"} done{state && !state.live ? " · the container is stopped; this is the last reading" : ""}</span>
+        {repoState.error && <span className="err small">{repoState.error}</span>}
+        <span className="row end" style={{ gap: 6 }}>
+          <button className="quiet sm" onClick={() => void repoState.refresh(!state?.live)} disabled={repoState.loading || (active && !state?.live)} title={state?.live ? "Read the clones and GitHub again" : "Start the container and read the clones now"}>{repoState.loading ? "Reading…" : state?.live ? "Refresh" : "Read now"}</button>
+          {session.repos.some((r) => r.github) && <button className="sm" onClick={() => setNextRound(true)} disabled={active} title={active ? stopFirst : "After merging on GitHub: sync every repository to its latest branch, then plan"}>Next round…</button>}
+          <MoreMenu label="⋯" className="quiet sm" items={[{ label: "Export bundles…", onClick: onExport, disabled: active }]} />
         </span>
       </div>
-      {session.repos.map((r) => {
-        const st = repoState.state?.repos.find((x) => x.name === r.name);
-        return (
-          <div className="stack" key={r.name} style={{ gap: 4, paddingTop: 6, borderTop: "1px solid var(--line, rgba(127,127,127,.2))" }}>
-            <div className="row" style={{ justifyContent: "space-between" }}>
-              <span><strong>{r.name}</strong> {r.github ? <a className="muted small mono" href={`https://github.com/${r.github}`} target="_blank" rel="noreferrer">{r.github}</a> : <span className="muted small mono" title={r.sourcePath}>{repoOrigin(r)}</span>}</span>
-              <span className="row" style={{ gap: 6 }}>
-                {r.github && (() => {
-                  const open = st?.prs.at(-1)?.state === "open" ? st.prs.at(-1) : undefined;
-                  const nothing = st?.box?.ahead === 0;
-                  return (
-                    <button className="sm pri" onClick={() => setPublishing(r)} disabled={active || nothing} title={active ? "Pause or stop the run first" : nothing ? "No commits since the base: nothing to publish" : open ? `Push the new commits to ${open.remoteBranch}` : `Push the commits to a verstas/ branch and open a draft pull request into ${r.branch}`}>
-                      {open ? `Update PR #${open.number}` : "Publish PR"}
+      <div className="repo-rows">
+        {session.repos.map((r) => {
+          const st = state?.repos.find((x) => x.name === r.name);
+          const ch = st ? repoChange(st) : { text: "not read yet", changed: false };
+          const pr = st?.prs.at(-1);
+          const openPr = pr?.state === "open" ? pr : undefined;
+          const nothing = st?.box?.ahead === 0;
+          const remote = st ? remoteNote(st) : undefined;
+          const shown = open === r.name;
+          return (
+            <div className="strip-row" key={r.name}>
+              <div className="line">
+                <button className="quiet sm disclose" aria-expanded={shown} onClick={() => setOpen(shown ? null : r.name)} title={shown ? "Hide the details" : "Base, GitHub and the commits of this session"}>{shown ? "▾" : "▸"}</button>
+                <span className="name"><strong>{r.name}</strong> {r.github ? <a className="muted small mono" href={`https://github.com/${r.github}`} target="_blank" rel="noreferrer">{r.github}</a> : <span className="muted small mono" title={r.sourcePath}>{repoOrigin(r)}</span>}</span>
+                <span className="what small" title={remote?.text}>
+                  <span className={ch.changed ? "" : "muted"}>{ch.changed ? <b>{ch.text}</b> : ch.text}</span>
+                  {remote && <span className={remote.tone}> · {remote.text}</span>}
+                </span>
+                <span className="pr small">
+                  {pr ? (
+                    <>
+                      <a href={pr.url} target="_blank" rel="noreferrer" title={pr.title}>PR #{pr.number}</a>{" "}
+                      <span className={pr.state === "merged" ? "ok" : pr.state === "closed" ? "muted" : ""}>{pr.state}</span>
+                    </>
+                  ) : r.github ? <span className="muted">no PR</span> : null}
+                </span>
+                <span className="row acts" style={{ gap: 6 }}>
+                  {r.github && (
+                    <button className="sm pri" onClick={() => setPublishing(r)} disabled={active || nothing} title={active ? stopFirst : nothing ? "No commits since the base: nothing to publish" : openPr ? `Push the new commits to ${openPr.remoteBranch}` : `Push the commits to a verstas/ branch and open a draft pull request into ${r.branch}`}>
+                      {openPr ? `Update PR #${openPr.number}` : "Publish PR"}
                     </button>
-                  );
-                })()}
-                {r.github && <button className="sm" onClick={() => setSyncing(r)} disabled={active} title={active ? "Pause or stop the run first" : `Bring the latest ${r.branch} from GitHub into the clone`}>Sync…</button>}
-                {r.github && <button className="quiet sm" onClick={() => setRestoring(r)} disabled={active} title={active ? "Pause or stop the run first" : `Replace the clone with a fresh clone of ${r.github} from GitHub`}>Reclone…</button>}
-              </span>
+                  )}
+                  {r.github && (
+                    <MoreMenu
+                      label="⋯"
+                      className="quiet sm"
+                      items={[
+                        { label: `Sync with ${r.branch}…`, onClick: () => setSyncing(r), disabled: active },
+                        { label: "Reclone from GitHub…", onClick: () => setRestoring(r), disabled: active },
+                      ]}
+                    />
+                  )}
+                </span>
+              </div>
+              {shown && st && <div className="detail"><RepoStatus r={st} live={Boolean(state?.live)} /></div>}
             </div>
-            {st && <RepoStatus r={st} live={Boolean(repoState.state?.live)} />}
-          </div>
-        );
-      })}
-      <div className="row small">
-        {repoState.state && !repoState.state.live && <span className="muted">The container is stopped; this is the last reading.</span>}
-        <button className="quiet sm" onClick={() => void repoState.refresh(!repoState.state?.live)} disabled={repoState.loading || (active && !repoState.state?.live)} title={repoState.state?.live ? "Read the clones and GitHub again" : "Start the container and read the clones now"}>{repoState.loading ? "Reading…" : repoState.state?.live ? "Refresh" : "Read now"}</button>
-        {repoState.error && <span className="err">{repoState.error}</span>}
+          );
+        })}
       </div>
-      <div className="row"><button className="quiet sm" onClick={onExport} disabled={active}>Export bundles…</button></div>
       {note && <div className="banner ok small"><span>{note}</span><button className="quiet sm end" onClick={() => setNote("")}>Dismiss</button></div>}
-      {syncing && (
-        <SyncDialog
-          repo={syncing}
-          st={repoState.state?.repos.find((x) => x.name === syncing.name)}
-          base={base}
-          onClose={() => setSyncing(null)}
-          onDone={async (text) => {
-            setSyncing(null);
-            setNote(text);
-            await onDone();
-          }}
-        />
-      )}
-      {nextRound && <NextRoundDialog session={session} state={repoState.state} base={base} onClose={() => setNextRound(false)} onDone={onDone} />}
-      {publishing && (
-        <PublishDialog
-          repo={publishing}
-          base={base}
-          onClose={() => setPublishing(null)}
-          onDone={async (text) => {
-            setPublishing(null);
-            setNote(text);
-            await onDone();
-          }}
-        />
-      )}
-      {restoring && (
-        <RestoreRepo
-          repo={restoring}
-          base={base}
-          onClose={() => setRestoring(null)}
-          onDone={async (text) => {
-            setRestoring(null);
-            setNote(text);
-            await onDone();
-          }}
-        />
-      )}
+      {syncing && <SyncDialog repo={syncing} st={state?.repos.find((x) => x.name === syncing.name)} base={base} onClose={() => setSyncing(null)} onDone={finish(() => setSyncing(null))} />}
+      {nextRound && <NextRoundDialog session={session} state={state} base={base} onClose={() => setNextRound(false)} onDone={onDone} />}
+      {publishing && <PublishDialog repo={publishing} base={base} onClose={() => setPublishing(null)} onDone={finish(() => setPublishing(null))} />}
+      {restoring && <RestoreRepo repo={restoring} base={base} onClose={() => setRestoring(null)} onDone={finish(() => setRestoring(null))} />}
     </section>
   );
 };
@@ -1656,7 +1673,8 @@ const InitProgress = ({ session }: { session: Session }) => {
  * told), the lead's claim that it is met, its plan and progress note, and
  * the earlier goals this session worked.
  */
-const GoalPanel = ({ session, base, active, run, onDone }: { session: Session; base: string; active: boolean; run?: Run; onDone: () => Promise<void> }) => {
+const GoalPanel = ({ session, base, active, run, onDone, fold = false }: { session: Session; base: string; active: boolean; run?: Run; onDone: () => Promise<void>; /** On the run view a written goal shows as three lines until you open it. */ fold?: boolean }) => {
+  const [expanded, setExpanded] = useState(false);
   const [text, setText] = useState(session.goal);
   const [dirty, setDirty] = useState(false);
   const [msg, setMsg] = useState("");
@@ -1677,6 +1695,7 @@ const GoalPanel = ({ session, base, active, run, onDone }: { session: Session; b
     try {
       const r = await api<{ changed: boolean; told?: string }>("PUT", `${base}/goal`, { goal: text });
       setDirty(false);
+      setExpanded(false);
       setMsg(!r.changed ? "Unchanged." : r.told ? `Saved and sent to the running ${r.told}; the next round reads it too.` : active ? "Saved; the next round reads it (the running worker could not take a message)." : "Saved; the next run reads it.");
       await onDone();
     } catch (e) {
@@ -1688,9 +1707,35 @@ const GoalPanel = ({ session, base, active, run, onDone }: { session: Session; b
   const goals = session.goals ?? [];
   const since = session.goalSince ?? session.createdAt;
   const written = Boolean(session.goal.trim());
+  const mark = session.goalMet ? "met, says the lead" : written ? (active ? "working" : "set") : "none";
+  const tone: Tone = session.goalMet ? "good" : written ? (active ? "sig" : "info") : "quiet";
+  const planNote = (
+    <div className="small">
+      <span className={`dot ${note?.text ? "good" : ""}`} /> <strong>Plan and progress note</strong>{" "}
+      <span className="muted">{note?.text ? `notes/state.md · ${note.updatedAt ? fmtAgo(note.updatedAt, now) : ""}` : "none yet; the lead writes notes/state.md as it works"}</span>{" "}
+      {note?.text && <button className="quiet sm" onClick={() => setShowNote(!showNote)}>{showNote ? "hide" : "view"}</button>}
+      {showNote && note?.text && <pre className="mono" style={{ whiteSpace: "pre-wrap", maxHeight: 420, overflow: "auto", marginTop: 6 }}>{note.text}</pre>}
+    </div>
+  );
+  if (fold && written && !dirty && !expanded) {
+    return (
+      <section className="card stack" style={{ gap: 8 }}>
+        <SheetHead title="Goal" mark={mark} tone={tone}>
+          <span className="muted small">set {fmtAgo(since, now)}{goals.length ? ` · ${goals.length} earlier` : ""}</span>
+          <button className="sm" onClick={() => setExpanded(true)}>Edit</button>
+        </SheetHead>
+        <div className="goal-fold" onClick={() => setExpanded(true)} title="Open the goal">{session.goal.trim()}</div>
+        {session.goalMet && <div className="small"><span className="ok">The lead says it is met</span> <span className="muted">{fmtAgo(session.goalMet.at, now)}: {session.goalMet.note.split("\n")[0]!.slice(0, 200)}</span></div>}
+        {msg && <div className="muted small">{msg}</div>}
+        {planNote}
+      </section>
+    );
+  }
   return (
     <section className="card stack" style={{ gap: 10 }}>
-      <SheetHead title="Goal" mark={session.goalMet ? "met, says the lead" : written ? (active ? "working" : "set") : "none"} tone={session.goalMet ? "good" : written ? (active ? "sig" : "info") : "quiet"} />
+      <SheetHead title="Goal" mark={mark} tone={tone}>
+        {fold && written && !dirty && <button className="quiet sm" onClick={() => setExpanded(false)}>Fold</button>}
+      </SheetHead>
       <p className="lead" style={{ margin: 0 }}>
         Optional. One lead works toward this text and the board's tickets, keeps its plan in <span className="mono">notes/state.md</span>, and Verstas commits whatever it leaves when a lead life ends. Edit the goal at any time: a running lead is told, and the next life reads the new text. Start again after a met goal to say "not yet". Without a goal, the board is the work.
       </p>
@@ -1727,12 +1772,7 @@ const GoalPanel = ({ session, base, active, run, onDone }: { session: Session; b
         )}
         <span className="muted small">{msg || (written ? `set ${fmtAgo(since, now)}${goals.length ? ` · ${goals.length} earlier goal${goals.length === 1 ? "" : "s"}` : ""}` : "No goal: the lead works the board's tickets.")}</span>
       </div>
-      <div className="small">
-        <span className={`dot ${note?.text ? "good" : ""}`} /> <strong>Plan and progress note</strong>{" "}
-        <span className="muted">{note?.text ? `notes/state.md · ${note.updatedAt ? fmtAgo(note.updatedAt, now) : ""}` : "none yet; the lead writes notes/state.md as it works"}</span>{" "}
-        {note?.text && <button className="quiet sm" onClick={() => setShowNote(!showNote)}>{showNote ? "hide" : "view"}</button>}
-        {showNote && note?.text && <pre className="mono" style={{ whiteSpace: "pre-wrap", maxHeight: 420, overflow: "auto", marginTop: 6 }}>{note.text}</pre>}
-      </div>
+      {planNote}
       {goals.length > 0 && (
         <details>
           <summary className="muted small">Earlier goals ({goals.length})</summary>
@@ -1908,7 +1948,7 @@ const ProgressStrip = ({ counts, total }: { counts: Record<string, number>; tota
   </div>
 );
 
-const MoreMenu = ({ items, label = "More ▾" }: { items: { label: string; onClick?: () => void; href?: string; disabled?: boolean }[]; label?: string }) => {
+const MoreMenu = ({ items, label = "More ▾", className }: { items: { label: string; onClick?: () => void; href?: string; disabled?: boolean }[]; label?: string; className?: string }) => {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -1926,7 +1966,7 @@ const MoreMenu = ({ items, label = "More ▾" }: { items: { label: string; onCli
   }, [open]);
   return (
     <div className="menu" ref={ref}>
-      <button onClick={() => setOpen(!open)} aria-haspopup="menu" aria-expanded={open}>{label}</button>
+      <button className={className} onClick={() => setOpen(!open)} aria-haspopup="menu" aria-expanded={open} aria-label={label === "⋯" ? "More actions" : undefined}>{label}</button>
       {open && (
         <div className="items" role="menu">
           {items.map((it) =>
@@ -2393,9 +2433,9 @@ const InboxPanel = ({ inbox, onRead, onPromote, onClear, onOpenTicket }: { inbox
   const messages = showCleared ? open : open.filter((m) => !earlier.includes(m));
   const ideas = shown(inbox.ideas, cleared.ideas).filter((i) => showCleared || !i.promotedTo);
   const decided = shown(inbox.requests.filter((r) => r.state !== "open"), cleared.requests).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-  const live = (showCleared ? { m: inbox.messages.filter((m) => !m.read && !cleared.messages.has(m.id)), i: inbox.ideas.filter((i) => !i.promotedTo && !cleared.ideas.has(i.id)) } : { m: open, i: ideas });
-  const total = live.m.length + live.i.length;
-  const clearable = total + inbox.requests.filter((r) => r.state !== "open" && !cleared.requests.has(r.id)).length;
+  // The count is what waits for you: unread and uncleared, a run of progress updates counted once.
+  const total = inbox.messages.filter((m) => !m.read && !cleared.messages.has(m.id) && !earlier.includes(m)).length + inbox.ideas.filter((i) => !i.promotedTo && !cleared.ideas.has(i.id)).length;
+  const clearable = total + earlier.length + inbox.requests.filter((r) => r.state !== "open" && !cleared.requests.has(r.id)).length;
   const link = (tid: string) => <a href="#" className="mono" onClick={(e) => { e.preventDefault(); onOpenTicket(tid); }}>{tid}</a>;
   return (
     <section className="card">

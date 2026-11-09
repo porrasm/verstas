@@ -506,6 +506,23 @@ textarea.invalid { border-color: var(--warn); }
 .req .action { border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; display: grid; gap: 6px; margin-top: 6px; }
 .req .action.decided { opacity: .75; }
 .req.cleared { opacity: .6; }
+/* Repositories strip: one line per repository under the session header. */
+.repo-strip { display: grid; gap: 8px; }
+.repo-rows { display: grid; }
+.strip-row { border-top: 1px solid var(--line); padding: 6px 0; }
+.strip-row:last-child { padding-bottom: 0; }
+.strip-row .line { display: grid; grid-template-columns: 26px minmax(120px, 1fr) minmax(120px, 1.6fr) 110px 176px; gap: 10px; align-items: center; }
+.strip-row .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.strip-row .what { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.strip-row .acts { justify-content: flex-end; flex-wrap: nowrap; }
+.strip-row .disclose { padding: 3px 6px; }
+.strip-row .detail { padding: 6px 0 4px 32px; }
+@media (max-width: 760px) {
+  .strip-row .line { grid-template-columns: auto minmax(0, 1fr) auto; }
+  .strip-row .what, .strip-row .pr { grid-column: 2 / -1; }
+}
+/* A written goal folded to three lines on the run view. */
+.goal-fold { white-space: pre-wrap; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; cursor: pointer; color: var(--text-2); font-size: 13.5px; }
 /* The inbox scrolls inside its card, so what sits below it keeps its place. */
 .inbox-list { max-height: 320px; overflow-y: auto; overscroll-behavior: contain; }
 button.linkish { background: none; border: 0; padding: 0; color: var(--muted); text-decoration: underline; text-underline-offset: 2px; }

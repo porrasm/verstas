@@ -153,7 +153,7 @@ Then, in the web app:
    changes whichever it needs. The harness runs no checks of its own: the
    reviewer runs each changed repository's check and reads the change
    (`docs/BOARD.md`, Judging).
-9. **Publish PR** when you want the work: the session page's Work panel
+9. **Publish PR** when you want the work: the Repositories strip at the top of the session page
    shows per repository which got commits, its base and whether GitHub
    moved on. Publish PR pushes the commits since the base to
    `verstas/<session>-<round>` on GitHub and opens a draft pull request

@@ -1583,12 +1583,12 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
         refused.push((e as Error).message);
       }
     }
-    if (refused.length) throw new Error(`The base branch moved on GitHub, and syncing first would lose work: ${refused.join("; ")}. Resolve it in the Work panel (Publish PR, or Sync with rebase or discard), then start again.${done.length ? ` Synced: ${done.join(", ")}.` : ""}`);
+    if (refused.length) throw new Error(`The base branch moved on GitHub, and syncing first would lose work: ${refused.join("; ")}. Resolve it in the Repositories strip (Publish PR, or Sync with rebase or discard), then start again.${done.length ? ` Synced: ${done.join(", ")}.` : ""}`);
     return done;
   };
 
   /**
-   * What state each repository is in, for the Work panel and the header:
+   * What state each repository is in, for the Repositories strip and the header:
    * the clone's commits since its base, uncommitted files, and how far
    * GitHub's branch moved past the base. The clone is read inside the
    * container when it runs (or with ?start=1, which brings it up); when it
