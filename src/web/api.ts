@@ -23,6 +23,7 @@ import {
   reviseGoal,
   ticketStateSchema,
   type AgentRequest,
+  type Board,
   type RequestAction,
   type Inbox,
   type Run,
@@ -505,6 +506,10 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
     }),
   );
 
+  /** Why a pasted board cannot be read or imported, in words for the page. */
+  const pasteError = (e: unknown): string =>
+    e instanceof z.ZodError ? `Invalid board: ${e.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}` : e instanceof SyntaxError ? `Not valid JSON: ${e.message}` : (e as Error).message;
+
   /** Parses a pasted board without saving it: what would be imported, or why it is invalid. */
   api.post(
     "/board/preview",
@@ -520,8 +525,7 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
           tickets: r.board.tickets.map((t) => ({ id: t.id, title: t.title, kind: t.kind, repos: t.repos, state: t.state, deps: t.deps, acceptance: t.acceptance.length })),
         });
       } catch (e) {
-        const msg = e instanceof z.ZodError ? `Invalid board: ${e.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}` : e instanceof SyntaxError ? `Not valid JSON: ${e.message}` : (e as Error).message;
-        res.json({ ok: false, error: msg });
+        res.json({ ok: false, error: pasteError(e) });
       }
     }),
   );
@@ -1031,6 +1035,13 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
     }),
   );
 
+  /** A lead running now hears a revised goal in its conversation; answers who was told, if anyone. */
+  const tellGoalRevised = async (id: string, goal: string): Promise<string | undefined> => {
+    if (!d.runs.status(id)) return undefined;
+    const r = await d.runs.message(id, `The goal was revised. It now reads:\n\n${goal.trim()}\n\nReconcile notes/state.md with it before you continue; earlier work may have aimed at the old text.`);
+    return r.ok ? r.to : undefined;
+  };
+
   /**
    * The goal the lead works toward beside the board. Saved at any time: the
    * next lead life reads it fresh, the goal it replaces goes to the
@@ -1049,11 +1060,7 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
         return next === docs.session ? {} : { next: { session: next } };
       });
       const changed = h.session.goal.trim() !== before;
-      let told: string | undefined;
-      if (changed && d.runs.status(id)) {
-        const r = await d.runs.message(id, `The goal was revised. It now reads:\n\n${h.session.goal.trim()}\n\nReconcile notes/state.md with it before you continue; earlier work may have aimed at the old text.`);
-        told = r.ok ? r.to : undefined;
-      }
+      const told = changed ? await tellGoalRevised(id, h.session.goal) : undefined;
       res.json({ ok: true, changed, told });
     }),
   );
@@ -1831,18 +1838,69 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
     }),
   );
 
+  /**
+   * A pasted board onto this session's board. "add" (the default) makes
+   * every pasted ticket a new one, renumbering the paste when its ids are
+   * taken; "merge" updates the tickets whose ids match (src/board/board.ts,
+   * importBoard). With setGoal, a goal in the paste becomes the session's.
+   * dryRun changes nothing and answers what would happen, or why it cannot.
+   */
   api.post(
     "/sessions/:id/board/import",
     wrap(async (req, res) => {
-      const { text, state } = z.object({ text: z.string().min(1).max(2_000_000), state: z.enum(["backlog", "ready"]).default("ready") }).parse(req.body);
-      const h = await d.hub.get(param(req, "id"));
-      const parsed = parseBoardPaste(text);
-      const result = await h.mutate((docs) => {
-        const r = importBoard(docs.board, parsed, { by: "user", defaultState: state });
+      const { text, state, mode, setGoal, dryRun } = z
+        .object({
+          text: z.string().min(1).max(2_000_000),
+          state: z.enum(["backlog", "ready"]).default("ready"),
+          mode: z.enum(["add", "merge"]).default("add"),
+          setGoal: z.boolean().default(false),
+          dryRun: z.boolean().default(false),
+        })
+        .parse(req.body);
+      const id = param(req, "id");
+      const h = await d.hub.get(id);
+      const plan = (docs: { board: Board; session: Session }) => {
+        const parsed = parseBoardPaste(text);
+        const r = importBoard(docs.board, parsed, { by: "user", defaultState: state, mode });
         validateRepos(r.board.tickets, docs.session.repos.map((x) => x.name), { ignoreDone: true });
-        return { next: { board: r.board }, result: { created: r.created, updated: r.updated, skipped: r.skipped } };
+        const goal = parsed.goal?.trim() || undefined;
+        const session = setGoal && goal ? reviseGoal(docs.session, goal, now()) : docs.session;
+        // The board's own goal field follows the session's; a paste alone never changes it.
+        const board: Board = { ...r.board, goal: setGoal && goal ? goal : docs.board.goal };
+        const brief = (tid: string) => {
+          const t = getTicket(board, tid);
+          return { id: t.id, title: t.title, state: t.state, deps: t.deps };
+        };
+        return {
+          board,
+          session,
+          result: {
+            mode,
+            created: r.created,
+            updated: r.updated,
+            skipped: r.skipped,
+            renumbered: r.renumbered,
+            matching: r.matching,
+            goal,
+            goalChanged: session !== docs.session,
+            tickets: { created: r.created.map(brief), updated: r.updated.map(brief) },
+          },
+        };
+      };
+      if (dryRun) {
+        try {
+          res.json({ ok: true, ...plan({ board: h.board, session: h.session }).result });
+        } catch (e) {
+          res.json({ ok: false, error: pasteError(e) });
+        }
+        return;
+      }
+      const result = await h.mutate((docs) => {
+        const p = plan(docs);
+        return { next: p.session === docs.session ? { board: p.board } : { board: p.board, session: p.session }, result: p.result };
       });
-      res.json(result);
+      const told = result.goalChanged ? await tellGoalRevised(id, h.session.goal) : undefined;
+      res.json({ ok: true, ...result, told });
     }),
   );
 

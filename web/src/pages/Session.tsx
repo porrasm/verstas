@@ -44,6 +44,7 @@ import {
 } from "../api";
 import { AgentOptionsButton, useDrivers } from "./AgentOptions";
 import { AgentTerminal, ArtifactPills } from "./Terminal";
+import { ImportCard } from "./session/ImportCard";
 
 const COLUMNS: { key: string; title: string; states: string[] }[] = [
   { key: "backlog", title: "Backlog", states: ["backlog"] },
@@ -130,7 +131,7 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
   const [pickedRun, setPickedRun] = useState<number | null>(null);
   const [err, setErr] = useState("");
   const [notice, setNotice] = useState("");
-  const [importText, setImportText] = useState<string | null>(null);
+  const [importOpen, setImportOpen] = useState(false);
   const [exportInfo, setExportInfo] = useState<string[] | null>(null);
   const [newTicket, setNewTicket] = useState(false);
   const [busy, setBusy] = useState("");
@@ -245,13 +246,6 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
       const mb = (r.bytes / 1_048_576).toFixed(1);
       setNotice(`Exported ${id}.ver (${mb} MB). Import it on the other machine from the Sessions page; Initialize there rebuilds the environment.${r.skipped.length ? ` Left out: ${r.skipped.join("; ")}.` : ""}`);
     });
-  const doImport = () =>
-    tryAct("importing", async () => {
-      const r = await api<{ created: string[]; updated: string[]; skipped: { title: string; reason: string }[] }>("POST", `${base}/board/import`, { text: importText, state: "ready" });
-      setImportText(null);
-      const parts = [`Imported ${r.created.length} new`, r.updated.length ? `updated ${r.updated.length}` : ""].filter(Boolean).join(", ");
-      setNotice(r.skipped.length ? `${parts}. Skipped: ${r.skipped.map((s) => `${s.title} (${s.reason})`).join("; ")}` : `${parts}.`);
-    });
   const decide = (rid: string, body: { answer?: string; actions?: { id: string; decision: "approve" | "decline"; note?: string }[]; declineAll?: boolean }) => tryAct("deciding", () => api("POST", `${base}/requests/${rid}`, body));
   const openTicket = (tid: string | null) => {
     location.hash = tid ? `#/s/${encodeURIComponent(id)}/t/${encodeURIComponent(tid)}` : `#/s/${encodeURIComponent(id)}`;
@@ -315,7 +309,7 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
     openTicket,
     tryAct,
     refreshRun,
-    onImport: () => setImportText(""),
+    onImport: () => setImportOpen(true),
     onNewTicket: () => setNewTicket(true),
     onExport: doExport,
     onInit: init,
@@ -347,7 +341,7 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
             {initialized && <button onClick={() => setNewTicket(true)} disabled={Boolean(busy)} title="Write a ticket by hand">New ticket</button>}
             <MoreMenu
               items={[
-                { label: "Import board…", onClick: () => setImportText("") },
+                { label: "Import tickets…", onClick: () => setImportOpen(true) },
                 { label: "Export board (JSON)", href: `/api${base}/board/export` },
                 ...(board.tickets.length > 0 ? [{ label: active ? "Clear board (stop the run first)" : "Clear board…", onClick: clearBoard, disabled: active }] : []),
                 { label: active ? "Export session (stop the run first)" : "Export session (.ver)…", onClick: doArchive, disabled: active },
@@ -412,12 +406,18 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
         </section>
       )}
 
-      {importText !== null && (
-        <section className="card stack tight">
-          <div className="row"><h3>Import board</h3><span className="muted small">JSON or markdown, see docs/BOARD.md. New tickets start as ready; known ids are updated.</span><button className="quiet sm end" onClick={() => setImportText(null)}>Cancel</button></div>
-          <textarea id="import" className="mono" value={importText} onChange={(e) => setImportText(e.target.value)} style={{ minHeight: 200 }} placeholder={'{ "tickets": [ { "title": "…", "spec": "…", "acceptance": ["…"] } ] }'} />
-          <div className="row"><button className="pri end" onClick={doImport} disabled={!importText.trim() || Boolean(busy)}>Import</button></div>
-        </section>
+      {importOpen && (
+        <ImportCard
+          base={base}
+          tickets={board.tickets.length}
+          currentGoal={session.goal}
+          busy={Boolean(busy)}
+          onCancel={() => setImportOpen(false)}
+          onDone={(text) => {
+            setImportOpen(false);
+            setNotice(text);
+          }}
+        />
       )}
 
       {!active && (counts.backlog ?? 0) > 0 && (

@@ -193,8 +193,10 @@ export type Board = z.infer<typeof boardSchema>;
  * What a paste or an agent may import: a subset of a ticket with loose
  * requirements. Ids are optional: an empty, missing or foreign id (one that
  * is not `T-n`, say a generator's `J-1`) gets the next free id on import, so
- * a board made outside Verstas can be pasted into an existing session; only
- * a `T-n` id that the board already has updates that ticket. The only
+ * a board made outside Verstas can be pasted into an existing session. A
+ * `T-n` id that the board already has updates that ticket in a merge, and
+ * is renumbered with the rest of the paste when the import adds
+ * (src/board/board.ts, importBoard). The only
  * states accepted are backlog and ready, since the others describe a run in
  * flight. Fields from before (`size`, `pinned`, `agent`) are accepted and
  * dropped, so an old board pastes clean.
