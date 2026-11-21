@@ -8,7 +8,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import { createAgentApi, RunTokens } from "./agent-api/agent-api.js";
 import { loadConfig, loadSecrets, saveConfig, saveSecrets, verstasHome, type Config } from "./config.js";
 import { DRIVERS } from "./harness/drivers.js";
-import { stopAllSandboxes } from "./sandbox/lifecycle.js";
+import { listSandboxes, stopAllSandboxes } from "./sandbox/lifecycle.js";
 import { createDockerRunManager, proxyDistPath, workerDistPath, type RunManagerConfig } from "./harness/docker-worker.js";
 import { createDockerRunner } from "./sandbox/docker.js";
 import type { SandboxConfig } from "./sandbox/lifecycle.js";
@@ -128,7 +128,8 @@ export const startVerstas = async (): Promise<Verstas> => {
     listSessionIds: async () => (await listSessions(config.sessionsRoot)).map((s) => s.id),
     getConfig: () => config,
     getToken: async () => (await loadSecrets()).remoteToken,
-    localApi: (call) => requestJson(`http://127.0.0.1:${config.uiPort}/api${call.path}`, { method: call.method, body: call.body, timeoutMs: 120_000 }),
+    localApi: (call) => requestJson(`http://127.0.0.1:${config.uiPort}/api${call.path}`, { method: call.method, body: call.body, timeoutMs: call.timeoutMs ?? 120_000 }),
+    containers: () => listSandboxes(sandbox),
     version,
     log: (m) => console.log(m),
   });

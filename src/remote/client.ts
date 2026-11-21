@@ -3,10 +3,11 @@ import path from "node:path";
 import type { Config } from "../config.js";
 import { isInitialized, type Run, type VerstasEvent } from "../core/types.js";
 import type { SessionHub } from "../sessions/hub.js";
+import { loadRepoStateCache } from "../sessions/repo-state.js";
 import { allRuns, runTotals } from "../sessions/runs.js";
 import { remoteCommandSchema, toApiCall, type ApiCall } from "./commands.js";
 import { HttpError, requestJson } from "./http.js";
-import { flattenEvent, REMOTE_EVENTS, REMOTE_PROTOCOL, remoteSession, type RemoteEvent } from "./view.js";
+import { flattenEvent, REMOTE_EVENTS, REMOTE_PROTOCOL, remoteSession, type RemoteAction, type RemoteEvent } from "./view.js";
 
 /**
  * The remote dashboard's connection, from this side. While it is turned on
@@ -26,6 +27,12 @@ const PUSH_DEBOUNCE_MS = 1_000;
 const HEARTBEAT_MS = 15_000;
 const POLL_WAIT_S = 25;
 const BACKOFF_MS = [2_000, 5_000, 15_000, 30_000, 60_000];
+/** How long one `docker ps` answers for. */
+const CONTAINERS_MS = 5_000;
+/** A shared session's clones are read again this often while its container runs. */
+const REPO_READ_MS = 60_000;
+/** A command's answer body goes to the dashboard only when it is this small. */
+const RESULT_MAX = 20_000;
 
 export type RemoteStatus = {
   state: "off" | "unconfigured" | "connecting" | "connected" | "error";
@@ -43,6 +50,8 @@ export type RemoteClientDeps = {
   getToken: () => Promise<string | undefined>;
   /** Calls the local UI API (path relative to /api) and returns its status and JSON body. */
   localApi: (call: ApiCall) => Promise<{ status: number; body: unknown }>;
+  /** Session containers Docker knows, by session id, in one call. Without it the dashboard is not told. */
+  containers?: () => Promise<Map<string, "running" | "stopped">>;
   version: string;
   log?: (msg: string) => void;
 };
@@ -63,6 +72,9 @@ export class RemoteClient {
   /** Where we are connected, kept so stopping says goodbye to the right relay after the settings changed. */
   private target: { baseUrl: string; token: string } | null = null;
   private st: RemoteStatus = { state: "off", shared: 0 };
+  private boxes: { at: number; map: Map<string, "running" | "stopped"> } | null = null;
+  private repoRead = new Map<string, number>();
+  private lastActions = new Map<string, RemoteAction>();
   private readonly onChange = (c: { sessionId: string }) => this.onSessionActivity(c.sessionId);
   private readonly onEvent = (e: { sessionId: string; runId: number; event: VerstasEvent }) => this.onRunEvent(e);
 
@@ -197,9 +209,30 @@ export class RemoteClient {
     return ring.events;
   }
 
+  private async containers(): Promise<Map<string, "running" | "stopped"> | null> {
+    if (!this.d.containers) return null;
+    if (!this.boxes || Date.now() - this.boxes.at > CONTAINERS_MS) this.boxes = { at: Date.now(), map: await this.d.containers().catch(() => new Map()) };
+    return this.boxes.map;
+  }
+
+  /**
+   * Has the clones read again in the background, through the Work panel's
+   * own endpoint (it reads them in the running container, saves the reading
+   * and asks GitHub about the open pull request), and pushes when it is done.
+   */
+  private readRepos(sessionId: string, force = false) {
+    if (!force && Date.now() - (this.repoRead.get(sessionId) ?? 0) < REPO_READ_MS) return;
+    this.repoRead.set(sessionId, Date.now());
+    void this.d
+      .localApi({ method: "GET", path: `/sessions/${encodeURIComponent(sessionId)}/repos/state`, body: undefined, timeoutMs: 60_000 })
+      .then(() => this.schedulePush(PUSH_DEBOUNCE_MS))
+      .catch(() => undefined);
+  }
+
   /** Every shared session, as the dashboard shows it. Exported for tests through build(). */
   async build() {
     const sessions = [];
+    const boxes = await this.containers();
     for (const id of await this.d.listSessionIds()) {
       let h;
       try {
@@ -210,8 +243,11 @@ export class RemoteClient {
       // A plan is not sent: there is nothing to run or watch until it is initialized.
       if (!h.session.remote || !isInitialized(h.session)) {
         this.rings.delete(id);
+        this.lastActions.delete(id);
         continue;
       }
+      const container = boxes ? (boxes.get(id) ?? "absent") : undefined;
+      if (container === "running" && h.session.repos.some((r) => r.github)) this.readRepos(id);
       const runs = await allRuns(h.paths.runs);
       const live = this.d.runs.status(id);
       const all = live ? [...runs.filter((r) => r.id !== live.id), live] : runs;
@@ -224,6 +260,9 @@ export class RemoteClient {
           active: Boolean(live),
           totals: runTotals(all, h.session.createdAt),
           events: await this.events(id, h.paths.runs, live, runs[runs.length - 1]),
+          repoState: await loadRepoStateCache(h.paths.dir),
+          container,
+          lastAction: this.lastActions.get(id),
         }),
       );
     }
@@ -303,7 +342,8 @@ export class RemoteClient {
           this.st = { ...this.st, lastCommandAt: new Date().toISOString() };
           // Push the new state before answering, so the dashboard that
           // refetches on the answer already sees what the command changed.
-          if (result.ok) await this.pushNow();
+          this.boxes = null;
+          await this.pushNow();
           await requestJson(this.url(baseUrl, `/commands/${encodeURIComponent(c.id)}`), { method: "POST", token, body: result, timeoutMs: 15_000 }).catch((e: Error) => this.fail(e));
         }
       } catch (e) {
@@ -321,13 +361,25 @@ export class RemoteClient {
     if (!parsed.success) return { ok: false, status: 400, error: `Verstas does not accept that command: ${parsed.error.issues.map((i) => `${i.path.join(".")} ${i.message}`).join("; ").slice(0, 500)}` };
     const cmd = parsed.data;
     if (!(await this.isShared(cmd.payload.sessionId))) return { ok: false, status: 403, error: "That session is not shared with the remote dashboard" };
-    const call = toApiCall(cmd);
+    const out = await this.carryOut(cmd.kind, cmd.payload.sessionId, toApiCall(cmd));
+    // Kept for the next pushes: a publish or a sync can answer after the dashboard stopped waiting.
+    this.lastActions.set(cmd.payload.sessionId, { kind: cmd.kind, at: new Date().toISOString(), ok: out.ok, ...(out.error ? { error: out.error } : {}), ...(out.result !== undefined ? { result: out.result } : {}) });
+    if (cmd.kind === "publish" || cmd.kind === "work.new") this.readRepos(cmd.payload.sessionId, true);
+    return out;
+  }
+
+  private async carryOut(kind: string, sessionId: string, call: ApiCall): Promise<{ ok: boolean; status?: number; error?: string; result?: unknown }> {
     try {
       const r = await this.d.localApi(call);
-      this.d.log?.(`[remote] ${cmd.kind} ${cmd.payload.sessionId}: ${r.status}`);
-      const body = r.body as { error?: string } | null;
-      if (r.status >= 300) return { ok: false, status: r.status, error: body?.error ?? `HTTP ${r.status}` };
-      return { ok: true, status: r.status };
+      this.d.log?.(`[remote] ${kind} ${sessionId}: ${r.status}`);
+      const body = r.body as { error?: string; results?: { ok?: boolean; error?: string }[] } | null;
+      // What the call answered (which tickets a paste made, each repository's pull request), when it is small.
+      const result = body && typeof body === "object" && JSON.stringify(body).length <= RESULT_MAX ? { result: body } : {};
+      if (r.status >= 300) {
+        const each = Array.isArray(body?.results) ? body.results.filter((x) => x.ok === false && x.error).map((x) => x.error).join("; ") : "";
+        return { ok: false, status: r.status, error: ((body?.error ?? each) || `HTTP ${r.status}`).slice(0, 2000), ...result };
+      }
+      return { ok: true, status: r.status, ...result };
     } catch (e) {
       return { ok: false, status: 500, error: (e as Error).message };
     }

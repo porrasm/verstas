@@ -1961,7 +1961,7 @@ const RemoteToggle = ({ session, onSet }: { session: Session; onSet: (remote: bo
   const where = remote?.baseUrl || "the remote dashboard";
   const toggle = () => {
     if (on) return void onSet(false);
-    if (confirm(`Show "${session.name}" on ${where}?\n\nIts tickets (titles, specs, reports, notes), requests, your prompts to the box and a short activity log are sent there while Verstas runs, from initialization on. Tool output, file contents and diffs are not.`)) void onSet(true);
+    if (confirm(`Show "${session.name}" on ${where}?\n\nIts goal, tickets (titles, specs, reports, notes), requests, messages and ideas from the agents, your prompts to the box, repository names with their pull requests and a short activity log are sent there while Verstas runs, from initialization on. Tool output, file contents and diffs are not.\n\nFrom there you can also start and stop it, start new work in it (which discards unpublished work), and publish its work as draft pull requests.`)) void onSet(true);
   };
   const plan = !session.initializedAt;
   return (

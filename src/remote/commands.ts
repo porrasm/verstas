@@ -9,9 +9,12 @@ import { SESSION_ID_PATTERN, ticketIdSchema, ticketKindSchema } from "../core/ty
  * local UI. Nothing here deletes a session, edits settings, the allowlist,
  * caps or secrets, applies work to a repository, or reads files.
  *
- * Kept to what a phone needs overnight (docs/REMOTE.md): start, pause and
- * stop, ask the box, answer requests, add tickets and approve them. Setup,
- * planning and ticket editing stay in the app.
+ * Kept to one round of work, start to finish (docs/REMOTE.md): new work in
+ * the same box, paste a board, set the goal, start, pause and stop, message
+ * the lead or ask the box, answer requests, read and clear the inbox, stop
+ * the container and publish draft pull requests. Managing a session (its
+ * repositories, agents, recipes, settings) and editing tickets stay in the
+ * app.
  */
 
 const sessionId = z.string().regex(SESSION_ID_PATTERN);
@@ -45,10 +48,22 @@ export const remoteCommandSchema = z.discriminatedUnion("kind", [
   }),
   z.object({ kind: z.literal("ticket.approve"), payload: z.object({ sessionId, ticketId: ticketIdSchema }) }),
   z.object({ kind: z.literal("tickets.approveAll"), payload: z.object({ sessionId }) }),
+  z.object({ kind: z.literal("goal.set"), payload: z.object({ sessionId, goal: short(20_000) }) }),
+  z.object({ kind: z.literal("board.import"), payload: z.object({ sessionId, text: z.string().min(1).max(2_000_000), state: z.enum(["backlog", "ready"]).optional(), setGoal: z.boolean().optional() }) }),
+  z.object({ kind: z.literal("board.clear"), payload: z.object({ sessionId }) }),
+  z.object({ kind: z.literal("message"), payload: z.object({ sessionId, text: z.string().trim().min(1).max(10_000) }) }),
+  z.object({ kind: z.literal("message.read"), payload: z.object({ sessionId, messageId: z.string().regex(/^M-\d+$/) }) }),
+  z.object({ kind: z.literal("inbox.clear"), payload: z.object({ sessionId }) }),
+  z.object({ kind: z.literal("work.new"), payload: z.object({ sessionId, goal: short(20_000).optional(), board: z.string().max(2_000_000).optional(), start: z.boolean().optional() }) }),
+  z.object({ kind: z.literal("publish"), payload: z.object({ sessionId, acknowledgeFlagged: z.boolean().optional() }) }),
+  z.object({ kind: z.literal("container.stop"), payload: z.object({ sessionId }) }),
 ]);
 export type RemoteCommand = z.infer<typeof remoteCommandSchema>;
 
-export type ApiCall = { method: "POST" | "PUT"; path: string; body: unknown };
+/** `timeoutMs` for the calls that bring a container up or talk to GitHub. */
+export type ApiCall = { method: "GET" | "POST" | "PUT"; path: string; body: unknown; timeoutMs?: number };
+
+const SLOW_MS = 10 * 60_000;
 
 const e = encodeURIComponent;
 
@@ -68,5 +83,24 @@ export const toApiCall = (c: RemoteCommand): ApiCall => {
       return { method: "POST", path: `${s}/tickets/${e(c.payload.ticketId)}/state`, body: { state: "ready" } };
     case "tickets.approveAll":
       return { method: "POST", path: `${s}/tickets/approve-all`, body: {} };
+    case "goal.set":
+      return { method: "PUT", path: `${s}/goal`, body: { goal: c.payload.goal } };
+    case "board.import":
+      return { method: "POST", path: `${s}/board/import`, body: { text: c.payload.text, state: c.payload.state ?? "ready", mode: "add", setGoal: c.payload.setGoal ?? false } };
+    case "board.clear":
+      return { method: "POST", path: `${s}/board/clear`, body: {} };
+    case "message":
+      return { method: "POST", path: `${s}/run/message`, body: { text: c.payload.text } };
+    case "message.read":
+      return { method: "POST", path: `${s}/messages/${e(c.payload.messageId)}/read`, body: {} };
+    case "inbox.clear":
+      return { method: "POST", path: `${s}/inbox/clear`, body: {} };
+    case "work.new":
+      // Never stops a run on its way: an active run refuses, and the template stays the session's.
+      return { method: "POST", path: `${s}/new-work`, body: { goal: c.payload.goal ?? "", board: c.payload.board ?? "", start: c.payload.start ?? false, stopRun: false }, timeoutMs: SLOW_MS };
+    case "publish":
+      return { method: "POST", path: `${s}/publish-all`, body: { acknowledgeFlagged: c.payload.acknowledgeFlagged ?? false }, timeoutMs: SLOW_MS };
+    case "container.stop":
+      return { method: "POST", path: `${s}/sandbox`, body: { action: "stop" }, timeoutMs: SLOW_MS };
   }
 };

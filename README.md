@@ -101,9 +101,10 @@ Then, in the web app:
    repository change becomes one commit; the reply stays on the page.
 6. **Agent terminal** (on the session page, below): plan the board with
    Claude Code or Codex in a conversation, in the box.
-7. **Remote dashboard** (optional, Settings): follow ticked sessions and
-   answer the inbox from your phone through the `verstas` app in the apps
-   monorepo. Off by default, and per session off until you tick it; see
+7. **Remote dashboard** (optional, Settings): do a round of work on ticked
+   sessions from your phone (paste a board, set the goal, start and stop,
+   message the lead, read the inbox, publish draft pull requests) through
+   the `verstas` app in the apps monorepo. Off by default, and per session off until you tick it; see
    [docs/REMOTE.md](docs/REMOTE.md) for what is and is not sent.
 8. **How the work is done.** One lead works the session. Its brief is the
    **goal** you write on the session page (one line or a whole

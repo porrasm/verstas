@@ -76,11 +76,73 @@ test("a session's view caps long text and names the hosts a pack would add", asy
   const h = await hub.get("shared-one");
   const v = remoteSession({ ...h.snapshot(), run: undefined, active: false, totals: { usd: 0, runs: 0, lastActivityAt: T }, events: [] });
   expect(v.tickets[0]!.spec.length).toBeLessThanOrEqual(4000);
-  // Only what the dashboard shows: nothing about setup, agents, settings or messages.
-  expect(Object.keys(v).sort()).toEqual(["active", "events", "id", "name", "prompts", "requests", "state", "tickets", "totals"]);
+  // Only what the dashboard shows: nothing about setup, agents or settings.
+  expect(Object.keys(v).sort()).toEqual(["active", "events", "goal", "id", "ideas", "messages", "name", "prompts", "repos", "requests", "state", "tickets", "totals"]);
   const detail = v.requests[0]!.actions[0]!.detail as { kind: string; hosts?: string[] };
   expect(detail.kind).toBe("pack");
   expect(detail.hosts?.length).toBeGreaterThan(0);
+});
+
+test("a session's view carries the goal, the inbox and where each GitHub repository's work stands", async () => {
+  const { hub } = await makeRoot();
+  const h = await hub.get("shared-one");
+  const docs = h.snapshot();
+  const pr = { round: 1, number: 7, url: "https://github.com/o/app/pull/7", remoteBranch: "verstas/shared-one-1", headSha: "a".repeat(40), base: "main", title: "Round one", state: "open" as const, publishedAt: T };
+  const session = sessionSchema.parse({ ...docs.session, repos: [...docs.session.repos, { name: "api", github: "o/api", branch: "main", runBranch: "verstas/x", prs: [pr] }] });
+  const inbox = inboxSchema.parse({
+    ...docs.inbox,
+    // Cleared at 09:00: what came before stays in the file and off the dashboard. Of the progress updates only the latest shows.
+    clearedAt: "2026-10-04T09:00:00.000Z",
+    messages: [
+      { id: "M-0", text: "old", createdAt: "2026-10-04T08:00:00.000Z" },
+      { id: "M-1", text: "m".repeat(9000), createdAt: T },
+      { id: "M-2", text: "at 30 min", createdAt: T, progress: true },
+      { id: "M-3", text: "at 60 min", createdAt: T, progress: true },
+    ],
+    ideas: [{ id: "I-0", title: "Old", pitch: "p", createdAt: "2026-10-04T08:00:00.000Z" }, { id: "I-1", title: "An idea", pitch: "p", createdAt: T }, { id: "I-2", title: "Taken", pitch: "p", createdAt: T, promotedTo: "T-1" }],
+  });
+  const v = remoteSession({
+    ...docs,
+    session,
+    inbox,
+    run: undefined,
+    active: false,
+    totals: { usd: 0, runs: 0, lastActivityAt: T },
+    events: [],
+    repoState: { api: { at: T, head: "a".repeat(40), ahead: 3, dirty: 0, commits: [{ sha: "a".repeat(40), date: T, subject: "SUBJECT" }], base: null } },
+    container: "stopped",
+    lastAction: { kind: "publish", at: T, ok: true },
+  });
+  expect(v.goal).toBe("g");
+  expect(v.messages).toEqual([
+    { id: "M-1", text: expect.stringMatching(/^m{5999}…$/), createdAt: T, read: false },
+    { id: "M-3", text: "at 60 min", createdAt: T, read: false, progress: true },
+  ]);
+  expect(v.ideas.map((i) => i.id)).toEqual(["I-1"]);
+  // A repository from a local checkout publishes nothing, so it is not listed; commit subjects stay here.
+  expect(v.repos).toEqual([{ name: "api", github: "o/api", branch: "main", ahead: 3, dirty: 0, readAt: T, published: true, pr: { number: 7, url: pr.url, state: "open", title: "Round one" } }]);
+  expect(JSON.stringify(v)).not.toContain("SUBJECT");
+  expect(v.container).toBe("stopped");
+  expect(v.lastAction).toEqual({ kind: "publish", at: T, ok: true });
+});
+
+test("commands: one round of work maps to the UI API", () => {
+  const call = (kind: string, payload: Record<string, unknown> = {}) => toApiCall(remoteCommandSchema.parse({ kind, payload: { sessionId: "shared-one", ...payload } }));
+  expect(call("goal.set", { goal: "Ship it" })).toEqual({ method: "PUT", path: "/sessions/shared-one/goal", body: { goal: "Ship it" } });
+  // A paste always adds: updating tickets by id stays in the app.
+  expect(call("board.import", { text: "{}", mode: "merge" })).toEqual({ method: "POST", path: "/sessions/shared-one/board/import", body: { text: "{}", state: "ready", mode: "add", setGoal: false } });
+  expect(call("board.clear")).toEqual({ method: "POST", path: "/sessions/shared-one/board/clear", body: {} });
+  expect(call("message", { text: " why? " })).toEqual({ method: "POST", path: "/sessions/shared-one/run/message", body: { text: "why?" } });
+  expect(call("message.read", { messageId: "M-3" })).toEqual({ method: "POST", path: "/sessions/shared-one/messages/M-3/read", body: {} });
+  expect(call("inbox.clear")).toEqual({ method: "POST", path: "/sessions/shared-one/inbox/clear", body: {} });
+  // New work from afar never stops a run on its way and leaves the goal template alone, whatever the payload says.
+  expect(call("work.new", { goal: "Next", board: "{}", start: true, stopRun: true, template: "x" })).toMatchObject({ path: "/sessions/shared-one/new-work", body: { goal: "Next", board: "{}", start: true, stopRun: false } });
+  expect(call("work.new")).toMatchObject({ body: { goal: "", board: "", start: false, stopRun: false } });
+  expect(call("publish")).toMatchObject({ path: "/sessions/shared-one/publish-all", body: { acknowledgeFlagged: false } });
+  expect(call("publish", { acknowledgeFlagged: true })).toMatchObject({ body: { acknowledgeFlagged: true } });
+  // Stops the container; removing it stays in the app.
+  expect(call("container.stop", { action: "remove" })).toMatchObject({ path: "/sessions/shared-one/sandbox", body: { action: "stop" } });
+  expect(remoteCommandSchema.safeParse({ kind: "message.read", payload: { sessionId: "shared-one", messageId: "../x" } }).success).toBe(false);
 });
 
 test("commands: known kinds map to the UI API; anything else is refused", () => {
@@ -137,7 +199,7 @@ const fakeRelay = async () => {
         results.push({ id: url.split("/").pop()!, body: JSON.parse(raw) });
         return json({ ok: true });
       }
-      if (url === "/api/verstas/host/hello") return json({ ok: true, protocol: 2, name: "test mac" });
+      if (url === "/api/verstas/host/hello") return json({ ok: true, protocol: 3, name: "test mac" });
       res.writeHead(404).end();
     });
   });
@@ -166,6 +228,7 @@ test("client: pushes only ticked, initialized sessions, carries out commands for
     getToken: async () => "vst_test",
     localApi: async (call) => {
       calls.push(call);
+      if (call.path.endsWith("/new-work")) return { status: 409, body: { error: "Pause or stop the run first" } };
       return { status: 200, body: { ok: true } };
     },
     version: "0.0.0-test",
@@ -192,6 +255,15 @@ test("client: pushes only ticked, initialized sessions, carries out commands for
     ]);
     expect((relay.results[1]!.body as { error: string }).error).toContain("not shared");
     expect(calls).toEqual([{ method: "POST", path: "/sessions/shared-one/run", body: { action: "start", prompt: undefined } }]);
+    calls.length = 0;
+
+    // The answer's body travels back, and the outcome stays on the session for a dashboard that stopped waiting.
+    expect(relay.results[0]!.body).toMatchObject({ ok: true, result: { ok: true } });
+    relay.enqueue({ id: "c5", kind: "work.new", payload: { sessionId: "shared-one", goal: "Next" } });
+    await waitFor(() => relay.results.length === 5);
+    expect(relay.results[4]!.body).toMatchObject({ ok: false, status: 409, error: "Pause or stop the run first" });
+    const shown = (relay.pushes[relay.pushes.length - 1]!.sessions[0] as { lastAction?: unknown }).lastAction;
+    expect(shown).toMatchObject({ kind: "work.new", ok: false, error: expect.stringContaining("stop the run") });
 
     // Unticking a session takes it off the dashboard with the next push.
     const before = relay.pushes.length;
