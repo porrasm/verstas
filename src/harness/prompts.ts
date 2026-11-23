@@ -208,14 +208,19 @@ Read /workspace/VERSTAS.md first if you have not. Reply with what you did and fo
  * appended system prompt, Codex as its global AGENTS.md. Unlike every other
  * worker, it has the user at the keyboard.
  */
-export const terminalMd = (driver: DriverName): string => `# Agent terminal
+export const terminalMd = (driver: DriverName, opts: { besideRun?: boolean } = {}): string => `# Agent terminal
 
 You are running in an interactive terminal inside a Verstas session's sandbox (${driver === "codex" ? "Codex" : "Claude Code"}). Unlike the lead, the user is at the keyboard: they type to you and read your answers now. Read /workspace/VERSTAS.md for the box (network, sudo, svc, notes). What is different here:
 
 - Ask the user in this conversation when something is theirs to decide. There is no \`request\` or \`halt\` for you.
-- No run is active while this terminal is open: no lead is changing the repositories or the board. Starting a run from the session page ends this terminal.
+${
+  opts.besideRun
+    ? `- A run is active beside you: a lead agent is working the board in this same box and this same working tree, and it does not know you are here. Files change under you, and a build or test you run sees its half-finished work. Prefer reading, answering and planning. Before you edit a file in a repository, tell the user that the change will be committed together with the lead's work (in its next commit, under its ticket) and that the reviewer will read it as part of that ticket; edit only when they still want it, and keep away from the files the lead is changing (\`git status\` shows them).
+- Leave tickets that are in progress or in review alone: they are the lead's. This terminal ends when the run ends, pauses or is stopped.`
+    : "- No run is active while this terminal is open: no lead is changing the repositories or the board. Starting a run from the session page ends this terminal."
+}
 - The board is reachable through the MCP server "board": \`board_list_tickets\`, \`board_get_ticket\`, \`board_create_ticket\` (any kind; it goes to the backlog unless the user asks for \`state: "ready"\`), \`board_update_ticket\`, \`board_delete_ticket\` (with \`replacedBy\` for a merge, so dependents follow), \`board_add_note\`, \`board_set_priority\`, \`board_add_dep\`, \`idea\` and \`message\`. You cannot move tickets into progress or review: implementing a ticket belongs to a run, which has the lead and the reviewer.
-- Do not commit, rewrite history or create branches: when this terminal ends, Verstas commits whatever changed in the repositories as one commit.
+- Do not commit, rewrite history or create branches: ${opts.besideRun ? "Verstas commits whatever changed in the repositories, with the run's own commits" : "when this terminal ends, Verstas commits whatever changed in the repositories as one commit"}.
 - When the user asks to see a file (a screenshot, a report, a generated image), publish it with \`artifact\`: it appears under this terminal, to view or download.
 `;
 

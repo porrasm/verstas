@@ -131,7 +131,7 @@ export type RemoteSettings = {
 export const isInitialized = (s: { initializedAt: string | null }): boolean => Boolean(s.initializedAt);
 export type NetworkPack = { name: string; title: string; hosts: string[]; /** Set on the packs that follow an agent choice instead of being ticked. */ agent?: DriverName };
 export type SetupScript = { name: string; description: string; hosts: string[]; note: string; script: string; runAs: "root" | "agent"; env: string };
-export type Run = { id: number; state: string; startedAt: string; endedAt?: string; currentTicket?: string; ticketsDone: number; /** Lead lives this run has started. */ rounds?: number; cost: { usd?: number }; pauseReason?: string; resumeAt?: string; /** Set on an agent terminal's run. */ terminal?: { driver: DriverName } };
+export type Run = { id: number; state: string; startedAt: string; endedAt?: string; currentTicket?: string; ticketsDone: number; /** Lead lives this run has started. */ rounds?: number; cost: { usd?: number }; pauseReason?: string; resumeAt?: string; /** Set on an agent terminal's run. */ terminal?: { driver: DriverName }; /** An agent terminal open beside this run right now. */ sideTerminal?: { driver: DriverName } };
 /** One earlier goal of the session. Mirrors goalRecordSchema in src/core/types.ts. */
 export type GoalRecord = { text: string; from: string; until: string; outcome: "met" | "revised" | "abandoned"; note?: string };
 export type VEvent = { kind: string; t: string; ticket?: string; [k: string]: unknown };

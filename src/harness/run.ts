@@ -8,7 +8,7 @@ import { classifyCommits, plannedVsTouched, reviewLevel, type RepoChange } from 
 import { writeJsonAtomic } from "../board/store.js";
 import type { SessionHandle, SessionHub } from "../sessions/hub.js";
 import type { AgentRunHooks, RunToken, RunTokens } from "../agent-api/agent-api.js";
-import { workspaceSizeMb } from "../sessions/sessions.js";
+import { workspaceSizeMb, writeAllowlist } from "../sessions/sessions.js";
 import { addArtifact, ARTIFACT_MAX_BYTES, type Artifact } from "../sessions/artifacts.js";
 import { allowlistFor } from "../network/packs.js";
 import { leadContinuePrompt, leadPrompt, mcpConfig, readLeadRules, reviewerPrompt, systemMd, terminalMd, userPrompt, verstasMd, workspaceClaudeMd, type LeadPromptOptions, type WorkingMode } from "./prompts.js";
@@ -146,6 +146,10 @@ export class RunManager implements AgentRunHooks {
   private workers = new Map<string, WorkerHandle & { role: Job["role"]; ticket?: string; log: (e: VerstasEvent) => Promise<void> }>();
   /** The agent terminal of a session whose active run is one. */
   private terminals = new Map<string, LiveTerminal>();
+  /** Per active run: resolves once its box is up (or the run ended first). A terminal opened beside the run waits for it. */
+  private boxUp = new Map<string, { promise: Promise<void>; resolve: () => void }>();
+  /** Ends the terminal open beside a session's run and waits until it is gone. */
+  private sideEnds = new Map<string, () => Promise<void>>();
   /** Numbers each worker's job directory. */
   private jobSeq = 0;
   constructor(private readonly deps: RunDeps) {}
@@ -213,19 +217,9 @@ export class RunManager implements AgentRunHooks {
     // A work run has nothing to do without a goal or tickets.
     const works = (opts.init && opts.start) || (!opts.init && opts.prompt === undefined && !opts.terminal);
     if (works && !h.session.goal.trim() && !h.board.tickets.length) throw new Error("Nothing to work on: write a goal or add tickets to the board first.");
-    if (opts.terminal) {
-      if (!this.deps.terminal) throw new Error("Agent terminals need the Docker sandbox");
-      if (opts.terminal.driver === "cursor") throw new Error("Agent terminals run Claude Code or Codex");
-      if (this.deps.hasCredential && !(await this.deps.hasCredential(opts.terminal.driver))) throw missingCredentialError(opts.terminal.driver, "the agent terminal runs on it");
-      // The terminal's agent needs its backend on the allowlist, like a session agent does.
-      const pack = driverInfo(opts.terminal.driver).pack;
-      if (!h.session.packs.includes(pack)) {
-        await h.mutate((docs) => {
-          const packs = [...docs.session.packs, pack];
-          return { next: { session: { ...docs.session, packs, allowlist: [...new Set([...docs.session.allowlist, ...allowlistFor(packs)])] } } };
-        });
-      }
-    }
+    if (opts.terminal) await this.prepareTerminal(h, opts.terminal.driver);
+    // The awaits above let another start in: one run at a time, still.
+    if (this.active.has(sessionId)) throw new Error("A run is already active for this session");
     const id = (await nextRunId(h.paths.runs)) ?? 1;
     const run: Run = runSchema.parse({ id, sessionId, startedAt: (this.deps.now ?? now)(), state: "running", terminal: opts.terminal ? { driver: opts.terminal.driver } : undefined });
     // Exists before the box is up, so the page can attach and watch it start.
@@ -248,8 +242,13 @@ export class RunManager implements AgentRunHooks {
       },
       done: Promise.resolve(run),
     };
+    let boxIsUp = (): void => undefined;
+    const up = { promise: new Promise<void>((r) => (boxIsUp = r)), resolve: () => boxIsUp() };
+    this.boxUp.set(sessionId, up);
     control.done = this.loop(h, run, opts, { isPause: () => pauseRequested, isStop: () => stopRequested, signal: abort.signal }).finally(() => {
       this.active.delete(sessionId);
+      up.resolve();
+      if (this.boxUp.get(sessionId) === up) this.boxUp.delete(sessionId);
       const t = this.terminals.get(sessionId);
       if (t?.runId === id) {
         // A terminal that never got going (the box failed to start, say) still tells its page it is over.
@@ -259,6 +258,99 @@ export class RunManager implements AgentRunHooks {
     });
     this.active.set(sessionId, control);
     return control;
+  }
+
+  /** What an agent terminal needs before it starts, its own run or beside one: the sandbox, a driver with an interface and a credential, and the agent's backend on the allowlist. True when the allowlist grew. */
+  private async prepareTerminal(h: SessionHandle, driver: DriverName): Promise<boolean> {
+    if (!this.deps.terminal) throw new Error("Agent terminals need the Docker sandbox");
+    if (driver === "cursor") throw new Error("Agent terminals run Claude Code or Codex");
+    if (this.deps.hasCredential && !(await this.deps.hasCredential(driver))) throw missingCredentialError(driver, "the agent terminal runs on it");
+    // The terminal's agent needs its backend on the allowlist, like a session agent does.
+    const pack = driverInfo(driver).pack;
+    if (h.session.packs.includes(pack)) return false;
+    await h.mutate((docs) => {
+      const packs = [...docs.session.packs, pack];
+      return { next: { session: { ...docs.session, packs, allowlist: [...new Set([...docs.session.allowlist, ...allowlistFor(packs)])] } } };
+    });
+    return true;
+  }
+
+  /**
+   * An agent terminal beside the active run (a work run or your prompt),
+   * in the same box and the same working tree. It is not a run of its own:
+   * it borrows the run's id for its token and its log lines, changes no
+   * session or run state, and makes no commit when it exits (the run's next
+   * commit takes what it changed). It ends when the run ends; then what it
+   * left is committed, since nothing else works in the box any more. The
+   * page warns before it opens one: two agents share the files.
+   */
+  async startSideTerminal(sessionId: string, spec: NonNullable<RunOptions["terminal"]>): Promise<{ run: Run; live: LiveTerminal }> {
+    const refuse = (): RunControl => {
+      const c = this.active.get(sessionId);
+      if (!c) throw new Error("No run is active for this session");
+      if (c.run.terminal || this.terminals.has(sessionId)) throw new Error("An agent terminal is already open for this session");
+      return c;
+    };
+    refuse();
+    const h = await this.deps.hub.get(sessionId);
+    if (!isInitialized(h.session)) throw new Error("The environment is still being initialized; open the terminal once it is up");
+    // The box is up already and reads its allowlist from the file (ensureSandbox wrote it before the pack joined).
+    if (await this.prepareTerminal(h, spec.driver)) await writeAllowlist(h.paths, h.session.allowlist);
+    const c = refuse();
+    const run = c.run;
+    const title = driverInfo(spec.driver).title;
+    const live = new LiveTerminal(run.id, spec.driver, spec);
+    live.status(`Starting ${title} beside run ${run.id}…`);
+    this.terminals.set(sessionId, live);
+    run.sideTerminal = { driver: spec.driver };
+    const abort = new AbortController();
+    const log = this.logFor(h, run.id);
+    // Once: the next terminal beside this run may open while this one is still finishing.
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      if (this.terminals.get(sessionId) === live) this.terminals.delete(sessionId);
+      delete run.sideTerminal;
+    };
+    const done = (async () => {
+      // A run that has only just started is still bringing its box up.
+      await this.boxUp.get(sessionId)?.promise;
+      if (this.active.get(sessionId) !== c) throw new Error("the run ended before the terminal started");
+      await this.runTerminal(h, run, spec, log, abort.signal, release);
+    })()
+      .catch(async (e: Error) => {
+        release();
+        await log({ kind: "status", t: (this.deps.now ?? now)(), text: `agent terminal: ${title} did not start beside the run: ${e.message}` }).catch(() => undefined);
+      })
+      .finally(() => {
+        live.end(null, abort.signal.aborted);
+        release();
+        if (this.sideEnds.get(sessionId) === end) this.sideEnds.delete(sessionId);
+      });
+    const end = async () => {
+      abort.abort();
+      await done;
+    };
+    this.sideEnds.set(sessionId, end);
+    return { run, live };
+  }
+
+  /** Ends the terminal open beside the session's run, leaving the run alone. False when there is none. */
+  async endSideTerminal(sessionId: string): Promise<boolean> {
+    const end = this.sideEnds.get(sessionId);
+    if (!end) return false;
+    await end();
+    return true;
+  }
+
+  /** Appends to a run's event log and streams the event to the pages. */
+  private logFor(h: SessionHandle, runId: number): (event: VerstasEvent) => Promise<void> {
+    const file = path.join(h.paths.runs, String(runId), "events.jsonl");
+    return async (event) => {
+      await fs.appendFile(file, JSON.stringify(event) + "\n");
+      this.deps.hub.emitRunEvent({ sessionId: h.id, runId, event });
+    };
   }
 
   pauseAfterTicket(sessionId: string): boolean {
@@ -428,7 +520,7 @@ export class RunManager implements AgentRunHooks {
       did.push(`requeued ${held.map((t) => t.id).join(", ")}`);
     }
     if (last && runLeftOpen) {
-      const closed: Run = { ...last.run, state: "stopped", endedAt: clock(), currentTicket: undefined, pauseReason: "host app restarted" };
+      const closed: Run = { ...last.run, state: "stopped", endedAt: clock(), currentTicket: undefined, sideTerminal: undefined, pauseReason: "host app restarted" };
       await writeJsonAtomic(last.file, closed);
       await fs.appendFile(path.join(path.dirname(last.file), "events.jsonl"), JSON.stringify({ kind: "run", t: clock(), state: "stopped", reason: "host app restarted" }) + "\n");
       did.push(`closed run ${last.run.id}`);
@@ -447,10 +539,7 @@ export class RunManager implements AgentRunHooks {
     const clock = d.now ?? now;
     const runDir = path.join(h.paths.runs, String(run.id));
     await fs.mkdir(path.join(runDir, "tickets"), { recursive: true });
-    const log = async (event: VerstasEvent) => {
-      await fs.appendFile(path.join(runDir, "events.jsonl"), JSON.stringify(event) + "\n");
-      d.hub.emitRunEvent({ sessionId: h.id, runId: run.id, event });
-    };
+    const log = this.logFor(h, run.id);
     const saveRun = () => writeJsonAtomic(path.join(runDir, "run.json"), run);
     const setSessionState = (state: Session["state"]) => h.mutate((docs) => ({ next: { session: { ...docs.session, state } } }));
     const status = (text: string, ticket?: string) => log({ kind: "status", t: clock(), ticket, text });
@@ -469,6 +558,8 @@ export class RunManager implements AgentRunHooks {
       // A terminal needs only its own agent's credential, checked when it started.
       await d.ensureSandbox(h.session, envFile, !opts.terminal);
       await this.writeWorkspaceFiles(h);
+      // A terminal asked for beside this run can start now.
+      this.boxUp.get(h.id)?.resolve();
 
       let proceed = true;
 
@@ -531,6 +622,17 @@ export class RunManager implements AgentRunHooks {
       run.state = "failed";
       await log({ kind: "error", t: clock(), text: `run failed: ${(e as Error).message}` });
     } finally {
+      // A terminal opened beside this run ends with it. No worker is in the box any more, so what the terminal left is committed here.
+      try {
+        const side = run.sideTerminal;
+        if (await this.endSideTerminal(h.id)) {
+          const leaked = await this.commitInContainer(h, `Terminal: ${side ? driverInfo(side.driver).title : "agent"} (beside run ${run.id})`);
+          if (leaked.length) await log({ kind: "error", t: clock(), text: `An agent credential appears in the changes to ${leaked.join(", ")}; nothing was committed there. Remove it from the files.` });
+        }
+      } catch (e) {
+        await log({ kind: "error", t: clock(), text: `ending the agent terminal beside the run failed: ${(e as Error).message}` }).catch(() => undefined);
+      }
+      delete run.sideTerminal;
       run.endedAt = clock();
       run.currentTicket = undefined;
       d.tokens.revokeRun(h.id, run.id);
@@ -1059,9 +1161,12 @@ export class RunManager implements AgentRunHooks {
    * directory, a run token with the terminal's permissions (it plans with
    * you and asks you directly), the agent's own
    * interface on a TTY the page attaches to, and when it exits or the run
-   * is stopped, one commit of whatever changed in the repositories.
+   * is stopped, one commit of whatever changed in the repositories. Beside
+   * a run (`besideRun`, called the moment the agent is gone) it is told a
+   * lead is at work, and it neither commits nor touches the run's state:
+   * the signal is then the terminal's own, not the run's.
    */
-  private async runTerminal(h: SessionHandle, run: Run, spec: NonNullable<RunOptions["terminal"]>, log: (e: VerstasEvent) => Promise<void>, signal: AbortSignal): Promise<void> {
+  private async runTerminal(h: SessionHandle, run: Run, spec: NonNullable<RunOptions["terminal"]>, log: (e: VerstasEvent) => Promise<void>, signal: AbortSignal, besideRun?: () => void): Promise<void> {
     const clock = this.deps.now ?? now;
     const live = this.terminals.get(h.id);
     if (!live || live.runId !== run.id || !this.deps.terminal) throw new Error("the agent terminal was not set up for this run");
@@ -1070,7 +1175,7 @@ export class RunManager implements AgentRunHooks {
     const rel = `${WORKSPACE_FILES}/jobs/${name}`;
     const dir = path.join(h.paths.workspace, rel);
     await fs.mkdir(dir, { recursive: true });
-    await fs.writeFile(path.join(dir, "rules.md"), terminalMd(spec.driver));
+    await fs.writeFile(path.join(dir, "rules.md"), terminalMd(spec.driver, { besideRun: Boolean(besideRun) }));
     // The session's worker model when the worker runs on the same driver; else the CLI's default.
     const worker = agentFor(h.session, "lead");
     const job: TerminalJob = {
@@ -1090,7 +1195,7 @@ export class RunManager implements AgentRunHooks {
       }
       const proc = await this.deps.terminal(h.id).open({ driver: spec.driver, jobFile: `/workspace/${rel}/job.json`, credentialFile: path.join(dir, "credential.out"), runToken: token, ...live.size });
       live.bind(proc);
-      await log({ kind: "status", t: clock(), text: `agent terminal: ${title} is running; type to it on the session page` });
+      await log({ kind: "status", t: clock(), text: `agent terminal: ${title} is running${besideRun ? " beside the run" : ""}; type to it on the session page` });
       const onAbort = () => {
         stopped = true;
         void proc.kill();
@@ -1099,13 +1204,16 @@ export class RunManager implements AgentRunHooks {
       const code = await proc.exited;
       signal.removeEventListener("abort", onAbort);
       live.end(code, stopped);
+      besideRun?.();
       await log({ kind: "status", t: clock(), text: stopped ? `agent terminal: ${title} was ended` : `agent terminal: ${title} exited${code === null ? "" : ` (exit ${code})`}` });
     } finally {
       this.deps.tokens.revoke(token);
-      // Whatever the agent changed in the repositories becomes one commit, as after your prompt.
-      const leaked = await this.commitInContainer(h, `Terminal: ${title} (run ${run.id})`);
-      if (leaked.length) await log({ kind: "error", t: clock(), text: `An agent credential appears in the changes to ${leaked.join(", ")}; nothing was committed there. Remove it from the files.` });
-      run.state = stopped || signal.aborted ? "stopped" : "finished";
+      if (!besideRun) {
+        // Whatever the agent changed in the repositories becomes one commit, as after your prompt.
+        const leaked = await this.commitInContainer(h, `Terminal: ${title} (run ${run.id})`);
+        if (leaked.length) await log({ kind: "error", t: clock(), text: `An agent credential appears in the changes to ${leaked.join(", ")}; nothing was committed there. Remove it from the files.` });
+        run.state = stopped || signal.aborted ? "stopped" : "finished";
+      }
     }
   }
 

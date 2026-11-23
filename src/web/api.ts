@@ -1139,24 +1139,40 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
 
   /**
    * An agent terminal: Claude Code or Codex in their own interface, in the
-   * box, with the board tools. It is a run of its own, so it starts only
-   * when nothing else runs. The key lets this page's terminal socket attach
-   * (src/server.ts); only a same-origin page can read it from here.
+   * box, with the board tools. With nothing else running it is a run of its
+   * own. While a run is active it opens beside that run instead (`side`):
+   * same box, same working tree, ending with the run; the page warns first.
+   * The key lets this page's terminal socket attach (src/server.ts); only a
+   * same-origin page can read it from here.
    */
   api.post(
     "/sessions/:id/terminal",
     wrap(async (req, res) => {
       const body = z.object({ driver: driverNameSchema.default("claude"), cols: z.number().int().optional(), rows: z.number().int().optional() }).parse(req.body ?? {});
       const id = param(req, "id");
-      let ctl;
+      const current = d.runs.status(id);
+      const side = Boolean(current && !current.terminal);
+      let run;
       try {
-        ctl = await d.runs.start(id, { terminal: body });
+        run = side ? (await d.runs.startSideTerminal(id, body)).run : (await d.runs.start(id, { terminal: body })).run;
       } catch (e) {
         res.status(409).json({ error: (e as Error).message });
         return;
       }
       const live = d.runs.terminal(id);
-      res.json({ ok: true, run: ctl.run, key: live?.key, driver: body.driver });
+      res.json({ ok: true, run, key: live?.key, driver: body.driver, side });
+    }),
+  );
+
+  /** Ends the terminal open beside a run; the run goes on. A terminal that is its own run ends with the run's stop. */
+  api.delete(
+    "/sessions/:id/terminal",
+    wrap(async (req, res) => {
+      if (!(await d.runs.endSideTerminal(param(req, "id")))) {
+        res.status(409).json({ error: "No agent terminal is open beside a run" });
+        return;
+      }
+      res.json({ ok: true });
     }),
   );
 
@@ -1165,7 +1181,7 @@ export const createUiApi = (d: UiApiDeps): express.Express => {
     wrap(async (req, res) => {
       const id = param(req, "id");
       const live = d.runs.terminal(id);
-      res.json(live ? { active: true, runId: live.runId, driver: live.driver, key: live.key, running: live.running } : { active: false });
+      res.json(live ? { active: true, runId: live.runId, driver: live.driver, key: live.key, running: live.running, side: Boolean(d.runs.status(id)?.sideTerminal) } : { active: false });
     }),
   );
 

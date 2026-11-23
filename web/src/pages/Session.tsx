@@ -84,6 +84,15 @@ const PAUSE_REASON: Record<string, string> = {
   requests: "waiting for your answer",
 };
 
+/** Asked before an agent terminal opens while a run is active: two agents then share the box. */
+const SIDE_TERMINAL_WARNING = `A run is active. The terminal opens beside it, in the same box and the same files as the lead.
+
+• What the agent in the terminal changes in the repositories is committed with the lead's work, under the lead's ticket, and the reviewer reads it as part of that ticket.
+• The lead does not know the terminal is there. Builds and tests on either side see the other's half-finished work.
+• The terminal ends when the run ends, pauses or is stopped.
+
+It is safe for reading, asking and planning tickets. Open it?`;
+
 type Tone = "sig" | "good" | "warn" | "quiet" | "info";
 /** One label and colour for the header pill from session state, run state and the live flag. */
 const sessionStatus = (session: Session, run: Run | undefined, active: boolean): { label: string; tone: Tone } => {
@@ -91,7 +100,7 @@ const sessionStatus = (session: Session, run: Run | undefined, active: boolean):
     if (run?.terminal) return { label: `agent terminal · ${run.terminal.driver === "codex" ? "Codex" : "Claude Code"}`, tone: "sig" };
     if (!isInitialized(session)) return { label: "initializing the environment", tone: "sig" };
     if (run?.state === "paused") return { label: `pausing · ${PAUSE_REASON[run.pauseReason ?? ""] ?? run.pauseReason ?? ""}`, tone: "sig" };
-    return { label: run?.currentTicket ? `working on ${run.currentTicket}` : "running", tone: "sig" };
+    return { label: `${run?.currentTicket ? `working on ${run.currentTicket}` : "running"}${run?.sideTerminal ? " · terminal open" : ""}`, tone: "sig" };
   }
   if (!isInitialized(session)) {
     return { label: "not initialized", tone: "quiet" };
@@ -143,8 +152,8 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
   const [logTicket, setLogTicket] = useState("");
   const [lastEventAt, setLastEventAt] = useState<string | null>(null);
   const [dir, setDir] = useState("");
-  /** The agent terminal's run while its pane is open; it stays open after the terminal ends until you close it. */
-  const [terminalPane, setTerminalPane] = useState<{ run: number; driver: "claude" | "codex" | "cursor" } | null>(null);
+  /** The agent terminal's run while its pane is open; it stays open after the terminal ends until you close it. `side`: opened beside a run; `n` tells two of those in one run apart. */
+  const [terminalPane, setTerminalPane] = useState<{ run: number; driver: "claude" | "codex" | "cursor"; side?: boolean; n?: number } | null>(null);
   const drivers = useDrivers();
   const now = useNow();
 
@@ -212,7 +221,8 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
           setEventsRun(m.runId);
         } else setEvents((ev) => [...ev.slice(-1999), m.event]);
       }
-      if (m.event.kind === "run" || m.event.kind === "ticket" || m.event.kind === "worker_done") void refreshRun();
+      // A terminal beside the run opens and ends without a run event; its status lines say when.
+      if (m.event.kind === "run" || m.event.kind === "ticket" || m.event.kind === "worker_done" || (m.event.kind === "status" && String(m.event.text ?? "").startsWith("agent terminal"))) void refreshRun();
     }
   });
 
@@ -256,16 +266,30 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
     location.hash = tid ? `#/s/${encodeURIComponent(id)}/t/${encodeURIComponent(tid)}` : `#/s/${encodeURIComponent(id)}`;
   };
 
-  /** Claude Code or Codex in their own interface, in the box, with the board tools; a run of its own. */
-  const launchTerminal = (driver: "claude" | "codex") =>
-    tryAct("starting the agent terminal", async () => {
-      const r = await api<{ run: Run }>("POST", `${base}/terminal`, { driver });
-      setTerminalPane({ run: r.run.id, driver });
+  /** Claude Code or Codex in their own interface, in the box, with the board tools: a run of its own, or beside the active run after a warning. */
+  const launchTerminal = (driver: "claude" | "codex") => {
+    if (active && !confirm(SIDE_TERMINAL_WARNING)) return;
+    void tryAct("starting the agent terminal", async () => {
+      const r = await api<{ run: Run; side?: boolean }>("POST", `${base}/terminal`, { driver });
+      paneStale.current = false;
+      setTerminalPane({ run: r.run.id, driver, side: r.side, n: Date.now() });
     });
+  };
+  const liveTerminal = active ? (run?.terminal ?? run?.sideTerminal) : undefined;
+  /** The open pane shows a terminal that has ended, so the next live one (opened in another window, say) replaces it. */
+  const paneStale = useRef(false);
   // A terminal already running when the page opens (a reload, another window) shows its pane.
   useEffect(() => {
-    if (active && run?.terminal) setTerminalPane({ run: run.id, driver: run.terminal.driver });
-  }, [active, run?.id, run?.terminal]);
+    if (!run || !liveTerminal) {
+      paneStale.current = true;
+      return;
+    }
+    const side = !run.terminal;
+    const stale = paneStale.current;
+    paneStale.current = false;
+    setTerminalPane((cur) => (cur && !stale && cur.run === run.id && Boolean(cur.side) === side ? cur : { run: run.id, driver: liveTerminal.driver, side, n: Date.now() }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [run?.id, liveTerminal?.driver, Boolean(run?.terminal)]);
 
   const ticket = useMemo(() => board?.tickets.find((t) => t.id === ticketId) ?? null, [board, ticketId]);
   if (err && !session) return <div className="banner warn">{err}</div>;
@@ -331,7 +355,7 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
           <div className="actions">
             {initialized && !active && <button className="pri" onClick={() => runAction("start")} disabled={Boolean(busy)} title={session.goalMet ? "Start again with the same goal: the lead takes that as not yet and looks for what falls short" : "One lead works the goal and the board's ready tickets; Verstas judges what it moves to review and commits what it leaves"}>{session.goalMet ? "Start again" : "Start run"}</button>}
             {terminalActive && <ConfirmButton className="pri" label="Start run" confirm="End the terminal and start" onConfirm={() => runAction("start")} disabled={Boolean(busy)} />}
-            {initialized && !active && (
+            {initialized && (!active || (!terminalActive && !run?.sideTerminal)) && (
               <MoreMenu
                 label="Agent terminal ▾"
                 items={(["claude", "codex"] as const).map((d) => {
@@ -465,12 +489,13 @@ export const SessionPage = ({ id, ticketId }: { id: string; ticketId: string | n
 
       {terminalPane !== null && (
         <AgentTerminal
-          key={terminalPane.run}
+          key={`${terminalPane.run}-${terminalPane.n ?? 0}`}
           sessionId={id}
+          side={terminalPane.side}
           base={base}
           title={terminalPane.driver === "codex" ? "Codex" : "Claude Code"}
           driver={terminalPane.driver === "codex" ? "codex" : "claude"}
-          onEnd={() => runAction("stop")}
+          onEnd={() => (terminalPane.side ? tryAct("ending the terminal", () => api("DELETE", `${base}/terminal`)) : runAction("stop"))}
           onClose={() => setTerminalPane(null)}
         />
       )}

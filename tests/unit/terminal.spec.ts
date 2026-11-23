@@ -326,7 +326,7 @@ const commitShell = (): Shell & { commits: string[] } => {
 
 const noWorker: WorkerRunner = { run: async () => { throw new Error("no worker runs in a terminal"); } };
 
-const terminalManager = async (state: "created" | "finished" = "created", opts: { credential?: boolean; files?: Record<string, Buffer> } = {}) => {
+const terminalManager = async (state: "created" | "finished" = "created", opts: { credential?: boolean; files?: Record<string, Buffer>; worker?: WorkerRunner } = {}) => {
   const s = await sessionDir(state);
   const shell = commitShell();
   const issued: RunToken[] = [];
@@ -337,18 +337,21 @@ const terminalManager = async (state: "created" | "finished" = "created", opts: 
     return issue(info);
   };
   const p = fakeProc();
+  /** Every terminal process opened, in order; the first is `p`. */
+  const procs: ReturnType<typeof fakeProc>[] = [];
   const opened: Parameters<TerminalRunner["open"]>[0][] = [];
   const mgr = new RunManager({
     hub: s.hub,
     tokens,
     shell: () => shell,
-    worker: () => noWorker,
+    worker: () => opts.worker ?? noWorker,
     ensureSandbox: async () => undefined,
     agentApiUrl: "http://x/agent",
     terminal: () => ({
       open: async (spec) => {
         opened.push(spec);
-        return p.proc;
+        procs.push(procs.length ? fakeProc() : p);
+        return procs[procs.length - 1]!.proc;
       },
     }),
     hasCredential: async () => opts.credential ?? true,
@@ -360,7 +363,7 @@ const terminalManager = async (state: "created" | "finished" = "created", opts: 
       return b.length;
     },
   });
-  return { s, shell, issued, p, opened, mgr };
+  return { s, shell, issued, p, procs, opened, mgr };
 };
 
 test("a terminal run starts the agent with a terminal token, ends on stop, commits once and leaves the session as it was", async () => {
@@ -417,6 +420,98 @@ test("endTerminal leaves a work run alone", async () => {
     expect(await t.mgr.endTerminal(t.s.id)).toBe(true);
   } finally {
     await fs.rm(t.s.root, { recursive: true, force: true });
+  }
+});
+
+// --- a terminal beside a run ----------------------------------------------------------
+
+/** A worker that runs until its run is stopped: your prompt, still being answered. */
+const hangingWorker = () => {
+  let started = false;
+  const worker: WorkerRunner = {
+    run: (job, _onEvent, signal) =>
+      new Promise((resolve) => {
+        started = true;
+        signal.addEventListener("abort", () => resolve({ kind: "worker_done", t: now(), role: job.role, ok: true, stopReason: "aborted", rateLimited: false, costUsd: 0, turns: 1, seconds: 1, text: "", stderr: "" }), { once: true });
+      }),
+  };
+  return { worker, started: () => started };
+};
+
+test("a terminal opens beside an active run without becoming one: the run's id, no commit of its own, and ending it leaves the run alone", async () => {
+  const w = hangingWorker();
+  const t = await terminalManager("created", { worker: w.worker });
+  try {
+    await expect(t.mgr.startSideTerminal(t.s.id, { driver: "claude" })).rejects.toThrow(/No run is active/);
+    const ctl = await t.mgr.start(t.s.id, { prompt: "look around" });
+    await expect.poll(w.started).toBe(true);
+    const side = await t.mgr.startSideTerminal(t.s.id, { driver: "claude", cols: 90, rows: 20 });
+    expect(side.run.id).toBe(ctl.run.id);
+    expect(t.mgr.status(t.s.id)).toMatchObject({ id: ctl.run.id, state: "running", sideTerminal: { driver: "claude" } });
+    expect(t.mgr.status(t.s.id)!.terminal).toBeUndefined();
+    await expect(t.mgr.startSideTerminal(t.s.id, { driver: "codex" })).rejects.toThrow(/already open/);
+    await expect.poll(() => t.mgr.terminal(t.s.id)?.running).toBe(true);
+    expect(t.opened[0]).toMatchObject({ driver: "claude", cols: 90, rows: 20 });
+    expect(t.issued.find((i) => i.role === "terminal")).toMatchObject({ runId: ctl.run.id });
+    const job = JSON.parse(await fs.readFile(path.join(t.s.paths.workspace, t.opened[0]!.jobFile.replace("/workspace/", "")), "utf8")) as TerminalJob;
+    const rules = await fs.readFile(path.join(t.s.paths.workspace, job.rulesFile.replace("/workspace/", "")), "utf8");
+    expect(rules).toContain("A run is active beside you");
+    expect(rules).not.toContain("No run is active while this terminal is open");
+    // Ending the terminal: the agent is hung up, the run goes on, nothing is committed.
+    expect(await t.mgr.endSideTerminal(t.s.id)).toBe(true);
+    expect(t.p.killed()).toBe(true);
+    expect(t.mgr.terminal(t.s.id)).toBeUndefined();
+    expect(t.mgr.status(t.s.id)).toMatchObject({ id: ctl.run.id, state: "running" });
+    expect(t.mgr.status(t.s.id)!.sideTerminal).toBeUndefined();
+    expect(t.shell.commits).toEqual([]);
+    expect(await t.mgr.endSideTerminal(t.s.id)).toBe(false);
+    // An agent that exits on its own frees the place for the next one.
+    await t.mgr.startSideTerminal(t.s.id, { driver: "claude" });
+    await expect.poll(() => t.procs.length).toBe(2);
+    t.procs[1]!.exit(0);
+    await expect.poll(() => t.mgr.terminal(t.s.id)).toBeUndefined();
+    expect(t.mgr.status(t.s.id)!.sideTerminal).toBeUndefined();
+    expect(t.shell.commits).toEqual([]);
+    // One still open when the run ends is ended with it, and what it left is committed after the run's own commit.
+    await t.mgr.startSideTerminal(t.s.id, { driver: "claude" });
+    await expect.poll(() => t.procs.length).toBe(3);
+    expect(await t.mgr.stopAndWait(t.s.id)).toBe(true);
+    const run = await ctl.done;
+    expect(run.state).toBe("stopped");
+    expect(run.sideTerminal).toBeUndefined();
+    expect(t.procs[2]!.killed()).toBe(true);
+    expect(t.mgr.terminal(t.s.id)).toBeUndefined();
+    expect(t.shell.commits).toEqual(["Prompt: look around", `Terminal: Claude Code (beside run ${run.id})`]);
+    expect(JSON.parse(await fs.readFile(path.join(t.s.paths.runs, String(run.id), "run.json"), "utf8")).sideTerminal).toBeUndefined();
+    const log = await fs.readFile(path.join(t.s.paths.runs, String(run.id), "events.jsonl"), "utf8");
+    expect(log).toContain("agent terminal: Claude Code is running beside the run");
+  } finally {
+    await fs.rm(t.s.root, { recursive: true, force: true });
+  }
+});
+
+test("a terminal that is its own run has none beside it; a driver without a credential opens none beside a run", async () => {
+  const t = await terminalManager();
+  try {
+    const ctl = await t.mgr.start(t.s.id, { terminal: { driver: "claude" } });
+    await expect(t.mgr.startSideTerminal(t.s.id, { driver: "claude" })).rejects.toThrow(/already open/);
+    expect(await t.mgr.endSideTerminal(t.s.id)).toBe(false);
+    await t.mgr.endTerminal(t.s.id);
+    await ctl.done;
+  } finally {
+    await fs.rm(t.s.root, { recursive: true, force: true });
+  }
+  const w = hangingWorker();
+  const none = await terminalManager("created", { credential: false, worker: w.worker });
+  try {
+    const ctl = await none.mgr.start(none.s.id, { prompt: "x" });
+    await expect(none.mgr.startSideTerminal(none.s.id, { driver: "codex" })).rejects.toThrow(/No Codex credential/);
+    expect(none.mgr.status(none.s.id)!.sideTerminal).toBeUndefined();
+    await none.mgr.stopAndWait(none.s.id);
+    await ctl.done;
+    expect(none.shell.commits).toEqual(["Prompt: x"]);
+  } finally {
+    await fs.rm(none.s.root, { recursive: true, force: true });
   }
 });
 

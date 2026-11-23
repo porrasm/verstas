@@ -224,10 +224,21 @@ page. Slash commands, `/resume` and the rest work as in your own terminal.
 The agent has the board tools: it can read the board and write tickets
 (any kind; to the backlog, or straight to ready when you ask), edit,
 merge and delete tickets and take notes, so you can plan the board with
-it in a conversation. It is a run of its own: it starts only when nothing
-else runs, and starting a run ends it. When it ends,
+it in a conversation. With nothing else running it is a run of its own,
+and starting a run ends it. When it ends,
 whatever it changed in the repositories is committed as one commit,
-"Terminal: …". The first time in a box, Claude Code asks you to trust the
+"Terminal: …".
+
+While a run is active the same menu opens a terminal beside the run,
+after a warning: the agent then shares the box and the files with the
+lead, which does not know it is there. It is safe for reading, asking and
+planning tickets. What it changes in the repositories is committed with
+the lead's work, under the lead's ticket, and the reviewer reads it as
+part of that ticket. **End terminal** hangs it up and leaves the run
+alone; it also ends when the run ends, pauses or is stopped, and what it
+left then is committed as "Terminal: … (beside run N)".
+
+The first time in a box, Claude Code asks you to trust the
 folder and to accept its bypass-permissions mode (the box is the sandbox,
 as for every worker); its answers are kept in the box's home.
 

@@ -48,7 +48,9 @@ const THEME = {
  */
 export const SHIFT_ENTER: Record<"claude" | "codex", string> = { claude: "\x1b\r", codex: "\n" };
 
-export const AgentTerminal = ({ sessionId, base, title, driver, onEnd, onClose }: { sessionId: string; base: string; title: string; driver: "claude" | "codex"; onEnd: () => void; onClose: () => void }) => {
+/** `side`: the terminal is open beside a run, not a run of its own: it shares the lead's files and makes no commit of its own. */
+export const AgentTerminal = ({ sessionId, base, title, driver, side, onEnd, onClose }: { sessionId: string; base: string; title: string; driver: "claude" | "codex"; side?: boolean; onEnd: () => void; onClose: () => void }) => {
+  const committed = side ? "Whatever the agent changed in the repositories goes into the run's next commit." : "Whatever the agent changed in the repositories was committed.";
   const host = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const [phase, setPhase] = useState<"connecting" | "open" | "ended">("connecting");
@@ -145,7 +147,7 @@ export const AgentTerminal = ({ sessionId, base, title, driver, onEnd, onClose }
       const info = await api<Info>("GET", `${base}/terminal`).catch(() => null);
       if (disposed) return;
       if (!info?.active || !info.key) {
-        finish("The terminal has ended. Whatever the agent changed in the repositories was committed.");
+        finish(`The terminal has ended. ${committed}`);
         return;
       }
       const proto = location.protocol === "https:" ? "wss" : "ws";
@@ -167,7 +169,7 @@ export const AgentTerminal = ({ sessionId, base, title, driver, onEnd, onClose }
         try {
           const n = JSON.parse(e.data) as Notice;
           if (n.type === "status") setNote(n.text);
-          else finish(n.stopped ? "The terminal was ended. Whatever the agent changed in the repositories was committed." : `The agent exited${n.code ? ` (exit ${n.code})` : ""}. Whatever it changed in the repositories was committed.`);
+          else finish(`${n.stopped ? "The terminal was ended." : `The agent exited${n.code ? ` (exit ${n.code})` : ""}.`} ${committed}`);
         } catch {
           // not a notice
         }
@@ -187,23 +189,26 @@ export const AgentTerminal = ({ sessionId, base, title, driver, onEnd, onClose }
       termRef.current = null;
       term.dispose();
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId, base, driver]);
 
   return (
     <section className="card stack tight term-card">
       <div className="row">
         <h3>Agent terminal · {title}</h3>
+        {side && <span className="pill warn" title="A run is active: the lead works in the same box and the same files">beside the run</span>}
         <span className={`pill ${phase === "open" ? "sig" : phase === "ended" ? "quiet" : "info"}`}>{phase === "open" ? <><span className="dot run" />live</> : phase === "ended" ? "ended" : "connecting"}</span>
         {note && <span className="muted small">{note}</span>}
         <button className="quiet sm end" onClick={() => void copySelection()} disabled={!selected && !copied} title="Copy the selected text (⌘C on the Mac, Ctrl+Shift+C elsewhere)">{copied ? "Copied" : "Copy"}</button>
-        {phase === "ended" ? <button className="quiet sm" onClick={onClose}>Close</button> : <button className="warn sm" onClick={onEnd} title="Hang up the agent; its changes in the repositories are committed">End terminal</button>}
+        {phase === "ended" ? <button className="quiet sm" onClick={onClose}>Close</button> : <button className="warn sm" onClick={onEnd} title={side ? "Hang up the agent; the run goes on, and its next commit takes what the agent changed" : "Hang up the agent; its changes in the repositories are committed"}>End terminal</button>}
       </div>
       {/* The fit addon sizes the terminal to its parent's computed height, padding included: the padding lives on the outer box so no row is cut off. */}
       <div className="term-host" onClick={() => host.current?.querySelector("textarea")?.focus()}>
         <div className="term-fit" ref={host} />
       </div>
+      {side && phase !== "ended" && <div className="banner warn small">A run is active in the same box. Changes the agent makes here are committed with the lead's work, under its ticket, and reviewed as part of it. This terminal ends when the run ends, pauses or is stopped.</div>}
       <ArtifactPills base={base} live={phase !== "ended"} />
-      <div className="muted small">Select text by dragging, or with {/Mac/.test(navigator.platform) ? "⌥" : "Shift"}-drag when the agent has the mouse; {/Mac/.test(navigator.platform) ? "⌘C" : "Ctrl+Shift+C"} copies, Shift+Enter starts a new line. The agent works in the box with the board tools; its tickets go to the backlog unless you ask for them to be ready. Starting a run ends this terminal and commits what changed in the repositories.</div>
+      <div className="muted small">Select text by dragging, or with {/Mac/.test(navigator.platform) ? "⌥" : "Shift"}-drag when the agent has the mouse; {/Mac/.test(navigator.platform) ? "⌘C" : "Ctrl+Shift+C"} copies, Shift+Enter starts a new line. The agent works in the box with the board tools; its tickets go to the backlog unless you ask for them to be ready. {side ? "Ending this terminal leaves the run alone." : "Starting a run ends this terminal and commits what changed in the repositories."}</div>
     </section>
   );
 };

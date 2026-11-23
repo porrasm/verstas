@@ -684,6 +684,12 @@ export const runSchema = z.object({
    * (and on runs from before terminals existed).
    */
   terminal: z.object({ driver: driverNameSchema }).optional(),
+  /**
+   * An agent terminal open beside this run right now (a work run or your
+   * prompt), in the same box and working tree. It is not a run: it ends
+   * with this one, and this is cleared when it does.
+   */
+  sideTerminal: z.object({ driver: driverNameSchema }).optional(),
 });
 export type Run = z.infer<typeof runSchema>;
 
